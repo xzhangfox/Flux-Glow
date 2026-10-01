@@ -30,6 +30,13 @@ const MAX_DIMENSION = 1600
 // loop actually feeling live rather than stuttering.
 const LIVE_MAX_DIMENSION = 360
 const LIVE_FRAME_INTERVAL_MS = 60 // floor on tick spacing — actual pace is also gated by processingRef below
+// The MLS face/eyes/mouth warp is a real per-pixel optimization over every
+// control point — too slow to run at full precision every live frame. This
+// evaluates it on a coarser grid and interpolates between points instead
+// (see mls.ts); the deformation field is smooth, so this is a close
+// approximation at a fraction of the cost. Static photos use grid=1 (the
+// processFrame default) since they're not fighting a per-frame budget.
+const LIVE_RESHAPE_GRID = 6
 
 export type Source = { kind: 'image'; file: File } | { kind: 'live' }
 
@@ -224,7 +231,7 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
           .then((landmarks) => {
             landmarksRef.current = landmarks
             setStatus(landmarks ? 'ready' : 'no-face')
-            resultRef.current = processFrame(base, landmarks, paramsRef.current)
+            resultRef.current = processFrame(base, landmarks, paramsRef.current, LIVE_RESHAPE_GRID)
             render()
           })
           .finally(() => {

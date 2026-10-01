@@ -1,8 +1,10 @@
 import { FaceLandmarker, type NormalizedLandmark } from '@mediapipe/tasks-vision'
 import { connectorsToLoop, loopCenterPx, dist, lerp, type Px } from './landmarks'
+import { warpRegion, type ControlPoint } from './mls'
 
 // Canonical MediaPipe face-mesh indices for the widest point of each cheek
-// at jaw height — the standard anchors used for face-slimming filters.
+// at jaw height — verified against real detected faces (see landmarks.ts
+// history), not a guess.
 const LEFT_CHEEK = 234
 const RIGHT_CHEEK = 454
 
@@ -27,15 +29,11 @@ function bilinearSample(data: Uint8ClampedArray, w: number, h: number, x: number
 }
 
 /**
- * A localized radial warp (not a global distortion): pixels within `radius`
- * of `center` are backward-mapped along a power curve of their normalized
- * distance. Positive `amount` pulls content in from farther out — a pinch
- * that shrinks the region (a narrower nose). Negative `amount` does the
- * reverse — it samples from closer to center, ballooning the region
- * outward (bigger eyes, fuller lips). This is the right shape for a
- * feature that should scale symmetrically from its own center — eyes,
- * nose, mouth all do. Pixels outside the radius are an identity copy, so
- * this never touches the rest of the photo.
+ * The nose has no official MediaPipe landmark loop to build real MLS
+ * control points from, so it stays on the simpler isolated radial warp
+ * (verified clean and tightly contained — see the accuracy check this
+ * module's history was built from) rather than guessing raw landmark
+ * indices for it.
  */
 function radialWarpInPlace(srcData: Uint8ClampedArray, outData: Uint8ClampedArray, w: number, h: number, center: Px, radius: number, amount: number) {
   if (Math.abs(amount) < 0.001 || radius < 1) return
@@ -66,52 +64,8 @@ function radialWarpInPlace(srcData: Uint8ClampedArray, outData: Uint8ClampedArra
   }
 }
 
-/**
- * The classic "local translation warp" (Gustafsson, Interactive Image
- * Warping, 1993 — the same technique behind essentially every face-slim
- * filter, from GPUImage's BeautifyFilter on down): instead of a face
- * pinching symmetrically in on itself (which reads as a dent, not a
- * slimmer jaw), each point within `radius` of `center` is pushed toward
- * `target`, strongest at the center and falling off smoothly to zero at
- * the radius edge: `ratio = ((r²-d²)/(r²-d²+|target-center|²))²`. Kept
- * well inside the radius (|target-center| small relative to radius) to
- * stay in the formula's monotonic range — push it too far and the warp
- * folds back on itself.
- */
-function translationWarpInPlace(srcData: Uint8ClampedArray, outData: Uint8ClampedArray, w: number, h: number, center: Px, target: Px, radius: number) {
-  const mx = target.x - center.x
-  const my = target.y - center.y
-  const m2 = mx * mx + my * my
-  if (m2 < 0.01 || radius < 1) return
-  const sample: [number, number, number, number] = [0, 0, 0, 0]
-  const minX = Math.max(0, Math.floor(center.x - radius))
-  const maxX = Math.min(w - 1, Math.ceil(center.x + radius))
-  const minY = Math.max(0, Math.floor(center.y - radius))
-  const maxY = Math.min(h - 1, Math.ceil(center.y + radius))
-  const r2 = radius * radius
-
-  for (let y = minY; y <= maxY; y++) {
-    for (let x = minX; x <= maxX; x++) {
-      const dx = x - center.x
-      const dy = y - center.y
-      const d2 = dx * dx + dy * dy
-      if (d2 >= r2) continue
-      const t = (r2 - d2) / (r2 - d2 + m2)
-      const ratio = t * t
-      const sx = x - ratio * mx
-      const sy = y - ratio * my
-      bilinearSample(srcData, w, h, Math.max(0, Math.min(w - 1, sx)), Math.max(0, Math.min(h - 1, sy)), sample)
-      const outIdx = (y * w + x) * 4
-      outData[outIdx] = sample[0]
-      outData[outIdx + 1] = sample[1]
-      outData[outIdx + 2] = sample[2]
-      outData[outIdx + 3] = sample[3]
-    }
-  }
-}
-
 export interface ReshapeParams {
-  /** Cheek/jaw pinch — narrows the face. */
+  /** Jaw/cheek narrow. */
   face: number
   /** Eye enlarge. */
   eyes: number
@@ -121,86 +75,122 @@ export interface ReshapeParams {
   mouth: number
 }
 
-type Region =
-  | { kind: 'scale'; center: Px; radius: number; /** Positive shrinks, negative enlarges — see radialWarpInPlace. */ amount: number }
-  | { kind: 'translate'; center: Px; target: Px; radius: number }
-
 /**
- * Locates each adjustable region from the real landmark groups (eyes and
- * lips are MediaPipe's own connector loops — their centroid is exact; the
- * nose has no official loop, so its center is interpolated 42% of the way
- * from the eye-line to the mouth, a ratio and radius both verified against
- * real detected faces, not a guess — see the landmark-accuracy check this
- * module's history was built from).
+ * Builds ONE combined set of MLS control points for the whole face rather
+ * than independent per-feature regions. Every landmark group is always
+ * included — as a moving point (pushed toward its target) when that
+ * slider is active, as an anchor (q == p, zero displacement) when it
+ * isn't. This is what actually fixes the smearing a lone circular region
+ * was prone to: a "moving" jaw point right next to an "anchor" eyebrow
+ * point pulls the deformation field taut between them instead of the two
+ * regions warping independently and fighting (or overlapping) at their
+ * boundary. A ring of anchors around the whole bounding box does the same
+ * job at the outer edge, so the warped region blends into the untouched
+ * rest of the photo instead of showing a seam.
  */
-function locateRegions(landmarks: NormalizedLandmark[], w: number, h: number, params: ReshapeParams): Region[] {
-  const regions: Region[] = []
+function buildFaceControls(landmarks: NormalizedLandmark[], w: number, h: number, params: ReshapeParams): { controls: ControlPoint[]; bounds: { minX: number; minY: number; maxX: number; maxY: number } } {
+  const controls: ControlPoint[] = []
+  const toPx = (idx: number): Px => ({ x: landmarks[idx].x * w, y: landmarks[idx].y * h })
 
-  const leftCheek: Px = { x: landmarks[LEFT_CHEEK].x * w, y: landmarks[LEFT_CHEEK].y * h }
-  const rightCheek: Px = { x: landmarks[RIGHT_CHEEK].x * w, y: landmarks[RIGHT_CHEEK].y * h }
-  const faceWidth = dist(leftCheek, rightCheek)
-  if (params.face > 0.001) {
-    // Push each cheek horizontally toward the face's own centerline —
-    // negative `face` (widen) has no real-world use case, so this only
-    // supports slimming. Kept tight (well short of 234/454's own distance
-    // from the hairline) so the disk doesn't reach into hair/temple —
-    // dragging that sideways by a near-constant offset reads as an
-    // obvious smear, unlike the radial pinch's isotropic falloff.
-    const faceCenterX = (leftCheek.x + rightCheek.x) / 2
-    const translateRadius = faceWidth * 0.22
-    const pushFraction = Math.min(params.face, 1) * 0.12
-    regions.push({
-      kind: 'translate',
-      center: leftCheek,
-      target: { x: leftCheek.x + (faceCenterX - leftCheek.x) * pushFraction, y: leftCheek.y },
-      radius: translateRadius,
-    })
-    regions.push({
-      kind: 'translate',
-      center: rightCheek,
-      target: { x: rightCheek.x + (faceCenterX - rightCheek.x) * pushFraction, y: rightCheek.y },
-      radius: translateRadius,
-    })
-  }
+  const leftCheek = toPx(LEFT_CHEEK)
+  const rightCheek = toPx(RIGHT_CHEEK)
+  const faceCenterX = (leftCheek.x + rightCheek.x) / 2
 
+  const ovalLoop = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_FACE_OVAL)
   const leftEyeLoop = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_LEFT_EYE)
   const rightEyeLoop = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE)
+  const leftBrowLoop = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_LEFT_EYEBROW)
+  const rightBrowLoop = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_RIGHT_EYEBROW)
   const lipsLoop = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_LIPS)
+
   const leftEye = loopCenterPx(leftEyeLoop, landmarks, w, h)
   const rightEye = loopCenterPx(rightEyeLoop, landmarks, w, h)
   const lips = loopCenterPx(lipsLoop, landmarks, w, h)
   const eyesCenter = lerp(leftEye, rightEye, 0.5)
   const eyeSpan = dist(leftEye, rightEye)
 
-  if (Math.abs(params.eyes) > 0.001) {
-    // Enlarging reads as negative amount in radialWarpInPlace — cap at a
-    // gentle 0.35 so this stays "bigger eyes", not uncanny-valley.
-    const eyeStrength = -Math.min(Math.abs(params.eyes), 1) * 0.35 * Math.sign(params.eyes)
-    const eyeRadius = eyeSpan * 0.27
-    regions.push({ kind: 'scale', center: leftEye, radius: eyeRadius, amount: eyeStrength })
-    regions.push({ kind: 'scale', center: rightEye, radius: eyeRadius, amount: eyeStrength })
+  // Face oval: points below the eye-line are the jaw/cheek/chin — the
+  // part a slim-face filter should narrow. Points above it (forehead,
+  // temple) always stay anchored so the warp has something stable to
+  // blend into on its way up.
+  const faceStrength = Math.min(Math.max(params.face, 0), 1)
+  for (const idx of ovalLoop) {
+    const p = toPx(idx)
+    if (p.y > eyesCenter.y && faceStrength > 0.001) {
+      const pushFraction = faceStrength * 0.14
+      controls.push({ p, q: { x: p.x + (faceCenterX - p.x) * pushFraction, y: p.y } })
+    } else {
+      controls.push({ p, q: p })
+    }
   }
 
-  if (Math.abs(params.nose) > 0.001) {
-    const nose = lerp(eyesCenter, lips, 0.42)
-    const noseRadius = eyeSpan * 0.24
-    const noseStrength = Math.min(Math.abs(params.nose), 1) * 0.4 * Math.sign(params.nose)
-    regions.push({ kind: 'scale', center: nose, radius: noseRadius, amount: noseStrength })
+  for (const idx of [...leftBrowLoop, ...rightBrowLoop]) {
+    const p = toPx(idx)
+    controls.push({ p, q: p })
   }
 
-  if (Math.abs(params.mouth) > 0.001) {
-    const mouthStrength = -Math.min(Math.abs(params.mouth), 1) * 0.35 * Math.sign(params.mouth)
-    const mouthRadius = eyeSpan * 0.32
-    regions.push({ kind: 'scale', center: lips, radius: mouthRadius, amount: mouthStrength })
+  const eyeStrength = Math.min(Math.max(params.eyes, 0), 1)
+  for (const [loop, center] of [
+    [leftEyeLoop, leftEye],
+    [rightEyeLoop, rightEye],
+  ] as const) {
+    const scale = 1 + eyeStrength * 0.22
+    for (const idx of loop) {
+      const p = toPx(idx)
+      if (eyeStrength > 0.001) {
+        controls.push({ p, q: { x: center.x + (p.x - center.x) * scale, y: center.y + (p.y - center.y) * scale } })
+      } else {
+        controls.push({ p, q: p })
+      }
+    }
   }
 
-  return regions
+  const mouthStrength = Math.min(Math.max(params.mouth, 0), 1)
+  for (const idx of lipsLoop) {
+    const p = toPx(idx)
+    if (mouthStrength > 0.001) {
+      const scale = 1 + mouthStrength * 0.18
+      controls.push({ p, q: { x: lips.x + (p.x - lips.x) * scale, y: lips.y + (p.y - lips.y) * scale } })
+    } else {
+      controls.push({ p, q: p })
+    }
+  }
+
+  // Bounding box around everything above, padded, then pinned with its
+  // own ring of anchors so the field is faithful right at the edge —
+  // nothing leaks out into hair or background past this box.
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const c of controls) {
+    minX = Math.min(minX, c.p.x)
+    minY = Math.min(minY, c.p.y)
+    maxX = Math.max(maxX, c.p.x)
+    maxY = Math.max(maxY, c.p.y)
+  }
+  const pad = eyeSpan * 0.35
+  minX -= pad
+  minY -= pad
+  maxX += pad
+  maxY += pad
+
+  const ringSteps = 10
+  for (let i = 0; i < ringSteps; i++) {
+    const t = i / ringSteps
+    const edgePoints: Px[] = [
+      { x: minX + (maxX - minX) * t, y: minY },
+      { x: minX + (maxX - minX) * t, y: maxY },
+      { x: minX, y: minY + (maxY - minY) * t },
+      { x: maxX, y: minY + (maxY - minY) * t },
+    ]
+    for (const p of edgePoints) controls.push({ p, q: p })
+  }
+
+  return { controls, bounds: { minX, minY, maxX, maxY } }
 }
 
-export function applyReshape(source: HTMLCanvasElement, landmarks: NormalizedLandmark[], params: ReshapeParams): HTMLCanvasElement {
-  const regions = locateRegions(landmarks, source.width, source.height, params)
-  if (regions.length === 0) return source
-
+export function applyReshape(source: HTMLCanvasElement, landmarks: NormalizedLandmark[], params: ReshapeParams, grid = 1): HTMLCanvasElement {
   const w = source.width
   const h = source.height
   const srcCtx = source.getContext('2d')!
@@ -212,12 +202,28 @@ export function applyReshape(source: HTMLCanvasElement, landmarks: NormalizedLan
   outCtx.drawImage(source, 0, 0)
   const outImageData = outCtx.getImageData(0, 0, w, h)
 
-  for (const region of regions) {
-    if (region.kind === 'scale') {
-      radialWarpInPlace(srcImageData.data, outImageData.data, w, h, region.center, region.radius, region.amount)
-    } else {
-      translationWarpInPlace(srcImageData.data, outImageData.data, w, h, region.center, region.target, region.radius)
-    }
+  const anyFaceFeatureActive = params.face > 0.001 || params.eyes > 0.001 || params.mouth > 0.001
+  if (anyFaceFeatureActive) {
+    const { controls, bounds } = buildFaceControls(landmarks, w, h, params)
+    warpRegion(srcImageData.data, outImageData.data, w, h, controls, bounds, grid)
+  }
+
+  if (Math.abs(params.nose) > 0.001) {
+    const leftEye = loopCenterPx(connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_LEFT_EYE), landmarks, w, h)
+    const rightEye = loopCenterPx(connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE), landmarks, w, h)
+    const lips = loopCenterPx(connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_LIPS), landmarks, w, h)
+    const eyesCenter = lerp(leftEye, rightEye, 0.5)
+    const eyeSpan = dist(leftEye, rightEye)
+    const nose = lerp(eyesCenter, lips, 0.42)
+    const noseRadius = eyeSpan * 0.24
+    const noseStrength = Math.min(Math.abs(params.nose), 1) * 0.4 * Math.sign(params.nose)
+    // Must read from a snapshot, not outImageData.data itself — this warp
+    // samples from nearby already-written pixels as it scans, so reading
+    // and writing the same live buffer would corrupt itself mid-pass.
+    // Composes on top of whatever the MLS pass above already did rather
+    // than overwriting it.
+    const noseSrc = anyFaceFeatureActive ? new Uint8ClampedArray(outImageData.data) : srcImageData.data
+    radialWarpInPlace(noseSrc, outImageData.data, w, h, nose, noseRadius, noseStrength)
   }
 
   outCtx.putImageData(outImageData, 0, 0)
