@@ -99,7 +99,10 @@ function ChromeButton({
 export default function Editor({ source, onReset }: { source: Source; onReset: () => void }) {
   const [status, setStatus] = useState<Status>('loading')
   const [smoothness, setSmoothness] = useState(0.6)
-  const [contour, setContour] = useState(0.25)
+  const [face, setFace] = useState(0.25)
+  const [eyes, setEyes] = useState(0)
+  const [nose, setNose] = useState(0)
+  const [mouth, setMouth] = useState(0)
   const [filterId, setFilterId] = useState('none')
   const [showBefore, setShowBefore] = useState(false)
   const [liveActive, setLiveActive] = useState(source.kind === 'live')
@@ -117,7 +120,7 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   const rafRef = useRef(0)
   const lastProcessRef = useRef(0)
   const liveActiveRef = useRef(liveActive)
-  const paramsRef = useRef<EditParams>({ smoothness, contour, filterId })
+  const paramsRef = useRef<EditParams>({ smoothness, face, eyes, nose, mouth, filterId })
   const facingModeRef = useRef(facingMode)
   const zoomRef = useRef(zoom)
   const panelRef = useRef<HTMLDivElement>(null)
@@ -125,8 +128,8 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   const filterButtonRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
-    paramsRef.current = { smoothness, contour, filterId }
-  }, [smoothness, contour, filterId])
+    paramsRef.current = { smoothness, face, eyes, nose, mouth, filterId }
+  }, [smoothness, face, eyes, nose, mouth, filterId])
   useEffect(() => {
     liveActiveRef.current = liveActive
   }, [liveActive])
@@ -254,14 +257,14 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
     if (!baseRef.current) return
     const t = setTimeout(recomputeStatic, 60)
     return () => clearTimeout(t)
-  }, [smoothness, contour, filterId, liveActive, recomputeStatic])
+  }, [smoothness, face, eyes, nose, mouth, filterId, liveActive, recomputeStatic])
 
   // Any further adjustment after confirming means the exported image would
   // no longer match what's on screen — fall back to Confirm again rather
   // than silently leaving a stale Save/Share up.
   useEffect(() => {
     setConfirmed(false)
-  }, [smoothness, contour, filterId])
+  }, [smoothness, face, eyes, nose, mouth, filterId])
 
   const handleCapture = () => {
     stopLive()
@@ -460,9 +463,12 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
           <div className="overflow-hidden">
             <div className="bg-black/70 backdrop-blur-md rounded-2xl p-4 border border-white/10">
               {openPanel === 'retouch' ? (
-                <div className="space-y-4">
+                <div className="space-y-4 max-h-[42vh] overflow-y-auto pr-1">
                   <Slider label="Smooth & Clear" value={smoothness} onChange={setSmoothness} disabled={disabled} />
-                  <Slider label="Slim" value={contour} onChange={setContour} disabled={disabled} />
+                  <Slider label="Face" value={face} onChange={setFace} disabled={disabled} />
+                  <Slider label="Eyes" value={eyes} onChange={setEyes} disabled={disabled} />
+                  <Slider label="Nose" value={nose} onChange={setNose} disabled={disabled} />
+                  <Slider label="Mouth" value={mouth} onChange={setMouth} disabled={disabled} />
                 </div>
               ) : (
                 <div className="grid grid-cols-3 gap-2">

@@ -1,29 +1,5 @@
 import { FaceLandmarker, type NormalizedLandmark } from '@mediapipe/tasks-vision'
-
-// MediaPipe exposes each face region as an unordered set of edges, not an
-// ordered polygon — walk the chain into a point loop so canvas can draw it
-// as a single closed path.
-function connectorsToLoop(connections: { start: number; end: number }[]): number[] {
-  const adjacency = new Map<number, number[]>()
-  for (const { start, end } of connections) {
-    if (!adjacency.has(start)) adjacency.set(start, [])
-    if (!adjacency.has(end)) adjacency.set(end, [])
-    adjacency.get(start)!.push(end)
-    adjacency.get(end)!.push(start)
-  }
-  const first = connections[0].start
-  const loop = [first]
-  const visited = new Set([first])
-  let current = first
-  for (let i = 0; i < connections.length; i++) {
-    const next = (adjacency.get(current) ?? []).find((n) => !visited.has(n))
-    if (next === undefined) break
-    loop.push(next)
-    visited.add(next)
-    current = next
-  }
-  return loop
-}
+import { connectorsToLoop } from './landmarks'
 
 function fillLoop(ctx: CanvasRenderingContext2D, loop: number[], landmarks: NormalizedLandmark[], w: number, h: number) {
   ctx.beginPath()
