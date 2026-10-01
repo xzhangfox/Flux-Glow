@@ -26,20 +26,27 @@ import {
 // needs; working at this size keeps every slider drag responsive.
 const MAX_DIMENSION = 1600
 // Live mode works at a smaller size than a captured photo: the per-pixel
-// smoothing/reshape passes are plain JS, not GPU shaders. 480 (not lower)
-// because anything smaller visibly blurs once it's upscaled via CSS to
-// fill the screen — `smoothSkin`'s own bounding-box optimization (only
-// the face region, not the full frame, actually gets touched) is most of
-// what makes this resolution affordable per frame.
-const LIVE_MAX_DIMENSION = 480
+// smoothing/reshape passes are plain JS, not GPU shaders. This is also the
+// canvas's actual backing-store resolution (see `render()` — it's sized to
+// match the processed frame, then stretched via CSS to fill the screen),
+// so anything too low visibly blurs on a high-DPI phone regardless of how
+// sharp the underlying camera feed is. `smoothSkin`'s and the reshape
+// passes' own bounding-box optimizations (only the face region, not the
+// full frame, gets touched) are most of what makes a resolution this high
+// affordable per live frame.
+const LIVE_MAX_DIMENSION = 960
 const LIVE_FRAME_INTERVAL_MS = 60 // floor on tick spacing — actual pace is also gated by processingRef below
-// The MLS face/eyes/mouth warp is a real per-pixel optimization over every
-// control point — too slow to run at full precision every live frame. This
-// evaluates it on a coarser grid and interpolates between points instead
-// (see mls.ts); the deformation field is smooth, so this is a close
-// approximation at a fraction of the cost. Static photos use grid=1 (the
-// processFrame default) since they're not fighting a per-frame budget.
-const LIVE_RESHAPE_GRID = 6
+// The jaw-slim MLS warp (the only reshape pass still using MLS — eyes,
+// mouth and nose are now a direct analytic radial zoom, cheap at any
+// resolution) evaluates its real per-control-point cost at every Nth
+// pixel on a grid and interpolates the smooth deformation field between
+// them instead (see mls.ts), rather than at full per-pixel precision.
+// Scaled up from 6 alongside LIVE_MAX_DIMENSION so the number of grid
+// evaluations inside the jaw's box — the actual cost driver — stays
+// roughly the same as before despite the higher resolution. Static photos
+// use grid=1 (the processFrame default) since they're not fighting a
+// per-frame budget.
+const LIVE_RESHAPE_GRID = 10
 
 export type Source = { kind: 'image'; file: File } | { kind: 'live' }
 
@@ -83,7 +90,74 @@ function drawDownscaled(source: HTMLImageElement | HTMLVideoElement, maxDim: num
   return canvas
 }
 
-const ZOOM_LEVELS = [1, 2]
+interface ZoomRange {
+  min: number
+  max: number
+  mode: 'hardware' | 'digital'
+}
+
+// Digital zoom beyond ~4x is just cropping an already-modest live frame
+// down to a quarter of its linear size — well past where it still looks
+// like a lens and not a blown-up JPEG, so that's the fallback ceiling when
+// the camera doesn't expose real optical/sensor zoom.
+const DIGITAL_ZOOM_RANGE: ZoomRange = { min: 1, max: 4, mode: 'digital' }
+
+// A handful of tap-to-cycle presets spanning the real available range
+// (hardware min/max when the device exposes `MediaStreamTrack.zoom`
+// capabilities, the digital fallback range otherwise) — rounded to values
+// someone would actually reach for (0.5x ultra-wide, 1x, 2x, 3x…) rather
+// than an arbitrary fixed [1, 2] regardless of what the hardware can do.
+// Holding the button instead of tapping it opens a dial for anything
+// continuous in between.
+function buildZoomPresets({ min, max }: ZoomRange): number[] {
+  const presets = new Set<number>()
+  if (min < 1) presets.add(Math.round(min * 10) / 10)
+  presets.add(1)
+  for (const v of [2, 3, 5]) {
+    if (v > min && v <= max) presets.add(v)
+  }
+  if (max > 1) presets.add(Math.round(max * 10) / 10)
+  return Array.from(presets)
+    .filter((v) => v >= min - 0.001 && v <= max + 0.001)
+    .sort((a, b) => a - b)
+}
+
+// A vertical drag strip for continuous zoom, shown while the zoom pill is
+// held. Reads clientY straight off `window` pointermove rather than using
+// pointer capture: the finger is already down on the pill (not this strip)
+// when the long-press timer opens it, and pointermove bubbles to window
+// regardless of which element is currently under the finger, so this needs
+// no capture handoff from the pill to work.
+function ZoomDial({ min, max, value, onChange }: { min: number; max: number; value: number; onChange: (v: number) => void }) {
+  const trackRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const handleMove = (e: PointerEvent) => {
+      const el = trackRef.current
+      if (!el) return
+      const rect = el.getBoundingClientRect()
+      const fraction = 1 - Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height))
+      onChange(Math.round((min + fraction * (max - min)) * 10) / 10)
+    }
+    window.addEventListener('pointermove', handleMove)
+    return () => window.removeEventListener('pointermove', handleMove)
+  }, [min, max, onChange])
+
+  const fraction = (max - min) > 0 ? (value - min) / (max - min) : 0
+  return (
+    <div
+      ref={trackRef}
+      className="absolute left-1/2 -translate-x-1/2 bottom-56 w-10 h-40 rounded-full bg-black/60 backdrop-blur-sm border border-white/20 touch-none"
+    >
+      <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-[11px] font-semibold text-black bg-primary px-2 py-0.5 rounded-full whitespace-nowrap">
+        {value.toFixed(1)}×
+      </div>
+      <div
+        className="absolute left-1/2 -translate-x-1/2 w-7 h-7 rounded-full bg-primary border-2 border-black/40"
+        style={{ bottom: `calc(${fraction * 100}% - 0.875rem)` }}
+      />
+    </div>
+  )
+}
 
 // A round icon-over-label button for the bottom chrome's side clusters —
 // Retouch, Retake, Save, Share.
@@ -128,6 +202,8 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   const [openPanel, setOpenPanel] = useState<'retouch' | 'filter' | null>(null)
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user')
   const [zoom, setZoom] = useState(1)
+  const [zoomRange, setZoomRange] = useState<ZoomRange>(DIGITAL_ZOOM_RANGE)
+  const [zoomDialOpen, setZoomDialOpen] = useState(false)
 
   const displayRef = useRef<HTMLCanvasElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -142,6 +218,10 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   const paramsRef = useRef<EditParams>({ smoothness, face, eyes, nose, mouth, filterId })
   const facingModeRef = useRef(facingMode)
   const zoomRef = useRef(zoom)
+  const zoomRangeRef = useRef(zoomRange)
+  const zoomTrackRef = useRef<MediaStreamTrack | null>(null)
+  const zoomPressTimerRef = useRef<number | null>(null)
+  const zoomPressMovedRef = useRef(false)
   const panelRef = useRef<HTMLDivElement>(null)
   const retouchButtonRef = useRef<HTMLButtonElement>(null)
   const filterButtonRef = useRef<HTMLButtonElement>(null)
@@ -155,6 +235,23 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   useEffect(() => {
     zoomRef.current = zoom
   }, [zoom])
+  useEffect(() => {
+    zoomRangeRef.current = zoomRange
+  }, [zoomRange])
+
+  // Releasing anywhere closes the dial — the drag that's adjusting it
+  // isn't pointer-captured to the dial itself (see ZoomDial), so this is
+  // the one place that actually knows the gesture ended.
+  useEffect(() => {
+    if (!zoomDialOpen) return
+    const close = () => setZoomDialOpen(false)
+    window.addEventListener('pointerup', close)
+    window.addEventListener('pointercancel', close)
+    return () => {
+      window.removeEventListener('pointerup', close)
+      window.removeEventListener('pointercancel', close)
+    }
+  }, [zoomDialOpen])
 
   // Tapping anywhere outside the open panel (or the Retouch/Filter buttons
   // that toggle it, which handle themselves) collapses it — same pattern
@@ -192,17 +289,23 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
     cancelAnimationFrame(rafRef.current)
     streamRef.current?.getTracks().forEach((t) => t.stop())
     streamRef.current = null
+    zoomTrackRef.current = null
     // In case a detect+process cycle was still in flight (e.g. stopped
     // mid-capture) — don't leave a future startLive() permanently stuck
     // behind a guard that'll never clear on its own.
     processingRef.current = false
+    if (zoomPressTimerRef.current !== null) {
+      clearTimeout(zoomPressTimerRef.current)
+      zoomPressTimerRef.current = null
+    }
+    setZoomDialOpen(false)
   }, [])
 
   const startLive = useCallback(async () => {
     setStatus('loading')
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facingModeRef.current, width: { ideal: 640 } },
+        video: { facingMode: facingModeRef.current, width: { ideal: 1280 }, height: { ideal: 1280 } },
       })
       streamRef.current = stream
       const video = videoRef.current!
@@ -210,6 +313,30 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
       await video.play()
       setStatus('ready')
       setLiveActive(true)
+
+      // Real optical/sensor zoom when the browser exposes it (mainly the
+      // rear camera on Android Chrome today) beats a digital crop — no
+      // resolution lost to cropping a frame that was never much bigger
+      // than what we display. Each camera (front vs back) can have a
+      // different range, so this re-detects on every startLive(), which
+      // handleFlipCamera already calls via stop+start.
+      const track = stream.getVideoTracks()[0]
+      zoomTrackRef.current = track
+      const caps = track.getCapabilities?.() as (MediaTrackCapabilities & { zoom?: { min: number; max: number; step: number } }) | undefined
+      if (caps?.zoom && caps.zoom.max > caps.zoom.min) {
+        const range: ZoomRange = { min: caps.zoom.min, max: caps.zoom.max, mode: 'hardware' }
+        zoomRangeRef.current = range
+        setZoomRange(range)
+        const initial = Math.min(range.max, Math.max(range.min, 1))
+        zoomRef.current = initial
+        setZoom(initial)
+        track.applyConstraints({ advanced: [{ zoom: initial } as unknown as MediaTrackConstraintSet] }).catch(() => {})
+      } else {
+        zoomRangeRef.current = DIGITAL_ZOOM_RANGE
+        setZoomRange(DIGITAL_ZOOM_RANGE)
+        zoomRef.current = 1
+        setZoom(1)
+      }
 
       const loop = () => {
         rafRef.current = requestAnimationFrame(loop)
@@ -228,7 +355,10 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
         lastProcessRef.current = now
         if (video.readyState < 2) return
         processingRef.current = true
-        const base = drawDownscaled(video, LIVE_MAX_DIMENSION, zoomRef.current, facingModeRef.current === 'user')
+        // Hardware zoom already zoomed the sensor output itself — cropping
+        // again on top of that would double-zoom.
+        const cropZoom = zoomRangeRef.current.mode === 'hardware' ? 1 : zoomRef.current
+        const base = drawDownscaled(video, LIVE_MAX_DIMENSION, cropZoom, facingModeRef.current === 'user')
         baseRef.current = base
         detectFaceLandmarksForVideo(video, now)
           .then((landmarks) => {
@@ -328,11 +458,46 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
     startLive()
   }
 
+  // Shared by the tap-to-cycle presets and the long-press dial — keeps the
+  // actual hardware track (when we have real optical/sensor zoom) in sync
+  // with whatever value the UI just settled on, instead of only updating
+  // the digital crop factor and silently ignoring the lens.
+  const applyZoom = (value: number) => {
+    const { min, max, mode } = zoomRangeRef.current
+    const clamped = Math.min(max, Math.max(min, value))
+    zoomRef.current = clamped
+    setZoom(clamped)
+    if (mode === 'hardware' && zoomTrackRef.current) {
+      zoomTrackRef.current.applyConstraints({ advanced: [{ zoom: clamped } as unknown as MediaTrackConstraintSet] }).catch(() => {})
+    }
+  }
+
   const handleToggleZoom = () => {
-    const i = ZOOM_LEVELS.indexOf(zoom)
-    const next = ZOOM_LEVELS[(i + 1) % ZOOM_LEVELS.length]
-    zoomRef.current = next
-    setZoom(next)
+    const presets = buildZoomPresets(zoomRange)
+    const i = presets.findIndex((p) => Math.abs(p - zoom) < 0.05)
+    const next = presets[(i + 1 + presets.length) % presets.length] ?? presets[0]
+    applyZoom(next)
+  }
+
+  // Tap the zoom pill to cycle presets; press and hold it to open a dial
+  // for anything continuous in between — the same two-tier interaction
+  // most phone camera apps use, since a tap-only cycle can't reach, say,
+  // 2.4x, and a drag-only dial is overkill for the common "just go to 2x"
+  // case.
+  const ZOOM_LONG_PRESS_MS = 350
+  const handleZoomPressStart = () => {
+    zoomPressMovedRef.current = false
+    zoomPressTimerRef.current = window.setTimeout(() => {
+      zoomPressTimerRef.current = null
+      setZoomDialOpen(true)
+    }, ZOOM_LONG_PRESS_MS)
+  }
+  const handleZoomPressEnd = () => {
+    if (zoomPressTimerRef.current !== null) {
+      clearTimeout(zoomPressTimerRef.current)
+      zoomPressTimerRef.current = null
+      if (!zoomPressMovedRef.current) handleToggleZoom()
+    }
   }
 
   const disabled = status === 'no-face'
@@ -454,13 +619,30 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
       </div>
 
       {liveActive && status !== 'loading' && (
-        <button
-          onClick={handleToggleZoom}
-          aria-label="Zoom level"
-          className="absolute left-1/2 -translate-x-1/2 bottom-44 w-9 h-9 rounded-full bg-black/50 backdrop-blur-sm border border-white/20 text-white text-[11px] font-semibold flex items-center justify-center"
-        >
-          {zoom}×
-        </button>
+        <>
+          {zoomDialOpen && (
+            <ZoomDial
+              min={zoomRange.min}
+              max={zoomRange.max}
+              value={zoom}
+              onChange={(v) => {
+                zoomPressMovedRef.current = true
+                applyZoom(v)
+              }}
+            />
+          )}
+          <button
+            onPointerDown={handleZoomPressStart}
+            onPointerUp={handleZoomPressEnd}
+            onPointerLeave={handleZoomPressEnd}
+            aria-label="Zoom level — tap to cycle, hold for fine control"
+            className={`absolute left-1/2 -translate-x-1/2 bottom-44 w-9 h-9 rounded-full backdrop-blur-sm border text-white text-[11px] font-semibold flex items-center justify-center select-none touch-none transition ${
+              zoomDialOpen ? 'bg-primary text-black border-primary scale-110' : 'bg-black/50 border-white/20'
+            }`}
+          >
+            {zoom < 10 ? zoom.toFixed(1).replace(/\.0$/, '') : Math.round(zoom)}×
+          </button>
+        </>
       )}
 
       {liveActive && status !== 'loading' && (
