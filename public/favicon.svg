@@ -13,5 +13,5 @@
   <circle cx='42.5' cy='46.5' r='2.6' fill='#000'/>
   <path d='M53.5 45c2-1.6 5-1.6 7 0' stroke='#000' stroke-width='3.2' stroke-linecap='round' fill='none'/>
   <path d='M41.5 58c2.8 2.4 5.9 2.4 8.8 0' stroke='#000' stroke-width='3.2' stroke-linecap='round' fill='none'/>
-  <path d='M74 22l2.8 7.6L84.5 32.5l-7.7 2.9L74 43l-2.8-7.6-7.7-2.9 7.7-2.9L74 22z' fill='url(#g)'/>
+  <path d='M74 22l2.8 7.6L84.5 32.5l-7.7 2.9L74 43l-2.8-7.6-7.7-2.9 7.7-2.9L74 22z' stroke='url(#g)' stroke-width='3' stroke-linejoin='round' fill='none'/>
 </svg>

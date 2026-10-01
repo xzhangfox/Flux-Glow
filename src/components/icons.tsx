@@ -34,7 +34,7 @@ export function IconFaceGlow(props: IconProps) {
       <path d="M9 10.2h.01" strokeWidth={2.4} />
       <path d="M13.6 9.8c.5-.4 1.3-.4 1.8 0" />
       <path d="M9.5 14c.7.6 1.6.9 2.5.9s1.8-.3 2.5-.9" />
-      <path d="M18.4 4.2l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9z" fill="currentColor" stroke="none" />
+      <path d="M18.4 4.2l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9z" strokeLinejoin="round" />
     </svg>
   )
 }
