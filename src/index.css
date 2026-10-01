@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+/* Same palette/type as the rest of the Flux family (see Flux-Finance's
+   index.html tailwind.config) — kept in one place here instead of inline
+   CDN config so Tailwind is a real build step, not a runtime <script>. */
+@theme {
+  --color-background: #000000;
+  --color-surface: #1c1c1e;
+  --color-primary: #d4af37;
+  --color-primary-dim: #8a7122;
+  --color-secondary: #2c2c2e;
+  --color-danger: #ef4444;
+  --color-success: #10b981;
+  --color-text-secondary: #8e8e93;
+  --font-sans: 'Manrope', sans-serif;
+  --shadow-glow: 0 0 20px rgba(212, 175, 55, 0.15);
+  --shadow-glow-strong: 0 0 30px rgba(212, 175, 55, 0.3);
+}
+
+body {
+  background-color: #000000;
+  color: #ffffff;
+  font-family: 'Manrope', sans-serif;
+  overscroll-behavior: none;
+}
+
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24;
+}
+.material-symbols-outlined.filled {
+  font-variation-settings: 'FILL' 1, 'wght' 300, 'GRAD' 0, 'opsz' 24;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
