@@ -163,6 +163,24 @@ export function IconError(props: IconProps) {
   )
 }
 
+export function IconEdit(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M15.2 4.8l4 4L7.5 20.5l-4.8.8.8-4.8L15.2 4.8z" />
+      <path d="M13.4 6.6l4 4" />
+    </svg>
+  )
+}
+
+export function IconEye(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M3 12c1.9-4 5.2-6.3 9-6.3s7.1 2.3 9 6.3c-1.9 4-5.2 6.3-9 6.3S4.9 16 3 12z" />
+      <circle cx="12" cy="12" r="2.6" />
+    </svg>
+  )
+}
+
 export function IconSpinner(props: IconProps) {
   return (
     <svg {...base} viewBox="0 0 24 24" fill="none" {...props}>

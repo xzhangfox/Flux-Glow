@@ -1,24 +1,22 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, type ComponentType, type SVGProps } from 'react'
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
 import { detectFaceLandmarks, detectFaceLandmarksForVideo } from '../lib/faceLandmarker'
 import { processFrame, type EditParams } from '../lib/pipeline'
 import { FILTER_PRESETS } from '../lib/filters'
 import Slider from './Slider'
-import ParamToolbar, { type ParamDef, type ActionDef } from './ParamToolbar'
 import {
   IconSpinner,
-  IconCompare,
+  IconEye,
   IconCamera,
   IconInfo,
   IconError,
   IconClose,
   IconCheck,
+  IconEdit,
   IconDownload,
   IconShare,
   IconRefresh,
-  IconDroplet,
   IconFaceOutline,
-  IconPalette,
 } from './icons'
 
 // Downscale before processing — phone photos run 3000px+ on a side, far
@@ -55,6 +53,35 @@ function drawDownscaled(source: HTMLImageElement | HTMLVideoElement, maxDim: num
   return canvas
 }
 
+// A round icon-over-label button for the bottom chrome's side clusters —
+// Retouch, Retake, Save, Share.
+function ChromeButton({
+  icon: Icon,
+  label,
+  onClick,
+  active,
+  primary,
+}: {
+  icon: ComponentType<SVGProps<SVGSVGElement>>
+  label: string
+  onClick: () => void
+  active?: boolean
+  primary?: boolean
+}) {
+  return (
+    <button onClick={onClick} aria-label={label} className="flex flex-col items-center gap-1 w-14 text-white/85">
+      <span
+        className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
+          active || primary ? 'bg-primary text-black border-primary' : 'bg-black/40 border-white/15'
+        }`}
+      >
+        <Icon className="w-5 h-5" />
+      </span>
+      <span className="text-[10px] font-medium leading-none">{label}</span>
+    </button>
+  )
+}
+
 export default function Editor({ source, onReset }: { source: Source; onReset: () => void }) {
   const [status, setStatus] = useState<Status>('loading')
   const [smoothness, setSmoothness] = useState(0.6)
@@ -63,6 +90,7 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   const [showBefore, setShowBefore] = useState(false)
   const [liveActive, setLiveActive] = useState(source.kind === 'live')
   const [confirmed, setConfirmed] = useState(false)
+  const [retouchOpen, setRetouchOpen] = useState(false)
 
   const displayRef = useRef<HTMLCanvasElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -74,6 +102,8 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   const lastProcessRef = useRef(0)
   const liveActiveRef = useRef(liveActive)
   const paramsRef = useRef<EditParams>({ smoothness, contour, filterId })
+  const retouchPanelRef = useRef<HTMLDivElement>(null)
+  const retouchButtonRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     paramsRef.current = { smoothness, contour, filterId }
@@ -81,6 +111,19 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   useEffect(() => {
     liveActiveRef.current = liveActive
   }, [liveActive])
+
+  // Tapping anywhere outside the retouch panel (or its own toggle button,
+  // which handles itself) collapses it — same pattern as a tap-away menu.
+  useEffect(() => {
+    function onClick(e: MouseEvent) {
+      const target = e.target as Node
+      if (retouchPanelRef.current?.contains(target)) return
+      if (retouchButtonRef.current?.contains(target)) return
+      setRetouchOpen(false)
+    }
+    document.addEventListener('click', onClick)
+    return () => document.removeEventListener('click', onClick)
+  }, [])
 
   const render = useCallback(() => {
     const canvas = displayRef.current
@@ -189,7 +232,7 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
 
   // Any further adjustment after confirming means the exported image would
   // no longer match what's on screen — fall back to Confirm again rather
-  // than silently leaving a stale Download/Share up.
+  // than silently leaving a stale Save/Share up.
   useEffect(() => {
     setConfirmed(false)
   }, [smoothness, contour, filterId])
@@ -202,47 +245,16 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
 
   const handleRetake = () => {
     setConfirmed(false)
+    setRetouchOpen(false)
     startLive()
   }
 
+  const handleConfirm = () => {
+    setConfirmed(true)
+    setRetouchOpen(false)
+  }
+
   const disabled = status === 'no-face'
-  const params: ParamDef[] = [
-    {
-      id: 'skin',
-      icon: IconDroplet,
-      label: 'Smooth',
-      isActive: smoothness > 0.01,
-      render: () => <Slider label="Smooth & Clear" value={smoothness} onChange={setSmoothness} disabled={disabled} />,
-    },
-    {
-      id: 'contour',
-      icon: IconFaceOutline,
-      label: 'Contour',
-      isActive: contour > 0.01,
-      render: () => <Slider label="Slim" value={contour} onChange={setContour} disabled={disabled} />,
-    },
-    {
-      id: 'filter',
-      icon: IconPalette,
-      label: 'Filter',
-      isActive: filterId !== 'none',
-      render: () => (
-        <div className="grid grid-cols-3 gap-2">
-          {FILTER_PRESETS.map((p) => (
-            <button
-              key={p.id}
-              onClick={() => setFilterId(p.id)}
-              className={`py-2 rounded-lg text-xs font-medium transition border ${
-                filterId === p.id ? 'bg-primary text-black border-primary' : 'bg-secondary text-white/70 border-transparent hover:bg-white/10'
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
-      ),
-    },
-  ]
 
   const resultBlob = (): Promise<Blob | null> => {
     const canvas = resultRef.current ?? baseRef.current
@@ -276,37 +288,62 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
     handleDownload()
   }
 
-  const actions: ActionDef[] = liveActive
-    ? [{ id: 'exit', icon: IconClose, label: 'Exit', onClick: onReset }]
-    : !confirmed
-      ? [{ id: 'confirm', icon: IconCheck, label: 'Confirm', onClick: () => setConfirmed(true), variant: 'primary', disabled: status === 'loading' }]
-      : [
-          { id: 'download', icon: IconDownload, label: 'Save', onClick: handleDownload, variant: 'primary' },
-          { id: 'share', icon: IconShare, label: 'Share', onClick: handleShare },
-          source.kind === 'live'
-            ? { id: 'retake', icon: IconRefresh, label: 'Retake', onClick: handleRetake }
-            : { id: 'new', icon: IconRefresh, label: 'New', onClick: onReset },
-        ]
+  let centerButton: React.ReactNode
+  if (liveActive) {
+    centerButton = (
+      <button
+        onClick={handleCapture}
+        disabled={status !== 'ready'}
+        aria-label="Capture"
+        className="w-16 h-16 rounded-full bg-primary border-4 border-white/80 shadow-glow-strong flex items-center justify-center hover:brightness-110 transition disabled:opacity-50"
+      >
+        <IconCamera className="w-7 h-7 text-black" />
+      </button>
+    )
+  } else if (!confirmed) {
+    centerButton = (
+      <button
+        onClick={handleConfirm}
+        disabled={status === 'loading'}
+        aria-label="Confirm"
+        className="w-16 h-16 rounded-full bg-primary border-4 border-white/20 shadow-glow-strong flex items-center justify-center hover:brightness-110 transition disabled:opacity-40"
+      >
+        <IconCheck className="w-7 h-7 text-black" />
+      </button>
+    )
+  } else {
+    centerButton = (
+      <button
+        onClick={() => setConfirmed(false)}
+        aria-label="Edit"
+        className="w-16 h-16 rounded-full bg-black/50 border-4 border-white/20 backdrop-blur-sm flex items-center justify-center text-white hover:bg-black/60 transition"
+      >
+        <IconEdit className="w-6 h-6" />
+      </button>
+    )
+  }
 
   return (
-    <div className="flex flex-col items-center gap-4 w-full max-w-md">
-      <div className="relative w-full rounded-3xl overflow-hidden bg-surface border border-white/10 shadow-glow">
-        <canvas ref={displayRef} className="w-full h-auto block" />
-        <video ref={videoRef} autoPlay playsInline muted className="hidden" />
+    <div className="fixed inset-0 bg-black overflow-hidden select-none">
+      <canvas ref={displayRef} className="absolute inset-0 w-full h-full object-cover" />
+      <video ref={videoRef} autoPlay playsInline muted className="hidden" />
 
-        {status === 'loading' && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/60">
-            <IconSpinner className="w-8 h-8 text-primary animate-spin" />
-          </div>
-        )}
+      <div className="absolute top-0 inset-x-0 h-28 bg-gradient-to-b from-black/70 to-transparent pointer-events-none" />
 
-        {liveActive && status !== 'loading' && (
-          <div className="absolute top-3 left-3 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 backdrop-blur-sm border border-white/10">
-            <span className="w-1.5 h-1.5 rounded-full bg-danger animate-pulse" />
-            <span className="text-[10px] font-semibold tracking-wide text-white/90">LIVE</span>
-          </div>
-        )}
+      {status === 'loading' && (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <IconSpinner className="w-9 h-9 text-primary animate-spin" />
+        </div>
+      )}
 
+      <div className="absolute inset-x-0 flex items-center justify-between px-4" style={{ top: 'max(1rem, env(safe-area-inset-top))' }}>
+        <button
+          onClick={onReset}
+          aria-label="Close"
+          className="w-10 h-10 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center text-white"
+        >
+          <IconClose className="w-5 h-5" />
+        </button>
         <button
           onMouseDown={() => setShowBefore(true)}
           onMouseUp={() => setShowBefore(false)}
@@ -314,36 +351,98 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
           onTouchStart={() => setShowBefore(true)}
           onTouchEnd={() => setShowBefore(false)}
           disabled={status === 'loading'}
-          className="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg bg-black/60 text-white text-xs font-medium backdrop-blur-sm border border-white/10 select-none flex items-center gap-1"
+          aria-label="Hold to compare with the original"
+          className={`w-10 h-10 rounded-full backdrop-blur-sm flex items-center justify-center transition ${
+            showBefore ? 'bg-primary text-black' : 'bg-black/40 text-white'
+          }`}
         >
-          <IconCompare className="w-3.5 h-3.5" />
-          Hold for Before
+          <IconEye className="w-5 h-5" />
         </button>
-
-        {liveActive && status === 'ready' && (
-          <button
-            onClick={handleCapture}
-            className="absolute bottom-3 left-1/2 -translate-x-1/2 w-14 h-14 rounded-full bg-primary border-4 border-white/80 shadow-glow-strong flex items-center justify-center hover:brightness-110 transition"
-            aria-label="Capture"
-          >
-            <IconCamera className="w-6 h-6 text-black" />
-          </button>
-        )}
       </div>
-      {status === 'no-face' && (
-        <p className="text-text-secondary text-xs text-center max-w-md flex items-center gap-1.5">
-          <IconInfo className="w-3.5 h-3.5" />
-          No face detected — skin and contour need a visible face, filters still work.
-        </p>
-      )}
-      {status === 'error' && (
-        <p className="text-danger text-xs flex items-center gap-1.5">
-          <IconError className="w-3.5 h-3.5" />
-          {source.kind === 'live' ? "Couldn't access the camera — check your browser permissions." : "Couldn't load that photo."}
-        </p>
+
+      {liveActive && status !== 'loading' && (
+        <div
+          className="absolute left-4 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 backdrop-blur-sm border border-white/10"
+          style={{ top: 'calc(max(1rem, env(safe-area-inset-top)) + 3.25rem)' }}
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-danger animate-pulse" />
+          <span className="text-[10px] font-semibold tracking-wide text-white/90">LIVE</span>
+        </div>
       )}
 
-      <ParamToolbar params={params} actions={actions} />
+      <div
+        className="absolute inset-x-0 bottom-0 flex flex-col gap-3 px-4 pt-8"
+        style={{ paddingBottom: 'max(1.25rem, env(safe-area-inset-bottom))', background: 'linear-gradient(to top, rgba(0,0,0,0.85), rgba(0,0,0,0.4) 60%, transparent)' }}
+      >
+        {(status === 'no-face' || status === 'error') && (
+          <p
+            className={`self-center text-xs text-center flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-sm ${
+              status === 'error' ? 'text-danger' : 'text-white/80'
+            }`}
+          >
+            {status === 'error' ? <IconError className="w-3.5 h-3.5 flex-shrink-0" /> : <IconInfo className="w-3.5 h-3.5 flex-shrink-0" />}
+            {status === 'error'
+              ? source.kind === 'live'
+                ? "Couldn't access the camera — check your browser permissions."
+                : "Couldn't load that photo."
+              : 'No face detected — smooth and contour need one, filters still work.'}
+          </p>
+        )}
+
+        <div
+          ref={retouchPanelRef}
+          className={`grid transition-all duration-250 ease-out ${retouchOpen ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}
+          style={{ transitionProperty: 'grid-template-rows, opacity' }}
+        >
+          <div className="overflow-hidden">
+            <div className="bg-black/70 backdrop-blur-md rounded-2xl p-4 border border-white/10 space-y-4">
+              <Slider label="Smooth & Clear" value={smoothness} onChange={setSmoothness} disabled={disabled} />
+              <Slider label="Slim" value={contour} onChange={setContour} disabled={disabled} />
+            </div>
+          </div>
+        </div>
+
+        <div className="flex gap-2 overflow-x-auto no-scrollbar">
+          {FILTER_PRESETS.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => setFilterId(p.id)}
+              className={`flex-shrink-0 px-3.5 py-1.5 rounded-full text-xs font-medium border transition ${
+                filterId === p.id ? 'bg-primary text-black border-primary' : 'bg-black/40 text-white/80 border-white/15 backdrop-blur-sm'
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-2 pt-1">
+          <div className="flex items-center gap-3 justify-self-start">
+            <button ref={retouchButtonRef} onClick={() => setRetouchOpen((v) => !v)} aria-label="Retouch" className="flex flex-col items-center gap-1 w-14 text-white/85">
+              <span
+                className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
+                  retouchOpen ? 'bg-primary text-black border-primary' : 'bg-black/40 border-white/15'
+                }`}
+              >
+                <IconFaceOutline className="w-5 h-5" />
+              </span>
+              <span className="text-[10px] font-medium leading-none">Retouch</span>
+            </button>
+            {source.kind === 'live' && !liveActive && <ChromeButton icon={IconRefresh} label="Retake" onClick={handleRetake} />}
+          </div>
+
+          <div className="justify-self-center">{centerButton}</div>
+
+          <div className="flex items-center gap-3 justify-self-end">
+            {confirmed && (
+              <>
+                <ChromeButton icon={IconDownload} label="Save" primary onClick={handleDownload} />
+                <ChromeButton icon={IconShare} label="Share" onClick={handleShare} />
+              </>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

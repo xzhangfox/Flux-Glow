@@ -6,6 +6,14 @@ import { IconFaceGlow } from './components/icons'
 export default function App() {
   const [source, setSource] = useState<Source | null>(null)
 
+  // The editor is a full-screen camera/photo view with its own chrome
+  // (Editor.tsx renders `fixed inset-0`) — the landing header/footer
+  // below belong only to the upload screen, so they're skipped entirely
+  // once a source is picked rather than just hidden behind it.
+  if (source) {
+    return <Editor source={source} onReset={() => setSource(null)} />
+  }
+
   return (
     <div className="min-h-screen bg-background flex flex-col items-center relative overflow-hidden">
       <div
@@ -24,11 +32,7 @@ export default function App() {
       </header>
 
       <main className="relative flex-1 w-full flex items-center justify-center px-6 pb-16">
-        {source ? (
-          <Editor source={source} onReset={() => setSource(null)} />
-        ) : (
-          <UploadArea onImage={(file) => setSource({ kind: 'image', file })} onLive={() => setSource({ kind: 'live' })} />
-        )}
+        <UploadArea onImage={(file) => setSource({ kind: 'image', file })} onLive={() => setSource({ kind: 'live' })} />
       </main>
 
       <footer className="relative pb-8 text-center">
