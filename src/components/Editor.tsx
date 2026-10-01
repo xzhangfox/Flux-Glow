@@ -5,6 +5,21 @@ import { processFrame, type EditParams } from '../lib/pipeline'
 import { FILTER_PRESETS } from '../lib/filters'
 import Slider from './Slider'
 import ParamToolbar, { type ParamDef } from './ParamToolbar'
+import {
+  IconSpinner,
+  IconCompare,
+  IconCamera,
+  IconInfo,
+  IconError,
+  IconClose,
+  IconCheck,
+  IconDownload,
+  IconShare,
+  IconRefresh,
+  IconDroplet,
+  IconFaceOutline,
+  IconPalette,
+} from './icons'
 
 // Downscale before processing — phone photos run 3000px+ on a side, far
 // more detail than this editor displays or than frequency separation
@@ -47,6 +62,7 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   const [filterId, setFilterId] = useState('none')
   const [showBefore, setShowBefore] = useState(false)
   const [liveActive, setLiveActive] = useState(source.kind === 'live')
+  const [confirmed, setConfirmed] = useState(false)
 
   const displayRef = useRef<HTMLCanvasElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -171,12 +187,21 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
     return () => clearTimeout(t)
   }, [smoothness, contour, filterId, liveActive, recomputeStatic])
 
+  // Any further adjustment after confirming means the exported image would
+  // no longer match what's on screen — fall back to Confirm again rather
+  // than silently leaving a stale Download/Share up.
+  useEffect(() => {
+    setConfirmed(false)
+  }, [smoothness, contour, filterId])
+
   const handleCapture = () => {
     stopLive()
     setLiveActive(false)
+    setConfirmed(false)
   }
 
   const handleRetake = () => {
+    setConfirmed(false)
     startLive()
   }
 
@@ -184,21 +209,21 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   const params: ParamDef[] = [
     {
       id: 'skin',
-      icon: 'blur_on',
+      icon: IconDroplet,
       label: 'Smooth',
       isActive: smoothness > 0.01,
       render: () => <Slider label="Smooth & Clear" value={smoothness} onChange={setSmoothness} disabled={disabled} />,
     },
     {
       id: 'contour',
-      icon: 'face',
+      icon: IconFaceOutline,
       label: 'Contour',
       isActive: contour > 0.01,
       render: () => <Slider label="Slim" value={contour} onChange={setContour} disabled={disabled} />,
     },
     {
       id: 'filter',
-      icon: 'palette',
+      icon: IconPalette,
       label: 'Filter',
       isActive: filterId !== 'none',
       render: () => (
@@ -219,22 +244,36 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
     },
   ]
 
-  const handleDownload = () => {
+  const resultBlob = (): Promise<Blob | null> => {
     const canvas = resultRef.current ?? baseRef.current
-    if (!canvas) return
-    canvas.toBlob(
-      (blob) => {
-        if (!blob) return
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = 'flux-glow.jpg'
-        a.click()
-        URL.revokeObjectURL(url)
-      },
-      'image/jpeg',
-      0.95
-    )
+    if (!canvas) return Promise.resolve(null)
+    return new Promise((resolve) => canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.95))
+  }
+
+  const handleDownload = async () => {
+    const blob = await resultBlob()
+    if (!blob) return
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'flux-glow.jpg'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const handleShare = async () => {
+    const blob = await resultBlob()
+    if (!blob) return
+    const file = new File([blob], 'flux-glow.jpg', { type: 'image/jpeg' })
+    if (navigator.canShare?.({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: 'Flux Glow' })
+        return
+      } catch {
+        // user cancelled or share failed — fall through to download
+      }
+    }
+    handleDownload()
   }
 
   return (
@@ -245,7 +284,7 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
 
         {status === 'loading' && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/60">
-            <span className="material-symbols-outlined animate-spin text-primary text-3xl">progress_activity</span>
+            <IconSpinner className="w-8 h-8 text-primary animate-spin" />
           </div>
         )}
 
@@ -265,7 +304,7 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
           disabled={status === 'loading'}
           className="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg bg-black/60 text-white text-xs font-medium backdrop-blur-sm border border-white/10 select-none flex items-center gap-1"
         >
-          <span className="material-symbols-outlined text-sm">compare</span>
+          <IconCompare className="w-3.5 h-3.5" />
           Hold for Before
         </button>
 
@@ -275,19 +314,19 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
             className="absolute bottom-3 left-1/2 -translate-x-1/2 w-14 h-14 rounded-full bg-primary border-4 border-white/80 shadow-glow-strong flex items-center justify-center hover:brightness-110 transition"
             aria-label="Capture"
           >
-            <span className="material-symbols-outlined text-black text-2xl">photo_camera</span>
+            <IconCamera className="w-6 h-6 text-black" />
           </button>
         )}
       </div>
       {status === 'no-face' && (
         <p className="text-text-secondary text-xs text-center max-w-md flex items-center gap-1.5">
-          <span className="material-symbols-outlined text-sm">info</span>
+          <IconInfo className="w-3.5 h-3.5" />
           No face detected — skin and contour need a visible face, filters still work.
         </p>
       )}
       {status === 'error' && (
         <p className="text-danger text-xs flex items-center gap-1.5">
-          <span className="material-symbols-outlined text-sm">error</span>
+          <IconError className="w-3.5 h-3.5" />
           {source.kind === 'live' ? "Couldn't access the camera — check your browser permissions." : "Couldn't load that photo."}
         </p>
       )}
@@ -300,26 +339,41 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
             onClick={onReset}
             className="flex-1 py-3 bg-secondary text-white rounded-xl hover:bg-white/10 transition flex items-center justify-center gap-1.5"
           >
-            <span className="material-symbols-outlined text-lg">close</span>
+            <IconClose className="w-4 h-4" />
             Exit Live
+          </button>
+        ) : !confirmed ? (
+          <button
+            onClick={() => setConfirmed(true)}
+            disabled={status === 'loading'}
+            className="flex-1 py-3 bg-primary text-black font-semibold rounded-xl hover:brightness-110 transition shadow-glow disabled:opacity-40 flex items-center justify-center gap-1.5"
+          >
+            <IconCheck className="w-4 h-4" />
+            Confirm
           </button>
         ) : (
           <>
             <button
               onClick={handleDownload}
-              disabled={status === 'loading'}
-              className="flex-1 py-3 bg-primary text-black font-semibold rounded-xl hover:brightness-110 transition shadow-glow disabled:opacity-40 flex items-center justify-center gap-1.5"
+              className="flex-1 py-3 bg-primary text-black font-semibold rounded-xl hover:brightness-110 transition shadow-glow flex items-center justify-center gap-1.5"
             >
-              <span className="material-symbols-outlined text-lg">download</span>
+              <IconDownload className="w-4 h-4" />
               Download
+            </button>
+            <button
+              onClick={handleShare}
+              className="flex-1 py-3 bg-secondary text-white font-semibold rounded-xl hover:bg-white/10 transition flex items-center justify-center gap-1.5 border border-white/10"
+            >
+              <IconShare className="w-4 h-4" />
+              Share
             </button>
             {source.kind === 'live' ? (
               <button onClick={handleRetake} className="px-4 py-3 bg-secondary text-white rounded-xl hover:bg-white/10 transition" aria-label="Retake">
-                <span className="material-symbols-outlined text-lg">replay</span>
+                <IconRefresh className="w-4 h-4" />
               </button>
             ) : (
               <button onClick={onReset} className="px-4 py-3 bg-secondary text-white rounded-xl hover:bg-white/10 transition" aria-label="New photo">
-                <span className="material-symbols-outlined text-lg">refresh</span>
+                <IconRefresh className="w-4 h-4" />
               </button>
             )}
           </>

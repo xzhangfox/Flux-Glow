@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react'
+import { IconSparkle, IconImage, IconCamera } from './icons'
 
 export default function UploadArea({ onImage, onLive }: { onImage: (file: File) => void; onLive: () => void }) {
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -22,7 +23,7 @@ export default function UploadArea({ onImage, onLive }: { onImage: (file: File) 
       }`}
     >
       <div className="w-16 h-16 rounded-2xl bg-primary/10 border border-primary/30 flex items-center justify-center shadow-glow">
-        <span className="material-symbols-outlined text-4xl text-primary">auto_fix_high</span>
+        <IconSparkle className="w-8 h-8 text-primary" />
       </div>
       <div className="text-center px-6">
         <p className="text-white/90 font-medium text-lg">Drop a photo here</p>
@@ -33,14 +34,14 @@ export default function UploadArea({ onImage, onLive }: { onImage: (file: File) 
           onClick={() => fileInputRef.current?.click()}
           className="px-5 py-3 bg-primary text-black font-semibold rounded-xl hover:brightness-110 transition shadow-glow text-sm flex items-center gap-2"
         >
-          <span className="material-symbols-outlined text-lg">photo_library</span>
+          <IconImage className="w-4 h-4" />
           Upload Photo
         </button>
         <button
           onClick={onLive}
           className="px-5 py-3 bg-secondary text-white rounded-xl hover:bg-white/10 transition text-sm flex items-center gap-2 border border-white/10"
         >
-          <span className="material-symbols-outlined text-lg">videocam</span>
+          <IconCamera className="w-4 h-4" />
           Live Camera
         </button>
       </div>

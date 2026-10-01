@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import UploadArea from './components/UploadArea'
 import Editor, { type Source } from './components/Editor'
+import { IconSparkle } from './components/icons'
 
 export default function App() {
   const [source, setSource] = useState<Source | null>(null)
@@ -14,7 +15,7 @@ export default function App() {
 
       <header className="relative w-full max-w-4xl px-6 py-6 flex items-center gap-3">
         <div className="w-9 h-9 rounded-lg border border-primary/40 bg-primary/5 flex items-center justify-center">
-          <span className="material-symbols-outlined text-primary text-xl">auto_awesome</span>
+          <IconSparkle className="w-5 h-5 text-primary" />
         </div>
         <div>
           <h1 className="text-lg font-bold text-white tracking-tight">Flux Glow</h1>

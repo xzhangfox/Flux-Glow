@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode, type ComponentType, type SVGProps } from 'react'
 
 export interface ParamDef {
   id: string
-  icon: string
+  icon: ComponentType<SVGProps<SVGSVGElement>>
   label: string
   /** Shows a small dot on the icon when the control isn't at its default
    *  (a quick "this one's been touched" cue, same idea Meitu's own
@@ -22,13 +22,17 @@ export default function ParamToolbar({ params }: { params: ParamDef[] }) {
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    function onPointerDown(e: PointerEvent) {
+    // 'click' (fires after mouseup, once the click target is already fixed)
+    // rather than 'pointerdown' — closing the panel on pointerdown shifts
+    // the layout *before* the click resolves, which can make a tap on a
+    // button just below the panel (e.g. Confirm) miss its target.
+    function onClick(e: MouseEvent) {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setOpenId(null)
       }
     }
-    document.addEventListener('pointerdown', onPointerDown)
-    return () => document.removeEventListener('pointerdown', onPointerDown)
+    document.addEventListener('click', onClick)
+    return () => document.removeEventListener('click', onClick)
   }, [])
 
   const open = params.find((p) => p.id === openId)
@@ -47,6 +51,7 @@ export default function ParamToolbar({ params }: { params: ParamDef[] }) {
       <div className="flex gap-2 overflow-x-auto no-scrollbar px-1 py-1 -mx-1">
         {params.map((p) => {
           const isOpen = openId === p.id
+          const Icon = p.icon
           return (
             <button
               key={p.id}
@@ -55,7 +60,7 @@ export default function ParamToolbar({ params }: { params: ParamDef[] }) {
                 isOpen ? 'bg-primary text-black border-primary' : 'bg-surface text-white/70 border-white/10 hover:bg-white/10'
               }`}
             >
-              <span className="material-symbols-outlined text-xl leading-none">{p.icon}</span>
+              <Icon className="w-5 h-5" />
               <span className="text-[10px] font-medium leading-none whitespace-nowrap">{p.label}</span>
               {p.isActive && !isOpen && <span className="absolute top-1.5 right-2.5 w-1.5 h-1.5 rounded-full bg-primary" />}
             </button>
