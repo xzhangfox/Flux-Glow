@@ -166,9 +166,34 @@ function buildVertexBuffers(landmarks: NormalizedLandmark[], params: ReshapePara
   // never touched (they keep target === original from the loop above) —
   // no explicit "anchor" bookkeeping needed, unlike the old MLS version,
   // because leaving a vertex alone IS the default state here.
+  //
+  // "Push toward centerX" assumes a roughly frontal face — the real slim
+  // effect is narrowing width around the face's symmetry axis, and
+  // centerX only approximates that axis when the face is facing the
+  // camera. Turn the head and the two sides of the oval are at very
+  // different depths (one near, one foreshortened far), so pushing both
+  // toward the same centerX by the same fraction moves them by very
+  // different real amounts — right where the near and far side's
+  // triangles meet (around the nose bridge), that mismatch showed up as
+  // a visible vertical seam, worst against a lighting gradient across
+  // the face (the same "invisible on skin, obvious against a gradient"
+  // lesson as the original wavy-background bug, just with the gradient
+  // now a shadow instead of a door frame). Rather than modeling head
+  // pose properly, fade the push out as the face turns away from
+  // frontal: when the eye-line's own midpoint sits noticeably off from
+  // the cheek-to-cheek midpoint (relative to how wide apart the cheeks
+  // are), the face is turned enough that this formula's assumption no
+  // longer holds, so ease off instead of forcing it anyway.
   if (params.face > 0.001) {
     const faceCenterX = (landmarks[LEFT_CHEEK].x + landmarks[RIGHT_CHEEK].x) / 2
-    const pushFraction = Math.min(params.face, 1) * 0.14
+    const cheekSpan = Math.abs(landmarks[RIGHT_CHEEK].x - landmarks[LEFT_CHEEK].x)
+    // The four eye-corner indices (not the full eye loop) — empirically
+    // measured at 0.07-0.14 for a frontal/mildly-turned face and 0.36-0.57
+    // for the turned angle that produced the seam, a clean separation.
+    const eyesCenterX = (landmarks[33].x + landmarks[133].x + landmarks[362].x + landmarks[263].x) / 4
+    const yawProxy = cheekSpan > 1e-5 ? Math.abs(eyesCenterX - faceCenterX) / cheekSpan : 0
+    const yawFalloff = 1 - Math.min(1, Math.max(0, (yawProxy - 0.15) / 0.2))
+    const pushFraction = Math.min(params.face, 1) * 0.14 * yawFalloff
     for (const idx of OVAL_LOOP) {
       if (landmarks[idx].y <= trueEyeLineY) continue
       targetPos[idx * 2] = landmarks[idx].x + (faceCenterX - landmarks[idx].x) * pushFraction
