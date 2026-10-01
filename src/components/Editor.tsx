@@ -36,17 +36,6 @@ const MAX_DIMENSION = 1600
 // affordable per live frame.
 const LIVE_MAX_DIMENSION = 960
 const LIVE_FRAME_INTERVAL_MS = 60 // floor on tick spacing — actual pace is also gated by processingRef below
-// The jaw-slim MLS warp (the only reshape pass still using MLS — eyes,
-// mouth and nose are now a direct analytic radial zoom, cheap at any
-// resolution) evaluates its real per-control-point cost at every Nth
-// pixel on a grid and interpolates the smooth deformation field between
-// them instead (see mls.ts), rather than at full per-pixel precision.
-// Scaled up from 6 alongside LIVE_MAX_DIMENSION so the number of grid
-// evaluations inside the jaw's box — the actual cost driver — stays
-// roughly the same as before despite the higher resolution. Static photos
-// use grid=1 (the processFrame default) since they're not fighting a
-// per-frame budget.
-const LIVE_RESHAPE_GRID = 10
 
 export type Source = { kind: 'image'; file: File } | { kind: 'live' }
 
@@ -72,18 +61,26 @@ function loadImage(file: File): Promise<HTMLImageElement> {
 // on `base`, so its normalized coordinates are relative to the
 // *unmirrored* frame regardless of what drawDownscaled did. Every reshape
 // pass (and the skin mask, and the smoothing bounds) turns those
-// coordinates straight into pixel positions on `base`, so when `base` was
-// mirrored and the landmarks weren't, every single one of them pointed at
-// its mirror-reflected x position instead of the real feature — an eye
-// warp centered on whatever half-eyebrow/half-nose-bridge pixel happened
-// to sit at that reflected spot instead of the eye, which is exactly the
-// "horror movie" look a real face (close to but not perfectly symmetric)
-// produces. The crop in drawDownscaled is always centered, so a plain
-// horizontal flip of normalized x commutes with it — no extra correction
-// needed for zoom.
-function mirrorLandmarks(landmarks: NormalizedLandmark[] | null): NormalizedLandmark[] | null {
+// coordinates straight into pixel positions on `base`, so whenever `base`
+// was mirrored and/or digitally cropped (zoomed) and the landmarks
+// weren't adjusted to match, every one of them pointed at the wrong
+// position relative to the actual feature in `base` — for mirroring, the
+// mirror-reflected x instead of the real one (an eye warp centered on
+// whatever half-eyebrow/half-nose-bridge pixel happened to sit at that
+// reflected spot, which is exactly the "horror movie" look a real,
+// not-quite-symmetric face produces); for digital zoom, a position
+// outside the actual cropped-and-rescaled frame entirely once zoomed in
+// enough. This maps raw detection-space landmarks into `base`'s own
+// coordinate space given the same (zoom, mirror) drawDownscaled used.
+function remapLandmarksToBase(landmarks: NormalizedLandmark[] | null, zoom: number, mirror: boolean): NormalizedLandmark[] | null {
   if (!landmarks) return landmarks
-  return landmarks.map((p) => ({ ...p, x: 1 - p.x }))
+  const cropFrac = zoom > 1 ? (1 - 1 / zoom) / 2 : 0
+  return landmarks.map((p) => {
+    let x = zoom > 1 ? (p.x - cropFrac) * zoom : p.x
+    const y = zoom > 1 ? (p.y - cropFrac) * zoom : p.y
+    if (mirror) x = 1 - x
+    return { ...p, x, y }
+  })
 }
 
 function drawDownscaled(source: HTMLImageElement | HTMLVideoElement, maxDim: number, zoom = 1, mirror = false): HTMLCanvasElement {
@@ -380,10 +377,10 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
         baseRef.current = base
         detectFaceLandmarksForVideo(video, now)
           .then((rawLandmarks) => {
-            const landmarks = facingModeRef.current === 'user' ? mirrorLandmarks(rawLandmarks) : rawLandmarks
+            const landmarks = remapLandmarksToBase(rawLandmarks, cropZoom, facingModeRef.current === 'user')
             landmarksRef.current = landmarks
             setStatus(landmarks ? 'ready' : 'no-face')
-            resultRef.current = processFrame(base, landmarks, paramsRef.current, LIVE_RESHAPE_GRID)
+            resultRef.current = processFrame(base, landmarks, paramsRef.current)
             render()
           })
           .finally(() => {

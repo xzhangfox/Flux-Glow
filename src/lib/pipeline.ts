@@ -13,11 +13,12 @@ export interface EditParams extends ReshapeParams {
 /** The full edit pipeline, shared by the static photo editor and the live
  *  camera preview so the two never drift into visibly different results:
  *  skin mask -> frequency-separation smoothing -> per-region reshape
- *  (face/eyes/nose/mouth) -> filter. `reshapeGrid` controls the MLS warp's
- *  grid step (see mls.ts) — 1 for full per-pixel precision (static
- *  photos), higher for live video where that precision isn't worth the
- *  per-frame cost. */
-export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandmark[] | null, params: EditParams, reshapeGrid = 1): HTMLCanvasElement {
+ *  (face/eyes/nose/mouth) -> filter. Reshape is a GPU triangulated-mesh
+ *  warp (see meshWarp.ts) — unlike the CPU per-pixel approach it replaced,
+ *  it doesn't need a precision/cost tradeoff between static photos and
+ *  live video, so there's no grid-step parameter to thread through here
+ *  the way the old MLS version needed. */
+export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandmark[] | null, params: EditParams): HTMLCanvasElement {
   const preset: FilterPreset = FILTER_PRESETS.find((p) => p.id === params.filterId) ?? FILTER_PRESETS[0]
   if (!landmarks) return applyFilter(base, preset)
 
@@ -25,6 +26,6 @@ export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandm
   const ovalLoop = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_FACE_OVAL)
   const smoothBounds = loopBoundsPx(ovalLoop, landmarks, base.width, base.height, Math.max(20, base.width * 0.05))
   const smoothed = smoothSkin(base, mask, params.smoothness, smoothBounds)
-  const reshaped = applyReshape(smoothed, landmarks, params, reshapeGrid)
+  const reshaped = applyReshape(smoothed, landmarks, params)
   return applyFilter(reshaped, preset)
 }
