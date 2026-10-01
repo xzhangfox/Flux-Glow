@@ -4,6 +4,7 @@ import { detectFaceLandmarks, detectFaceLandmarksForVideo } from '../lib/faceLan
 import { processFrame, type EditParams } from '../lib/pipeline'
 import { FILTER_PRESETS } from '../lib/filters'
 import Slider from './Slider'
+import ParamToolbar, { type ParamDef } from './ParamToolbar'
 
 // Downscale before processing — phone photos run 3000px+ on a side, far
 // more detail than this editor displays or than frequency separation
@@ -37,18 +38,6 @@ function drawDownscaled(source: HTMLImageElement | HTMLVideoElement, maxDim: num
   canvas.height = Math.round(h * scale)
   canvas.getContext('2d')!.drawImage(source, 0, 0, canvas.width, canvas.height)
   return canvas
-}
-
-function SectionCard({ icon, title, children }: { icon: string; title: string; children: React.ReactNode }) {
-  return (
-    <div className="bg-surface rounded-2xl p-5 border border-white/10">
-      <div className="flex items-center gap-2 mb-4">
-        <span className="material-symbols-outlined text-primary text-xl">{icon}</span>
-        <h3 className="text-sm font-semibold text-white/90">{title}</h3>
-      </div>
-      {children}
-    </div>
-  )
 }
 
 export default function Editor({ source, onReset }: { source: Source; onReset: () => void }) {
@@ -191,6 +180,45 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
     startLive()
   }
 
+  const disabled = status === 'no-face'
+  const params: ParamDef[] = [
+    {
+      id: 'skin',
+      icon: 'blur_on',
+      label: 'Smooth',
+      isActive: smoothness > 0.01,
+      render: () => <Slider label="Smooth & Clear" value={smoothness} onChange={setSmoothness} disabled={disabled} />,
+    },
+    {
+      id: 'contour',
+      icon: 'face',
+      label: 'Contour',
+      isActive: contour > 0.01,
+      render: () => <Slider label="Slim" value={contour} onChange={setContour} disabled={disabled} />,
+    },
+    {
+      id: 'filter',
+      icon: 'palette',
+      label: 'Filter',
+      isActive: filterId !== 'none',
+      render: () => (
+        <div className="grid grid-cols-3 gap-2">
+          {FILTER_PRESETS.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => setFilterId(p.id)}
+              className={`py-2 rounded-lg text-xs font-medium transition border ${
+                filterId === p.id ? 'bg-primary text-black border-primary' : 'bg-secondary text-white/70 border-transparent hover:bg-white/10'
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      ),
+    },
+  ]
+
   const handleDownload = () => {
     const canvas = resultRef.current ?? baseRef.current
     if (!canvas) return
@@ -210,122 +238,92 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   }
 
   return (
-    <div className="flex flex-col lg:flex-row gap-6 w-full max-w-4xl">
-      <div className="flex-1 flex flex-col items-center gap-3">
-        <div className="relative w-full max-w-md rounded-3xl overflow-hidden bg-surface border border-white/10 shadow-glow">
-          <canvas ref={displayRef} className="w-full h-auto block" />
-          <video ref={videoRef} autoPlay playsInline muted className="hidden" />
+    <div className="flex flex-col items-center gap-4 w-full max-w-md">
+      <div className="relative w-full rounded-3xl overflow-hidden bg-surface border border-white/10 shadow-glow">
+        <canvas ref={displayRef} className="w-full h-auto block" />
+        <video ref={videoRef} autoPlay playsInline muted className="hidden" />
 
-          {status === 'loading' && (
-            <div className="absolute inset-0 flex items-center justify-center bg-black/60">
-              <span className="material-symbols-outlined animate-spin text-primary text-3xl">progress_activity</span>
-            </div>
-          )}
-
-          {liveActive && status !== 'loading' && (
-            <div className="absolute top-3 left-3 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 backdrop-blur-sm border border-white/10">
-              <span className="w-1.5 h-1.5 rounded-full bg-danger animate-pulse" />
-              <span className="text-[10px] font-semibold tracking-wide text-white/90">LIVE</span>
-            </div>
-          )}
-
-          <button
-            onMouseDown={() => setShowBefore(true)}
-            onMouseUp={() => setShowBefore(false)}
-            onMouseLeave={() => setShowBefore(false)}
-            onTouchStart={() => setShowBefore(true)}
-            onTouchEnd={() => setShowBefore(false)}
-            disabled={status === 'loading'}
-            className="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg bg-black/60 text-white text-xs font-medium backdrop-blur-sm border border-white/10 select-none flex items-center gap-1"
-          >
-            <span className="material-symbols-outlined text-sm">compare</span>
-            Hold for Before
-          </button>
-
-          {liveActive && status === 'ready' && (
-            <button
-              onClick={handleCapture}
-              className="absolute bottom-3 left-1/2 -translate-x-1/2 w-14 h-14 rounded-full bg-primary border-4 border-white/80 shadow-glow-strong flex items-center justify-center hover:brightness-110 transition"
-              aria-label="Capture"
-            >
-              <span className="material-symbols-outlined text-black text-2xl">photo_camera</span>
-            </button>
-          )}
-        </div>
-        {status === 'no-face' && (
-          <p className="text-text-secondary text-xs text-center max-w-md flex items-center gap-1.5">
-            <span className="material-symbols-outlined text-sm">info</span>
-            No face detected — skin and contour need a visible face, filters still work.
-          </p>
+        {status === 'loading' && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/60">
+            <span className="material-symbols-outlined animate-spin text-primary text-3xl">progress_activity</span>
+          </div>
         )}
-        {status === 'error' && (
-          <p className="text-danger text-xs flex items-center gap-1.5">
-            <span className="material-symbols-outlined text-sm">error</span>
-            {source.kind === 'live' ? "Couldn't access the camera — check your browser permissions." : "Couldn't load that photo."}
-          </p>
+
+        {liveActive && status !== 'loading' && (
+          <div className="absolute top-3 left-3 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 backdrop-blur-sm border border-white/10">
+            <span className="w-1.5 h-1.5 rounded-full bg-danger animate-pulse" />
+            <span className="text-[10px] font-semibold tracking-wide text-white/90">LIVE</span>
+          </div>
+        )}
+
+        <button
+          onMouseDown={() => setShowBefore(true)}
+          onMouseUp={() => setShowBefore(false)}
+          onMouseLeave={() => setShowBefore(false)}
+          onTouchStart={() => setShowBefore(true)}
+          onTouchEnd={() => setShowBefore(false)}
+          disabled={status === 'loading'}
+          className="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg bg-black/60 text-white text-xs font-medium backdrop-blur-sm border border-white/10 select-none flex items-center gap-1"
+        >
+          <span className="material-symbols-outlined text-sm">compare</span>
+          Hold for Before
+        </button>
+
+        {liveActive && status === 'ready' && (
+          <button
+            onClick={handleCapture}
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 w-14 h-14 rounded-full bg-primary border-4 border-white/80 shadow-glow-strong flex items-center justify-center hover:brightness-110 transition"
+            aria-label="Capture"
+          >
+            <span className="material-symbols-outlined text-black text-2xl">photo_camera</span>
+          </button>
         )}
       </div>
+      {status === 'no-face' && (
+        <p className="text-text-secondary text-xs text-center max-w-md flex items-center gap-1.5">
+          <span className="material-symbols-outlined text-sm">info</span>
+          No face detected — skin and contour need a visible face, filters still work.
+        </p>
+      )}
+      {status === 'error' && (
+        <p className="text-danger text-xs flex items-center gap-1.5">
+          <span className="material-symbols-outlined text-sm">error</span>
+          {source.kind === 'live' ? "Couldn't access the camera — check your browser permissions." : "Couldn't load that photo."}
+        </p>
+      )}
 
-      <div className="w-full lg:w-72 flex flex-col gap-5">
-        <SectionCard icon="blur_on" title="Skin">
-          <Slider label="Smooth & Clear" value={smoothness} onChange={setSmoothness} disabled={status === 'no-face'} />
-        </SectionCard>
+      <ParamToolbar params={params} />
 
-        <SectionCard icon="face" title="Contour">
-          <Slider label="Slim" value={contour} onChange={setContour} disabled={status === 'no-face'} />
-        </SectionCard>
-
-        <SectionCard icon="palette" title="Filter">
-          <div className="grid grid-cols-3 gap-2">
-            {FILTER_PRESETS.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => setFilterId(p.id)}
-                className={`py-2 rounded-lg text-xs font-medium transition border ${
-                  filterId === p.id ? 'bg-primary text-black border-primary' : 'bg-secondary text-white/70 border-transparent hover:bg-white/10'
-                }`}
-              >
-                {p.label}
-              </button>
-            ))}
-          </div>
-        </SectionCard>
-
-        <div className="flex gap-3 mt-auto">
-          {liveActive ? (
+      <div className="flex gap-3 w-full">
+        {liveActive ? (
+          <button
+            onClick={onReset}
+            className="flex-1 py-3 bg-secondary text-white rounded-xl hover:bg-white/10 transition flex items-center justify-center gap-1.5"
+          >
+            <span className="material-symbols-outlined text-lg">close</span>
+            Exit Live
+          </button>
+        ) : (
+          <>
             <button
-              onClick={onReset}
-              className="flex-1 py-3 bg-secondary text-white rounded-xl hover:bg-white/10 transition flex items-center justify-center gap-1.5"
+              onClick={handleDownload}
+              disabled={status === 'loading'}
+              className="flex-1 py-3 bg-primary text-black font-semibold rounded-xl hover:brightness-110 transition shadow-glow disabled:opacity-40 flex items-center justify-center gap-1.5"
             >
-              <span className="material-symbols-outlined text-lg">close</span>
-              Exit Live
+              <span className="material-symbols-outlined text-lg">download</span>
+              Download
             </button>
-          ) : (
-            <>
-              <button
-                onClick={handleDownload}
-                disabled={status === 'loading'}
-                className="flex-1 py-3 bg-primary text-black font-semibold rounded-xl hover:brightness-110 transition shadow-glow disabled:opacity-40 flex items-center justify-center gap-1.5"
-              >
-                <span className="material-symbols-outlined text-lg">download</span>
-                Download
+            {source.kind === 'live' ? (
+              <button onClick={handleRetake} className="px-4 py-3 bg-secondary text-white rounded-xl hover:bg-white/10 transition" aria-label="Retake">
+                <span className="material-symbols-outlined text-lg">replay</span>
               </button>
-              {source.kind === 'live' ? (
-                <button
-                  onClick={handleRetake}
-                  className="px-4 py-3 bg-secondary text-white rounded-xl hover:bg-white/10 transition"
-                  aria-label="Retake"
-                >
-                  <span className="material-symbols-outlined text-lg">replay</span>
-                </button>
-              ) : (
-                <button onClick={onReset} className="px-4 py-3 bg-secondary text-white rounded-xl hover:bg-white/10 transition" aria-label="New photo">
-                  <span className="material-symbols-outlined text-lg">refresh</span>
-                </button>
-              )}
-            </>
-          )}
-        </div>
+            ) : (
+              <button onClick={onReset} className="px-4 py-3 bg-secondary text-white rounded-xl hover:bg-white/10 transition" aria-label="New photo">
+                <span className="material-symbols-outlined text-lg">refresh</span>
+              </button>
+            )}
+          </>
+        )}
       </div>
     </div>
   )
