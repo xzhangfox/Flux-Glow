@@ -17,6 +17,8 @@ import {
   IconShare,
   IconRefresh,
   IconFaceOutline,
+  IconPalette,
+  IconFlipCamera,
 } from './icons'
 
 // Downscale before processing — phone photos run 3000px+ on a side, far
@@ -42,16 +44,28 @@ function loadImage(file: File): Promise<HTMLImageElement> {
   })
 }
 
-function drawDownscaled(source: HTMLImageElement | HTMLVideoElement, maxDim: number): HTMLCanvasElement {
+// `zoom` crops a centered region of the source before scaling it up to
+// fill the canvas — a digital stand-in for a focal-length switcher, since
+// getUserMedia doesn't expose a phone's separate physical lenses.
+function drawDownscaled(source: HTMLImageElement | HTMLVideoElement, maxDim: number, zoom = 1): HTMLCanvasElement {
   const w = source instanceof HTMLVideoElement ? source.videoWidth : source.width
   const h = source instanceof HTMLVideoElement ? source.videoHeight : source.height
   const scale = Math.min(1, maxDim / Math.max(w, h))
   const canvas = document.createElement('canvas')
   canvas.width = Math.round(w * scale)
   canvas.height = Math.round(h * scale)
-  canvas.getContext('2d')!.drawImage(source, 0, 0, canvas.width, canvas.height)
+  const ctx = canvas.getContext('2d')!
+  if (zoom > 1) {
+    const cropW = w / zoom
+    const cropH = h / zoom
+    ctx.drawImage(source, (w - cropW) / 2, (h - cropH) / 2, cropW, cropH, 0, 0, canvas.width, canvas.height)
+  } else {
+    ctx.drawImage(source, 0, 0, canvas.width, canvas.height)
+  }
   return canvas
 }
+
+const ZOOM_LEVELS = [1, 2]
 
 // A round icon-over-label button for the bottom chrome's side clusters —
 // Retouch, Retake, Save, Share.
@@ -90,7 +104,9 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   const [showBefore, setShowBefore] = useState(false)
   const [liveActive, setLiveActive] = useState(source.kind === 'live')
   const [confirmed, setConfirmed] = useState(false)
-  const [retouchOpen, setRetouchOpen] = useState(false)
+  const [openPanel, setOpenPanel] = useState<'retouch' | 'filter' | null>(null)
+  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user')
+  const [zoom, setZoom] = useState(1)
 
   const displayRef = useRef<HTMLCanvasElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -102,8 +118,11 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   const lastProcessRef = useRef(0)
   const liveActiveRef = useRef(liveActive)
   const paramsRef = useRef<EditParams>({ smoothness, contour, filterId })
-  const retouchPanelRef = useRef<HTMLDivElement>(null)
+  const facingModeRef = useRef(facingMode)
+  const zoomRef = useRef(zoom)
+  const panelRef = useRef<HTMLDivElement>(null)
   const retouchButtonRef = useRef<HTMLButtonElement>(null)
+  const filterButtonRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     paramsRef.current = { smoothness, contour, filterId }
@@ -111,15 +130,20 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   useEffect(() => {
     liveActiveRef.current = liveActive
   }, [liveActive])
+  useEffect(() => {
+    zoomRef.current = zoom
+  }, [zoom])
 
-  // Tapping anywhere outside the retouch panel (or its own toggle button,
-  // which handles itself) collapses it — same pattern as a tap-away menu.
+  // Tapping anywhere outside the open panel (or the Retouch/Filter buttons
+  // that toggle it, which handle themselves) collapses it — same pattern
+  // as a tap-away menu.
   useEffect(() => {
     function onClick(e: MouseEvent) {
       const target = e.target as Node
-      if (retouchPanelRef.current?.contains(target)) return
+      if (panelRef.current?.contains(target)) return
       if (retouchButtonRef.current?.contains(target)) return
-      setRetouchOpen(false)
+      if (filterButtonRef.current?.contains(target)) return
+      setOpenPanel(null)
     }
     document.addEventListener('click', onClick)
     return () => document.removeEventListener('click', onClick)
@@ -151,7 +175,9 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   const startLive = useCallback(async () => {
     setStatus('loading')
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 480 } } })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facingModeRef.current, width: { ideal: 480 } },
+      })
       streamRef.current = stream
       const video = videoRef.current!
       video.srcObject = stream
@@ -166,7 +192,7 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
         if (now - lastProcessRef.current < LIVE_FRAME_INTERVAL_MS) return
         lastProcessRef.current = now
         if (video.readyState < 2) return
-        const base = drawDownscaled(video, LIVE_MAX_DIMENSION)
+        const base = drawDownscaled(video, LIVE_MAX_DIMENSION, zoomRef.current)
         baseRef.current = base
         detectFaceLandmarksForVideo(video, now).then((landmarks) => {
           landmarksRef.current = landmarks
@@ -245,13 +271,28 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
 
   const handleRetake = () => {
     setConfirmed(false)
-    setRetouchOpen(false)
+    setOpenPanel(null)
     startLive()
   }
 
   const handleConfirm = () => {
     setConfirmed(true)
-    setRetouchOpen(false)
+    setOpenPanel(null)
+  }
+
+  const handleFlipCamera = () => {
+    const next = facingMode === 'user' ? 'environment' : 'user'
+    facingModeRef.current = next
+    setFacingMode(next)
+    stopLive()
+    startLive()
+  }
+
+  const handleToggleZoom = () => {
+    const i = ZOOM_LEVELS.indexOf(zoom)
+    const next = ZOOM_LEVELS[(i + 1) % ZOOM_LEVELS.length]
+    zoomRef.current = next
+    setZoom(next)
   }
 
   const disabled = status === 'no-face'
@@ -344,21 +385,43 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
         >
           <IconClose className="w-5 h-5" />
         </button>
-        <button
-          onMouseDown={() => setShowBefore(true)}
-          onMouseUp={() => setShowBefore(false)}
-          onMouseLeave={() => setShowBefore(false)}
-          onTouchStart={() => setShowBefore(true)}
-          onTouchEnd={() => setShowBefore(false)}
-          disabled={status === 'loading'}
-          aria-label="Hold to compare with the original"
-          className={`w-10 h-10 rounded-full backdrop-blur-sm flex items-center justify-center transition ${
-            showBefore ? 'bg-primary text-black' : 'bg-black/40 text-white'
-          }`}
-        >
-          <IconEye className="w-5 h-5" />
-        </button>
+        <div className="flex items-center gap-2.5">
+          {liveActive && (
+            <button
+              onClick={handleFlipCamera}
+              disabled={status === 'loading'}
+              aria-label="Flip camera"
+              className="w-10 h-10 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center text-white disabled:opacity-40"
+            >
+              <IconFlipCamera className="w-5 h-5" />
+            </button>
+          )}
+          <button
+            onMouseDown={() => setShowBefore(true)}
+            onMouseUp={() => setShowBefore(false)}
+            onMouseLeave={() => setShowBefore(false)}
+            onTouchStart={() => setShowBefore(true)}
+            onTouchEnd={() => setShowBefore(false)}
+            disabled={status === 'loading'}
+            aria-label="Hold to compare with the original"
+            className={`w-10 h-10 rounded-full backdrop-blur-sm flex items-center justify-center transition ${
+              showBefore ? 'bg-primary text-black' : 'bg-black/40 text-white'
+            }`}
+          >
+            <IconEye className="w-5 h-5" />
+          </button>
+        </div>
       </div>
+
+      {liveActive && status !== 'loading' && (
+        <button
+          onClick={handleToggleZoom}
+          aria-label="Zoom level"
+          className="absolute left-1/2 -translate-x-1/2 bottom-44 w-9 h-9 rounded-full bg-black/50 backdrop-blur-sm border border-white/20 text-white text-[11px] font-semibold flex items-center justify-center"
+        >
+          {zoom}×
+        </button>
+      )}
 
       {liveActive && status !== 'loading' && (
         <div
@@ -390,43 +453,67 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
         )}
 
         <div
-          ref={retouchPanelRef}
-          className={`grid transition-all duration-250 ease-out ${retouchOpen ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}
+          ref={panelRef}
+          className={`grid transition-all duration-250 ease-out ${openPanel ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}
           style={{ transitionProperty: 'grid-template-rows, opacity' }}
         >
           <div className="overflow-hidden">
-            <div className="bg-black/70 backdrop-blur-md rounded-2xl p-4 border border-white/10 space-y-4">
-              <Slider label="Smooth & Clear" value={smoothness} onChange={setSmoothness} disabled={disabled} />
-              <Slider label="Slim" value={contour} onChange={setContour} disabled={disabled} />
+            <div className="bg-black/70 backdrop-blur-md rounded-2xl p-4 border border-white/10">
+              {openPanel === 'retouch' ? (
+                <div className="space-y-4">
+                  <Slider label="Smooth & Clear" value={smoothness} onChange={setSmoothness} disabled={disabled} />
+                  <Slider label="Slim" value={contour} onChange={setContour} disabled={disabled} />
+                </div>
+              ) : (
+                <div className="grid grid-cols-3 gap-2">
+                  {FILTER_PRESETS.map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => setFilterId(p.id)}
+                      className={`py-2 rounded-lg text-xs font-medium transition border ${
+                        filterId === p.id ? 'bg-primary text-black border-primary' : 'bg-secondary text-white/70 border-transparent hover:bg-white/10'
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>
 
-        <div className="flex gap-2 overflow-x-auto no-scrollbar">
-          {FILTER_PRESETS.map((p) => (
-            <button
-              key={p.id}
-              onClick={() => setFilterId(p.id)}
-              className={`flex-shrink-0 px-3.5 py-1.5 rounded-full text-xs font-medium border transition ${
-                filterId === p.id ? 'bg-primary text-black border-primary' : 'bg-black/40 text-white/80 border-white/15 backdrop-blur-sm'
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
-
         <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-2 pt-1">
           <div className="flex items-center gap-3 justify-self-start">
-            <button ref={retouchButtonRef} onClick={() => setRetouchOpen((v) => !v)} aria-label="Retouch" className="flex flex-col items-center gap-1 w-14 text-white/85">
+            <button
+              ref={retouchButtonRef}
+              onClick={() => setOpenPanel((v) => (v === 'retouch' ? null : 'retouch'))}
+              aria-label="Retouch"
+              className="flex flex-col items-center gap-1 w-14 text-white/85"
+            >
               <span
                 className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
-                  retouchOpen ? 'bg-primary text-black border-primary' : 'bg-black/40 border-white/15'
+                  openPanel === 'retouch' ? 'bg-primary text-black border-primary' : 'bg-black/40 border-white/15'
                 }`}
               >
                 <IconFaceOutline className="w-5 h-5" />
               </span>
               <span className="text-[10px] font-medium leading-none">Retouch</span>
+            </button>
+            <button
+              ref={filterButtonRef}
+              onClick={() => setOpenPanel((v) => (v === 'filter' ? null : 'filter'))}
+              aria-label="Filter"
+              className="flex flex-col items-center gap-1 w-14 text-white/85"
+            >
+              <span
+                className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
+                  openPanel === 'filter' ? 'bg-primary text-black border-primary' : 'bg-black/40 border-white/15'
+                }`}
+              >
+                <IconPalette className="w-5 h-5" />
+              </span>
+              <span className="text-[10px] font-medium leading-none">Filter</span>
             </button>
             {source.kind === 'live' && !liveActive && <ChromeButton icon={IconRefresh} label="Retake" onClick={handleRetake} />}
           </div>

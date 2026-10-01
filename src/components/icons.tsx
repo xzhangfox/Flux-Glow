@@ -181,6 +181,17 @@ export function IconEye(props: IconProps) {
   )
 }
 
+export function IconFlipCamera(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M17 8H9.5a4.5 4.5 0 0 0-4.3 3.2" />
+      <path d="M14.5 5.5L17 8l-2.5 2.5" />
+      <path d="M7 16h7.5a4.5 4.5 0 0 0 4.3-3.2" />
+      <path d="M9.5 18.5L7 16l2.5-2.5" />
+    </svg>
+  )
+}
+
 export function IconSpinner(props: IconProps) {
   return (
     <svg {...base} viewBox="0 0 24 24" fill="none" {...props}>
