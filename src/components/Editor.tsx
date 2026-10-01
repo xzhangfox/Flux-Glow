@@ -68,6 +68,24 @@ function loadImage(file: File): Promise<HTMLImageElement> {
 // image (text backwards, etc.) unless something corrects it, and nothing
 // upstream does — so the live preview, capture, and anything saved from it
 // all need this to show a true (non-mirrored) orientation.
+// MediaPipe detects landmarks on the raw `video` element directly — never
+// on `base`, so its normalized coordinates are relative to the
+// *unmirrored* frame regardless of what drawDownscaled did. Every reshape
+// pass (and the skin mask, and the smoothing bounds) turns those
+// coordinates straight into pixel positions on `base`, so when `base` was
+// mirrored and the landmarks weren't, every single one of them pointed at
+// its mirror-reflected x position instead of the real feature — an eye
+// warp centered on whatever half-eyebrow/half-nose-bridge pixel happened
+// to sit at that reflected spot instead of the eye, which is exactly the
+// "horror movie" look a real face (close to but not perfectly symmetric)
+// produces. The crop in drawDownscaled is always centered, so a plain
+// horizontal flip of normalized x commutes with it — no extra correction
+// needed for zoom.
+function mirrorLandmarks(landmarks: NormalizedLandmark[] | null): NormalizedLandmark[] | null {
+  if (!landmarks) return landmarks
+  return landmarks.map((p) => ({ ...p, x: 1 - p.x }))
+}
+
 function drawDownscaled(source: HTMLImageElement | HTMLVideoElement, maxDim: number, zoom = 1, mirror = false): HTMLCanvasElement {
   const w = source instanceof HTMLVideoElement ? source.videoWidth : source.width
   const h = source instanceof HTMLVideoElement ? source.videoHeight : source.height
@@ -361,7 +379,8 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
         const base = drawDownscaled(video, LIVE_MAX_DIMENSION, cropZoom, facingModeRef.current === 'user')
         baseRef.current = base
         detectFaceLandmarksForVideo(video, now)
-          .then((landmarks) => {
+          .then((rawLandmarks) => {
+            const landmarks = facingModeRef.current === 'user' ? mirrorLandmarks(rawLandmarks) : rawLandmarks
             landmarksRef.current = landmarks
             setStatus(landmarks ? 'ready' : 'no-face')
             resultRef.current = processFrame(base, landmarks, paramsRef.current, LIVE_RESHAPE_GRID)
