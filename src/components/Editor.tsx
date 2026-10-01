@@ -28,8 +28,8 @@ const MAX_DIMENSION = 1600
 // Live mode works at a much smaller size: the per-pixel smoothing/contour
 // passes are plain JS, not GPU shaders, so this is what keeps the preview
 // loop actually feeling live rather than stuttering.
-const LIVE_MAX_DIMENSION = 480
-const LIVE_FRAME_INTERVAL_MS = 90 // ~11fps cap on the heavy processing
+const LIVE_MAX_DIMENSION = 360
+const LIVE_FRAME_INTERVAL_MS = 60 // floor on tick spacing — actual pace is also gated by processingRef below
 
 export type Source = { kind: 'image'; file: File } | { kind: 'live' }
 
@@ -46,8 +46,12 @@ function loadImage(file: File): Promise<HTMLImageElement> {
 
 // `zoom` crops a centered region of the source before scaling it up to
 // fill the canvas — a digital stand-in for a focal-length switcher, since
-// getUserMedia doesn't expose a phone's separate physical lenses.
-function drawDownscaled(source: HTMLImageElement | HTMLVideoElement, maxDim: number, zoom = 1): HTMLCanvasElement {
+// getUserMedia doesn't expose a phone's separate physical lenses. `mirror`
+// flips horizontally: the front camera's raw stream reads as a mirror
+// image (text backwards, etc.) unless something corrects it, and nothing
+// upstream does — so the live preview, capture, and anything saved from it
+// all need this to show a true (non-mirrored) orientation.
+function drawDownscaled(source: HTMLImageElement | HTMLVideoElement, maxDim: number, zoom = 1, mirror = false): HTMLCanvasElement {
   const w = source instanceof HTMLVideoElement ? source.videoWidth : source.width
   const h = source instanceof HTMLVideoElement ? source.videoHeight : source.height
   const scale = Math.min(1, maxDim / Math.max(w, h))
@@ -55,6 +59,10 @@ function drawDownscaled(source: HTMLImageElement | HTMLVideoElement, maxDim: num
   canvas.width = Math.round(w * scale)
   canvas.height = Math.round(h * scale)
   const ctx = canvas.getContext('2d')!
+  if (mirror) {
+    ctx.translate(canvas.width, 0)
+    ctx.scale(-1, 1)
+  }
   if (zoom > 1) {
     const cropW = w / zoom
     const cropH = h / zoom
@@ -119,6 +127,7 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   const resultRef = useRef<HTMLCanvasElement | null>(null)
   const rafRef = useRef(0)
   const lastProcessRef = useRef(0)
+  const processingRef = useRef(false)
   const liveActiveRef = useRef(liveActive)
   const paramsRef = useRef<EditParams>({ smoothness, face, eyes, nose, mouth, filterId })
   const facingModeRef = useRef(facingMode)
@@ -173,6 +182,10 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
     cancelAnimationFrame(rafRef.current)
     streamRef.current?.getTracks().forEach((t) => t.stop())
     streamRef.current = null
+    // In case a detect+process cycle was still in flight (e.g. stopped
+    // mid-capture) — don't leave a future startLive() permanently stuck
+    // behind a guard that'll never clear on its own.
+    processingRef.current = false
   }, [])
 
   const startLive = useCallback(async () => {
@@ -191,18 +204,32 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
       const loop = () => {
         rafRef.current = requestAnimationFrame(loop)
         if (!liveActiveRef.current) return
+        // Without this guard, a frame that takes longer than the interval
+        // to process (landmark detection + skin mask + frequency-separation
+        // smoothing + reshape warps is real work, easily >60ms) doesn't
+        // skip a beat — the next rAF tick only checks elapsed time, so it
+        // fires another overlapping detect+process cycle anyway. Those pile
+        // up faster than they resolve, and the preview falls further and
+        // further behind "live" the longer it runs. Only ever start a new
+        // cycle once the previous one has actually finished.
+        if (processingRef.current) return
         const now = performance.now()
         if (now - lastProcessRef.current < LIVE_FRAME_INTERVAL_MS) return
         lastProcessRef.current = now
         if (video.readyState < 2) return
-        const base = drawDownscaled(video, LIVE_MAX_DIMENSION, zoomRef.current)
+        processingRef.current = true
+        const base = drawDownscaled(video, LIVE_MAX_DIMENSION, zoomRef.current, facingModeRef.current === 'user')
         baseRef.current = base
-        detectFaceLandmarksForVideo(video, now).then((landmarks) => {
-          landmarksRef.current = landmarks
-          setStatus(landmarks ? 'ready' : 'no-face')
-          resultRef.current = processFrame(base, landmarks, paramsRef.current)
-          render()
-        })
+        detectFaceLandmarksForVideo(video, now)
+          .then((landmarks) => {
+            landmarksRef.current = landmarks
+            setStatus(landmarks ? 'ready' : 'no-face')
+            resultRef.current = processFrame(base, landmarks, paramsRef.current)
+            render()
+          })
+          .finally(() => {
+            processingRef.current = false
+          })
       }
       loop()
     } catch {
