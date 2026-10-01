@@ -4,7 +4,18 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>Flux Glow</title>
+
+    <!-- PWA / "Add to Home Screen" — see flux-ambient-ui-system and
+         ios-pwa-icon-design skills. apple-touch-icon and the manifest
+         icons must be PNG: iOS Safari doesn't reliably render an SVG
+         apple-touch-icon and silently falls back to an auto-generated
+         screenshot thumbnail instead of the real icon if given one. -->
+    <link rel="manifest" href="/manifest.json" />
     <meta name="theme-color" content="#000000" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Flux Glow" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 
     <!-- Fonts — same as the rest of the Flux family -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
