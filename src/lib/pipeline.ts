@@ -1,8 +1,9 @@
-import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
+import { FaceLandmarker, type NormalizedLandmark } from '@mediapipe/tasks-vision'
 import { buildSkinMask } from './skinMask'
 import { smoothSkin } from './smoothing'
 import { applyReshape, type ReshapeParams } from './reshape'
 import { applyFilter, FILTER_PRESETS, type FilterPreset } from './filters'
+import { connectorsToLoop, loopBoundsPx } from './landmarks'
 
 export interface EditParams extends ReshapeParams {
   smoothness: number
@@ -21,7 +22,9 @@ export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandm
   if (!landmarks) return applyFilter(base, preset)
 
   const mask = buildSkinMask(landmarks, base.width, base.height)
-  const smoothed = smoothSkin(base, mask, params.smoothness)
+  const ovalLoop = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_FACE_OVAL)
+  const smoothBounds = loopBoundsPx(ovalLoop, landmarks, base.width, base.height, Math.max(20, base.width * 0.05))
+  const smoothed = smoothSkin(base, mask, params.smoothness, smoothBounds)
   const reshaped = applyReshape(smoothed, landmarks, params, reshapeGrid)
   return applyFilter(reshaped, preset)
 }

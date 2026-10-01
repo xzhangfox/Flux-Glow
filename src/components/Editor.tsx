@@ -25,10 +25,13 @@ import {
 // more detail than this editor displays or than frequency separation
 // needs; working at this size keeps every slider drag responsive.
 const MAX_DIMENSION = 1600
-// Live mode works at a much smaller size: the per-pixel smoothing/contour
-// passes are plain JS, not GPU shaders, so this is what keeps the preview
-// loop actually feeling live rather than stuttering.
-const LIVE_MAX_DIMENSION = 360
+// Live mode works at a smaller size than a captured photo: the per-pixel
+// smoothing/reshape passes are plain JS, not GPU shaders. 480 (not lower)
+// because anything smaller visibly blurs once it's upscaled via CSS to
+// fill the screen — `smoothSkin`'s own bounding-box optimization (only
+// the face region, not the full frame, actually gets touched) is most of
+// what makes this resolution affordable per frame.
+const LIVE_MAX_DIMENSION = 480
 const LIVE_FRAME_INTERVAL_MS = 60 // floor on tick spacing — actual pace is also gated by processingRef below
 // The MLS face/eyes/mouth warp is a real per-pixel optimization over every
 // control point — too slow to run at full precision every live frame. This
@@ -199,7 +202,7 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
     setStatus('loading')
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facingModeRef.current, width: { ideal: 480 } },
+        video: { facingMode: facingModeRef.current, width: { ideal: 640 } },
       })
       streamRef.current = stream
       const video = videoRef.current!

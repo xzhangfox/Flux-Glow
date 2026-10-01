@@ -18,21 +18,41 @@ function blurredCopy(source: HTMLCanvasElement, radiusPx: number): HTMLCanvasEle
  * tone underneath it gets smoothed, which doubles as blemish reduction
  * without a separate spot-removal tool.
  */
-export function smoothSkin(source: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number): HTMLCanvasElement {
+/**
+ * `bounds`, when given, is the face's own bounding box (padded well past
+ * the mask's blur radius) — background, hair, and everything else outside
+ * it is mask-value zero anyway, i.e. a guaranteed no-op in the blend
+ * formula below, so skipping it entirely (both the expensive
+ * getImageData/putImageData calls and the per-pixel loop) changes nothing
+ * about the result and is often a large chunk of the frame to not pay for.
+ */
+export function smoothSkin(source: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: { minX: number; minY: number; maxX: number; maxY: number }): HTMLCanvasElement {
   const w = source.width
   const h = source.height
   const sctx = source.getContext('2d')!
   const mctx = mask.getContext('2d')!
 
+  const result = document.createElement('canvas')
+  result.width = w
+  result.height = h
+  const rctx = result.getContext('2d')!
+  rctx.drawImage(source, 0, 0)
+
+  const bx = bounds ? Math.max(0, Math.floor(bounds.minX)) : 0
+  const by = bounds ? Math.max(0, Math.floor(bounds.minY)) : 0
+  const bw = (bounds ? Math.min(w, Math.ceil(bounds.maxX)) : w) - bx
+  const bh = (bounds ? Math.min(h, Math.ceil(bounds.maxY)) : h) - by
+  if (bw <= 0 || bh <= 0) return result
+
   const low = blurredCopy(source, 5)
   const smoothedLow = blurredCopy(low, 7 + intensity * 10)
 
-  const origData = sctx.getImageData(0, 0, w, h)
-  const lowData = low.getContext('2d')!.getImageData(0, 0, w, h)
-  const smoothedLowData = smoothedLow.getContext('2d')!.getImageData(0, 0, w, h)
-  const maskData = mctx.getImageData(0, 0, w, h)
+  const origData = sctx.getImageData(bx, by, bw, bh)
+  const lowData = low.getContext('2d')!.getImageData(bx, by, bw, bh)
+  const smoothedLowData = smoothedLow.getContext('2d')!.getImageData(bx, by, bw, bh)
+  const maskData = mctx.getImageData(bx, by, bw, bh)
 
-  const out = new ImageData(w, h)
+  const out = new ImageData(bw, bh)
   const orig = origData.data
   const lowArr = lowData.data
   const smoothArr = smoothedLowData.data
@@ -49,9 +69,6 @@ export function smoothSkin(source: HTMLCanvasElement, mask: HTMLCanvasElement, i
     outArr[i + 3] = orig[i + 3]
   }
 
-  const result = document.createElement('canvas')
-  result.width = w
-  result.height = h
-  result.getContext('2d')!.putImageData(out, 0, 0)
+  rctx.putImageData(out, bx, by)
   return result
 }

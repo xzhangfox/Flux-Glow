@@ -51,3 +51,33 @@ export function dist(a: Px, b: Px): number {
 export function lerp(a: Px, b: Px, t: number): Px {
   return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
 }
+
+export interface Bounds {
+  minX: number
+  minY: number
+  maxX: number
+  maxY: number
+}
+
+/** Bounding box of a loop's points, padded and clamped to the canvas —
+ *  lets per-pixel passes skip the (often majority) of the frame outside
+ *  the face entirely instead of processing every pixel unconditionally. */
+export function loopBoundsPx(loop: number[], landmarks: NormalizedLandmark[], w: number, h: number, pad: number): Bounds {
+  const pts = loopToPx(loop, landmarks, w, h)
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const p of pts) {
+    if (p.x < minX) minX = p.x
+    if (p.y < minY) minY = p.y
+    if (p.x > maxX) maxX = p.x
+    if (p.y > maxY) maxY = p.y
+  }
+  return {
+    minX: Math.max(0, Math.floor(minX - pad)),
+    minY: Math.max(0, Math.floor(minY - pad)),
+    maxX: Math.min(w, Math.ceil(maxX + pad)),
+    maxY: Math.min(h, Math.ceil(maxY + pad)),
+  }
+}
