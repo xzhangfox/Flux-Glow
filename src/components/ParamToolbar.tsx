@@ -11,13 +11,30 @@ export interface ParamDef {
   render: () => ReactNode
 }
 
+export interface ActionDef {
+  id: string
+  icon: ComponentType<SVGProps<SVGSVGElement>>
+  label: string
+  onClick: () => void
+  /** 'primary' gets the gold fill (the one emphasized action — Confirm,
+   *  or Download once confirmed); everything else is the plain outline. */
+  variant?: 'primary' | 'secondary'
+  disabled?: boolean
+}
+
+const paramButtonClass =
+  'relative flex-shrink-0 flex flex-col items-center gap-1 px-4 py-2.5 rounded-xl transition-colors border'
+
 /**
  * A bottom icon toolbar, horizontally scrollable once there are more
  * icons than fit: tapping one opens a small panel above the bar (a
  * slider, a filter grid, whatever `render` returns); tapping the same
- * icon again, or anywhere outside the bar/panel, closes it.
+ * icon again, or anywhere outside the bar/panel, closes it. `actions`
+ * renders a pinned, non-scrolling group of plain-click icon buttons
+ * (Confirm, Download, Share, …) at the right end, in the same visual
+ * language as the param icons.
  */
-export default function ParamToolbar({ params }: { params: ParamDef[] }) {
+export default function ParamToolbar({ params, actions }: { params: ParamDef[]; actions?: ActionDef[] }) {
   const [openId, setOpenId] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -48,24 +65,49 @@ export default function ParamToolbar({ params }: { params: ParamDef[] }) {
         </div>
       </div>
 
-      <div className="flex gap-2 overflow-x-auto no-scrollbar px-1 py-1 -mx-1">
-        {params.map((p) => {
-          const isOpen = openId === p.id
-          const Icon = p.icon
-          return (
-            <button
-              key={p.id}
-              onClick={() => setOpenId(isOpen ? null : p.id)}
-              className={`relative flex-shrink-0 flex flex-col items-center gap-1 px-4 py-2.5 rounded-xl transition-colors border ${
-                isOpen ? 'bg-primary text-black border-primary' : 'bg-surface text-white/70 border-white/10 hover:bg-white/10'
-              }`}
-            >
-              <Icon className="w-5 h-5" />
-              <span className="text-[10px] font-medium leading-none whitespace-nowrap">{p.label}</span>
-              {p.isActive && !isOpen && <span className="absolute top-1.5 right-2.5 w-1.5 h-1.5 rounded-full bg-primary" />}
-            </button>
-          )
-        })}
+      <div className="flex items-stretch gap-2">
+        <div className="flex gap-2 overflow-x-auto no-scrollbar px-1 py-1 -mx-1 flex-1 min-w-0">
+          {params.map((p) => {
+            const isOpen = openId === p.id
+            const Icon = p.icon
+            return (
+              <button
+                key={p.id}
+                onClick={() => setOpenId(isOpen ? null : p.id)}
+                className={`${paramButtonClass} ${
+                  isOpen ? 'bg-primary text-black border-primary' : 'bg-surface text-white/70 border-white/10 hover:bg-white/10'
+                }`}
+              >
+                <Icon className="w-5 h-5" />
+                <span className="text-[10px] font-medium leading-none whitespace-nowrap">{p.label}</span>
+                {p.isActive && !isOpen && <span className="absolute top-1.5 right-2.5 w-1.5 h-1.5 rounded-full bg-primary" />}
+              </button>
+            )
+          })}
+        </div>
+
+        {actions && actions.length > 0 && (
+          <div className="flex gap-2 flex-shrink-0 py-1 pl-2 border-l border-white/10">
+            {actions.map((a) => {
+              const Icon = a.icon
+              return (
+                <button
+                  key={a.id}
+                  onClick={a.onClick}
+                  disabled={a.disabled}
+                  className={`${paramButtonClass} disabled:opacity-40 ${
+                    a.variant === 'primary'
+                      ? 'bg-primary text-black border-primary hover:brightness-110'
+                      : 'bg-surface text-white/70 border-white/10 hover:bg-white/10'
+                  }`}
+                >
+                  <Icon className="w-5 h-5" />
+                  <span className="text-[10px] font-medium leading-none whitespace-nowrap">{a.label}</span>
+                </button>
+              )
+            })}
+          </div>
+        )}
       </div>
     </div>
   )

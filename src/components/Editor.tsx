@@ -4,7 +4,7 @@ import { detectFaceLandmarks, detectFaceLandmarksForVideo } from '../lib/faceLan
 import { processFrame, type EditParams } from '../lib/pipeline'
 import { FILTER_PRESETS } from '../lib/filters'
 import Slider from './Slider'
-import ParamToolbar, { type ParamDef } from './ParamToolbar'
+import ParamToolbar, { type ParamDef, type ActionDef } from './ParamToolbar'
 import {
   IconSpinner,
   IconCompare,
@@ -276,6 +276,18 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
     handleDownload()
   }
 
+  const actions: ActionDef[] = liveActive
+    ? [{ id: 'exit', icon: IconClose, label: 'Exit', onClick: onReset }]
+    : !confirmed
+      ? [{ id: 'confirm', icon: IconCheck, label: 'Confirm', onClick: () => setConfirmed(true), variant: 'primary', disabled: status === 'loading' }]
+      : [
+          { id: 'download', icon: IconDownload, label: 'Save', onClick: handleDownload, variant: 'primary' },
+          { id: 'share', icon: IconShare, label: 'Share', onClick: handleShare },
+          source.kind === 'live'
+            ? { id: 'retake', icon: IconRefresh, label: 'Retake', onClick: handleRetake }
+            : { id: 'new', icon: IconRefresh, label: 'New', onClick: onReset },
+        ]
+
   return (
     <div className="flex flex-col items-center gap-4 w-full max-w-md">
       <div className="relative w-full rounded-3xl overflow-hidden bg-surface border border-white/10 shadow-glow">
@@ -331,54 +343,7 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
         </p>
       )}
 
-      <ParamToolbar params={params} />
-
-      <div className="flex gap-3 w-full">
-        {liveActive ? (
-          <button
-            onClick={onReset}
-            className="flex-1 py-3 bg-secondary text-white rounded-xl hover:bg-white/10 transition flex items-center justify-center gap-1.5"
-          >
-            <IconClose className="w-4 h-4" />
-            Exit Live
-          </button>
-        ) : !confirmed ? (
-          <button
-            onClick={() => setConfirmed(true)}
-            disabled={status === 'loading'}
-            className="flex-1 py-3 bg-primary text-black font-semibold rounded-xl hover:brightness-110 transition shadow-glow disabled:opacity-40 flex items-center justify-center gap-1.5"
-          >
-            <IconCheck className="w-4 h-4" />
-            Confirm
-          </button>
-        ) : (
-          <>
-            <button
-              onClick={handleDownload}
-              className="flex-1 py-3 bg-primary text-black font-semibold rounded-xl hover:brightness-110 transition shadow-glow flex items-center justify-center gap-1.5"
-            >
-              <IconDownload className="w-4 h-4" />
-              Download
-            </button>
-            <button
-              onClick={handleShare}
-              className="flex-1 py-3 bg-secondary text-white font-semibold rounded-xl hover:bg-white/10 transition flex items-center justify-center gap-1.5 border border-white/10"
-            >
-              <IconShare className="w-4 h-4" />
-              Share
-            </button>
-            {source.kind === 'live' ? (
-              <button onClick={handleRetake} className="px-4 py-3 bg-secondary text-white rounded-xl hover:bg-white/10 transition" aria-label="Retake">
-                <IconRefresh className="w-4 h-4" />
-              </button>
-            ) : (
-              <button onClick={onReset} className="px-4 py-3 bg-secondary text-white rounded-xl hover:bg-white/10 transition" aria-label="New photo">
-                <IconRefresh className="w-4 h-4" />
-              </button>
-            )}
-          </>
-        )}
-      </div>
+      <ParamToolbar params={params} actions={actions} />
     </div>
   )
 }
