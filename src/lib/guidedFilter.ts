@@ -23,6 +23,20 @@
 // version was measured at several hundred milliseconds on a single
 // region of a live video frame, far past a usable per-frame budget.
 
+/** Blurs just a region of a canvas, not the whole frame — each effect in
+ * the edit pipeline only ever reads its own small face-bounding-box
+ * region back out of a blur, so blurring (and copying) the full live
+ * frame first was pure waste; this crops before blurring instead. */
+export function croppedBlur(source: HTMLCanvasElement, bx: number, by: number, bw: number, bh: number, radiusPx: number): ImageData {
+  const canvas = document.createElement('canvas')
+  canvas.width = bw
+  canvas.height = bh
+  const ctx = canvas.getContext('2d')!
+  ctx.filter = `blur(${radiusPx}px)`
+  ctx.drawImage(source, bx, by, bw, bh, 0, 0, bw, bh)
+  return ctx.getImageData(0, 0, bw, bh)
+}
+
 function boxBlurH(src: Float32Array, w: number, h: number, r: number, dst: Float32Array) {
   const windowSize = 2 * r + 1
   for (let y = 0; y < h; y++) {

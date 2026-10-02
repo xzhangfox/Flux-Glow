@@ -2,6 +2,7 @@ import { FaceLandmarker, type NormalizedLandmark } from '@mediapipe/tasks-vision
 import { buildSkinMask } from './skinMask'
 import { smoothSkin } from './smoothing'
 import { applyFillLight, applyWhitening, applyAcneRemoval, applyWrinkleRemoval, applyMouthCornerSmoothing } from './beauty'
+import { applyLiveTonePass } from './livePass'
 import { applyReshape, type ReshapeParams } from './reshape'
 import { LEFT_MOUTH_CORNER, RIGHT_MOUTH_CORNER } from './meshWarp'
 import { applyFilter, FILTER_PRESETS, type FilterPreset } from './filters'
@@ -44,22 +45,39 @@ export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandm
   const ovalLoop = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_FACE_OVAL)
   const bounds = loopBoundsPx(ovalLoop, landmarks, base.width, base.height, Math.max(20, base.width * 0.05))
 
-  // Skipped outright (not just a cheap no-op inside each function) when a
-  // slider is at its default 0 — each still involves at least one extra
-  // canvas allocation and drawImage even when it would end up doing
-  // nothing, worth avoiding since most of these will be untouched most
-  // of the time, especially in the live loop.
-  let working = base
-  if (params.fillLight > 0.001) working = applyFillLight(working, mask, params.fillLight, bounds, highQuality)
-  if (params.whitening > 0.001) working = applyWhitening(working, mask, params.whitening, bounds)
-  if (params.acneRemoval > 0.001) working = applyAcneRemoval(working, mask, params.acneRemoval, bounds, highQuality)
-  if (params.wrinkleRemoval > 0.001) working = applyWrinkleRemoval(working, mask, params.wrinkleRemoval, bounds, highQuality)
+  // One shared canvas that every tone/beauty effect mutates in place over
+  // just its own bounds rect, instead of each allocating a full-frame
+  // copy and handing it to the next — chaining five full-frame
+  // allocate+drawImage round trips was the dominant cost in the live
+  // preview loop. A slider at its default 0 still skips its effect's own
+  // work entirely, same as before.
+  const working = document.createElement('canvas')
+  working.width = base.width
+  working.height = base.height
+  working.getContext('2d')!.drawImage(base, 0, 0)
+
+  if (highQuality) {
+    if (params.fillLight > 0.001) applyFillLight(working, mask, params.fillLight, bounds, true)
+    if (params.whitening > 0.001) applyWhitening(working, mask, params.whitening, bounds)
+    if (params.acneRemoval > 0.001) applyAcneRemoval(working, mask, params.acneRemoval, bounds, true)
+    if (params.wrinkleRemoval > 0.001) applyWrinkleRemoval(working, mask, params.wrinkleRemoval, bounds, true)
+    smoothSkin(working, mask, params.smoothness, bounds, true)
+  } else {
+    // Even with each effect already cropping its own blurs to the face's
+    // bounding box instead of the full frame, running the five separate
+    // functions still cost 150-200ms/frame at live resolution — the
+    // remaining dominant cost was each one doing its own
+    // getImageData/putImageData round trip on the same ~500x600 region.
+    // This fuses all five into one shared read, one shared per-pixel
+    // loop, and one shared write (see livePass.ts for the accepted
+    // fidelity tradeoffs that come with fusing them).
+    applyLiveTonePass(working, mask, params, bounds)
+  }
   if (params.mouthCornerSmooth > 0.001) {
     const corners = [LEFT_MOUTH_CORNER, RIGHT_MOUTH_CORNER].map((idx) => ({ x: landmarks[idx].x * base.width, y: landmarks[idx].y * base.height }))
     const radius = (bounds.maxX - bounds.minX) * 0.12
-    working = applyMouthCornerSmoothing(working, corners, radius, params.mouthCornerSmooth)
+    applyMouthCornerSmoothing(working, corners, radius, params.mouthCornerSmooth)
   }
-  const smoothed = smoothSkin(working, mask, params.smoothness, bounds, highQuality)
-  const reshaped = applyReshape(smoothed, landmarks, params)
+  const reshaped = applyReshape(working, landmarks, params)
   return applyFilter(reshaped, preset)
 }

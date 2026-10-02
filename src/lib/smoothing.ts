@@ -1,14 +1,4 @@
-import { edgeAwareBlur } from './guidedFilter'
-
-function blurredCopy(source: HTMLCanvasElement, radiusPx: number): HTMLCanvasElement {
-  const canvas = document.createElement('canvas')
-  canvas.width = source.width
-  canvas.height = source.height
-  const ctx = canvas.getContext('2d')!
-  ctx.filter = `blur(${radiusPx}px)`
-  ctx.drawImage(source, 0, 0)
-  return canvas
-}
+import { edgeAwareBlur, croppedBlur } from './guidedFilter'
 
 // Variance threshold (pixel-value-squared) for the guided filter below: a
 // local neighborhood whose variance clears this is a real boundary
@@ -34,16 +24,14 @@ const TONE_EDGE_EPS = 700
  * pipelines differs from a naive blur-based approach). The guided filter
  * keeps real boundaries sharp while still averaging away blotchy tone in
  * between them.
- */
-/**
+ *
  * `bounds`, when given, is the face's own bounding box (padded well past
  * the mask's blur radius) — background, hair, and everything else outside
  * it is mask-value zero anyway, i.e. a guaranteed no-op in the blend
  * formula below, so skipping it entirely (both the expensive
  * getImageData/putImageData calls and the per-pixel loop) changes nothing
  * about the result and is often a large chunk of the frame to not pay for.
- */
-/**
+ *
  * `highQuality` picks the tone pass above: the guided filter is
  * meaningfully better (see above) but, being a CPU per-pixel operation,
  * costs on the order of 100ms+ per call at a typical face-region size —
@@ -52,38 +40,38 @@ const TONE_EDGE_EPS = 700
  * Live preview falls back to the original Gaussian blur for this step so
  * the viewfinder stays responsive; the captured photo gets the accurate
  * pass.
+ *
+ * Mutates `canvas` in place over just the bounds rect, like the beauty.ts
+ * effects — see the note at the top of that file for why.
  */
 export function smoothSkin(
-  source: HTMLCanvasElement,
+  canvas: HTMLCanvasElement,
   mask: HTMLCanvasElement,
   intensity: number,
   bounds?: { minX: number; minY: number; maxX: number; maxY: number },
   highQuality = true,
-): HTMLCanvasElement {
-  const w = source.width
-  const h = source.height
-  const sctx = source.getContext('2d')!
-  const mctx = mask.getContext('2d')!
-
-  const result = document.createElement('canvas')
-  result.width = w
-  result.height = h
-  const rctx = result.getContext('2d')!
-  rctx.drawImage(source, 0, 0)
+): void {
+  const w = canvas.width
+  const h = canvas.height
 
   const bx = bounds ? Math.max(0, Math.floor(bounds.minX)) : 0
   const by = bounds ? Math.max(0, Math.floor(bounds.minY)) : 0
   const bw = (bounds ? Math.min(w, Math.ceil(bounds.maxX)) : w) - bx
   const bh = (bounds ? Math.min(h, Math.ceil(bounds.maxY)) : h) - by
-  if (bw <= 0 || bh <= 0) return result
+  if (bw <= 0 || bh <= 0) return
 
-  const low = blurredCopy(source, 5)
+  const lowData = croppedBlur(canvas, bx, by, bw, bh, 5)
+  const lowCanvas = document.createElement('canvas')
+  lowCanvas.width = bw
+  lowCanvas.height = bh
+  lowCanvas.getContext('2d')!.putImageData(lowData, 0, 0)
+
   const toneRadius = Math.round(7 + intensity * 10)
+  const smoothedLowData = highQuality ? edgeAwareBlur(lowCanvas, 0, 0, bw, bh, toneRadius, TONE_EDGE_EPS) : croppedBlur(lowCanvas, 0, 0, bw, bh, toneRadius)
 
-  const origData = sctx.getImageData(bx, by, bw, bh)
-  const lowData = low.getContext('2d')!.getImageData(bx, by, bw, bh)
-  const smoothedLowData = highQuality ? edgeAwareBlur(low, bx, by, bw, bh, toneRadius, TONE_EDGE_EPS) : blurredCopy(low, toneRadius).getContext('2d')!.getImageData(bx, by, bw, bh)
-  const maskData = mctx.getImageData(bx, by, bw, bh)
+  const ctx = canvas.getContext('2d')!
+  const origData = ctx.getImageData(bx, by, bw, bh)
+  const maskData = mask.getContext('2d')!.getImageData(bx, by, bw, bh)
 
   const out = new ImageData(bw, bh)
   const orig = origData.data
@@ -102,6 +90,5 @@ export function smoothSkin(
     outArr[i + 3] = orig[i + 3]
   }
 
-  rctx.putImageData(out, bx, by)
-  return result
+  ctx.putImageData(out, bx, by)
 }

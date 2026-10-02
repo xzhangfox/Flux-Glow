@@ -4,18 +4,16 @@
 // mask is zero everywhere else anyway) but does a genuinely different
 // kind of correction rather than just being the same blur at another
 // strength.
+//
+// Each function mutates `canvas` in place over just its bounds rect
+// instead of allocating a full-frame copy and returning it. The pipeline
+// chains several of these per frame; allocating and redrawing an entire
+// 1280x1280 live frame for each one (when the face's own bounding box is
+// often a fraction of that) was the dominant cost in the live preview
+// loop, measured at 200-350ms for four effects together — this is what
+// brings that down to something a 30fps loop can actually afford.
 
-import { edgeAwareBlur } from './guidedFilter'
-
-function blurredCopy(source: HTMLCanvasElement, radiusPx: number): HTMLCanvasElement {
-  const canvas = document.createElement('canvas')
-  canvas.width = source.width
-  canvas.height = source.height
-  const ctx = canvas.getContext('2d')!
-  ctx.filter = `blur(${radiusPx}px)`
-  ctx.drawImage(source, 0, 0)
-  return canvas
-}
+import { edgeAwareBlur, croppedBlur } from './guidedFilter'
 
 export interface Bounds {
   minX: number
@@ -39,7 +37,7 @@ function boundsRect(w: number, h: number, bounds?: Bounds) {
  * specific face*, instead of guessing a fixed brightness number that only
  * fits one lighting condition.
  */
-function luminancePercentile(data: Uint8ClampedArray, maskData: Uint8ClampedArray, percentile: number): number {
+export function luminancePercentile(data: Uint8ClampedArray, maskData: Uint8ClampedArray, percentile: number): number {
   const buckets = new Uint32Array(256)
   let total = 0
   for (let i = 0; i < data.length; i += 4) {
@@ -84,18 +82,10 @@ function luminancePercentile(data: Uint8ClampedArray, maskData: Uint8ClampedArra
  * face lit from one side has a wide range, so the genuinely dark side
  * gets lifted while the lit side doesn't.
  */
-export function applyFillLight(source: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds, highQuality = true): HTMLCanvasElement {
-  const w = source.width
-  const h = source.height
-  const result = document.createElement('canvas')
-  result.width = w
-  result.height = h
-  const rctx = result.getContext('2d')!
-  rctx.drawImage(source, 0, 0)
-  if (intensity <= 0.001) return result
-
-  const { bx, by, bw, bh } = boundsRect(w, h, bounds)
-  if (bw <= 0 || bh <= 0) return result
+export function applyFillLight(canvas: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds, highQuality = true): void {
+  if (intensity <= 0.001) return
+  const { bx, by, bw, bh } = boundsRect(canvas.width, canvas.height, bounds)
+  if (bw <= 0 || bh <= 0) return
 
   // Radius tuned to the scale facial shadows actually occur at, not
   // pixel-level darkness — this is what makes the lift map read as "is
@@ -108,9 +98,10 @@ export function applyFillLight(source: HTMLCanvasElement, mask: HTMLCanvasElemen
   // meant to be broad/regional, not responsive to skin-texture-scale
   // variance.
   const shadowScale = Math.max(6, Math.round(bw * 0.12))
-  const localData = highQuality ? edgeAwareBlur(source, bx, by, bw, bh, shadowScale, 2000) : blurredCopy(source, shadowScale).getContext('2d')!.getImageData(bx, by, bw, bh)
+  const localData = highQuality ? edgeAwareBlur(canvas, bx, by, bw, bh, shadowScale, 2000) : croppedBlur(canvas, bx, by, bw, bh, shadowScale)
 
-  const orig = source.getContext('2d')!.getImageData(bx, by, bw, bh)
+  const ctx = canvas.getContext('2d')!
+  const orig = ctx.getImageData(bx, by, bw, bh)
   const maskData = mask.getContext('2d')!.getImageData(bx, by, bw, bh)
   const out = new ImageData(bw, bh)
 
@@ -139,8 +130,7 @@ export function applyFillLight(source: HTMLCanvasElement, mask: HTMLCanvasElemen
     }
     out.data[i + 3] = orig.data[i + 3]
   }
-  rctx.putImageData(out, bx, by)
-  return result
+  ctx.putImageData(out, bx, by)
 }
 
 /**
@@ -162,20 +152,13 @@ export function applyFillLight(source: HTMLCanvasElement, mask: HTMLCanvasElemen
  * areas lift without blowing out highlights that a flat screen blend
  * would have brightened just as much.
  */
-export function applyWhitening(source: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds): HTMLCanvasElement {
-  const w = source.width
-  const h = source.height
-  const result = document.createElement('canvas')
-  result.width = w
-  result.height = h
-  const rctx = result.getContext('2d')!
-  rctx.drawImage(source, 0, 0)
-  if (intensity <= 0.001) return result
+export function applyWhitening(canvas: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds): void {
+  if (intensity <= 0.001) return
+  const { bx, by, bw, bh } = boundsRect(canvas.width, canvas.height, bounds)
+  if (bw <= 0 || bh <= 0) return
 
-  const { bx, by, bw, bh } = boundsRect(w, h, bounds)
-  if (bw <= 0 || bh <= 0) return result
-
-  const orig = source.getContext('2d')!.getImageData(bx, by, bw, bh)
+  const ctx = canvas.getContext('2d')!
+  const orig = ctx.getImageData(bx, by, bw, bh)
   const maskData = mask.getContext('2d')!.getImageData(bx, by, bw, bh)
   const out = new ImageData(bw, bh)
 
@@ -208,8 +191,7 @@ export function applyWhitening(source: HTMLCanvasElement, mask: HTMLCanvasElemen
     out.data[i + 2] = b + (finalB - b) * maskAlpha
     out.data[i + 3] = orig.data[i + 3]
   }
-  rctx.putImageData(out, bx, by)
-  return result
+  ctx.putImageData(out, bx, by)
 }
 
 /**
@@ -236,21 +218,14 @@ export function applyWhitening(source: HTMLCanvasElement, mask: HTMLCanvasElemen
  * the guided filter's edge-awareness still keeps it from reaching across
  * a real nearby feature boundary despite the larger radius.
  */
-export function applyAcneRemoval(source: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds, highQuality = true): HTMLCanvasElement {
-  const w = source.width
-  const h = source.height
-  const result = document.createElement('canvas')
-  result.width = w
-  result.height = h
-  const rctx = result.getContext('2d')!
-  rctx.drawImage(source, 0, 0)
-  if (intensity <= 0.001) return result
+export function applyAcneRemoval(canvas: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds, highQuality = true): void {
+  if (intensity <= 0.001) return
+  const { bx, by, bw, bh } = boundsRect(canvas.width, canvas.height, bounds)
+  if (bw <= 0 || bh <= 0) return
 
-  const { bx, by, bw, bh } = boundsRect(w, h, bounds)
-  if (bw <= 0 || bh <= 0) return result
-
-  const lowData = highQuality ? edgeAwareBlur(source, bx, by, bw, bh, 14, 300) : blurredCopy(source, 14).getContext('2d')!.getImageData(bx, by, bw, bh)
-  const orig = source.getContext('2d')!.getImageData(bx, by, bw, bh)
+  const lowData = highQuality ? edgeAwareBlur(canvas, bx, by, bw, bh, 14, 300) : croppedBlur(canvas, bx, by, bw, bh, 14)
+  const ctx = canvas.getContext('2d')!
+  const orig = ctx.getImageData(bx, by, bw, bh)
   const maskData = mask.getContext('2d')!.getImageData(bx, by, bw, bh)
   const out = new ImageData(bw, bh)
   const DEVIATION_THRESHOLD = 16
@@ -266,8 +241,7 @@ export function applyAcneRemoval(source: HTMLCanvasElement, mask: HTMLCanvasElem
     }
     out.data[i + 3] = orig.data[i + 3]
   }
-  rctx.putImageData(out, bx, by)
-  return result
+  ctx.putImageData(out, bx, by)
 }
 
 /**
@@ -295,23 +269,16 @@ export function applyAcneRemoval(source: HTMLCanvasElement, mask: HTMLCanvasElem
  * collapses to ~0 exactly where it shouldn't be touched, while still
  * responding normally to genuine wrinkle-scale contrast in between.
  */
-export function applyWrinkleRemoval(source: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds, highQuality = true): HTMLCanvasElement {
-  const w = source.width
-  const h = source.height
-  const result = document.createElement('canvas')
-  result.width = w
-  result.height = h
-  const rctx = result.getContext('2d')!
-  rctx.drawImage(source, 0, 0)
-  if (intensity <= 0.001) return result
+export function applyWrinkleRemoval(canvas: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds, highQuality = true): void {
+  if (intensity <= 0.001) return
+  const { bx, by, bw, bh } = boundsRect(canvas.width, canvas.height, bounds)
+  if (bw <= 0 || bh <= 0) return
 
-  const { bx, by, bw, bh } = boundsRect(w, h, bounds)
-  if (bw <= 0 || bh <= 0) return result
+  const fineData = highQuality ? edgeAwareBlur(canvas, bx, by, bw, bh, 3, 200) : croppedBlur(canvas, bx, by, bw, bh, 3)
+  const mediumData = highQuality ? edgeAwareBlur(canvas, bx, by, bw, bh, 9, 500) : croppedBlur(canvas, bx, by, bw, bh, 9)
 
-  const fineData = highQuality ? edgeAwareBlur(source, bx, by, bw, bh, 3, 200) : blurredCopy(source, 3).getContext('2d')!.getImageData(bx, by, bw, bh)
-  const mediumData = highQuality ? edgeAwareBlur(source, bx, by, bw, bh, 9, 500) : blurredCopy(source, 9).getContext('2d')!.getImageData(bx, by, bw, bh)
-
-  const orig = source.getContext('2d')!.getImageData(bx, by, bw, bh)
+  const ctx = canvas.getContext('2d')!
+  const orig = ctx.getImageData(bx, by, bw, bh)
   const maskData = mask.getContext('2d')!.getImageData(bx, by, bw, bh)
   const out = new ImageData(bw, bh)
   const reduction = intensity * 0.7
@@ -327,8 +294,7 @@ export function applyWrinkleRemoval(source: HTMLCanvasElement, mask: HTMLCanvasE
     }
     out.data[i + 3] = orig.data[i + 3]
   }
-  rctx.putImageData(out, bx, by)
-  return result
+  ctx.putImageData(out, bx, by)
 }
 
 /**
@@ -339,42 +305,39 @@ export function applyWrinkleRemoval(source: HTMLCanvasElement, mask: HTMLCanvasE
  * whole face. Blends toward a modest local blur within that small region
  * only.
  */
-export function applyMouthCornerSmoothing(source: HTMLCanvasElement, corners: { x: number; y: number }[], radius: number, intensity: number): HTMLCanvasElement {
-  const w = source.width
-  const h = source.height
-  const result = document.createElement('canvas')
-  result.width = w
-  result.height = h
-  const rctx = result.getContext('2d')!
-  rctx.drawImage(source, 0, 0)
-  if (intensity <= 0.001 || corners.length === 0) return result
+export function applyMouthCornerSmoothing(canvas: HTMLCanvasElement, corners: { x: number; y: number }[], radius: number, intensity: number): void {
+  if (intensity <= 0.001 || corners.length === 0) return
 
   const minX = Math.max(0, Math.floor(Math.min(...corners.map((c) => c.x)) - radius))
-  const maxX = Math.min(w, Math.ceil(Math.max(...corners.map((c) => c.x)) + radius))
+  const maxX = Math.min(canvas.width, Math.ceil(Math.max(...corners.map((c) => c.x)) + radius))
   const minY = Math.max(0, Math.floor(Math.min(...corners.map((c) => c.y)) - radius))
-  const maxY = Math.min(h, Math.ceil(Math.max(...corners.map((c) => c.y)) + radius))
+  const maxY = Math.min(canvas.height, Math.ceil(Math.max(...corners.map((c) => c.y)) + radius))
   const bw = maxX - minX
   const bh = maxY - minY
-  if (bw <= 0 || bh <= 0) return result
+  if (bw <= 0 || bh <= 0) return
 
+  // Mask built directly at the small region's own size (not the full
+  // frame) — the gradients just need shifting by (-minX, -minY).
   const maskCanvas = document.createElement('canvas')
-  maskCanvas.width = w
-  maskCanvas.height = h
+  maskCanvas.width = bw
+  maskCanvas.height = bh
   const mctx = maskCanvas.getContext('2d')!
   for (const c of corners) {
-    const gradient = mctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, radius)
+    const cx = c.x - minX
+    const cy = c.y - minY
+    const gradient = mctx.createRadialGradient(cx, cy, 0, cx, cy, radius)
     gradient.addColorStop(0, 'rgba(255,255,255,1)')
     gradient.addColorStop(1, 'rgba(255,255,255,0)')
     mctx.fillStyle = gradient
     mctx.beginPath()
-    mctx.arc(c.x, c.y, radius, 0, Math.PI * 2)
+    mctx.arc(cx, cy, radius, 0, Math.PI * 2)
     mctx.fill()
   }
 
-  const blurred = blurredCopy(source, radius * 0.35)
-  const orig = source.getContext('2d')!.getImageData(minX, minY, bw, bh)
-  const blurData = blurred.getContext('2d')!.getImageData(minX, minY, bw, bh)
-  const maskData = mctx.getImageData(minX, minY, bw, bh)
+  const blurData = croppedBlur(canvas, minX, minY, bw, bh, radius * 0.35)
+  const ctx = canvas.getContext('2d')!
+  const orig = ctx.getImageData(minX, minY, bw, bh)
+  const maskData = mctx.getImageData(0, 0, bw, bh)
   const out = new ImageData(bw, bh)
 
   for (let i = 0; i < orig.data.length; i += 4) {
@@ -384,6 +347,5 @@ export function applyMouthCornerSmoothing(source: HTMLCanvasElement, corners: { 
     }
     out.data[i + 3] = orig.data[i + 3]
   }
-  rctx.putImageData(out, minX, minY)
-  return result
+  ctx.putImageData(out, minX, minY)
 }
