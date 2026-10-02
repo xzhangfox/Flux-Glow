@@ -1,3 +1,5 @@
+import { edgeAwareBlur } from './guidedFilter'
+
 function blurredCopy(source: HTMLCanvasElement, radiusPx: number): HTMLCanvasElement {
   const canvas = document.createElement('canvas')
   canvas.width = source.width
@@ -8,15 +10,30 @@ function blurredCopy(source: HTMLCanvasElement, radiusPx: number): HTMLCanvasEle
   return canvas
 }
 
+// Variance threshold (pixel-value-squared) for the guided filter below: a
+// local neighborhood whose variance clears this is a real boundary
+// (eyebrow/eyelid/nose/lip edge, roughly a 20+ gray-level jump) and stays
+// close to untouched; well under it is ordinary blotchy skin tone and
+// smooths toward the local mean. Tuned empirically against a synthetic
+// sharp-edge test (see the direct-pipeline tests) rather than guessed.
+const TONE_EDGE_EPS = 700
+
 /**
  * True frequency separation, not a flat masked blur: `high = original -
  * lightlyBlurred` isolates fine texture (pores, fine lines), which is kept
- * untouched; a SECOND, heavier blur of that same low layer removes the
- * blotchy tone/color variation blemishes and redness actually are, and the
- * two recombine as `smoothedLow + high`. This is what keeps retouched skin
- * from reading as flat/plastic — the texture survives, only the blotchy
- * tone underneath it gets smoothed, which doubles as blemish reduction
- * without a separate spot-removal tool.
+ * untouched; a SECOND pass over that same low layer removes the blotchy
+ * tone/color variation blemishes and redness actually are, and the two
+ * recombine as `smoothedLow + high`.
+ *
+ * That second pass is a guided filter (see guidedFilter.ts), not another
+ * Gaussian blur — a plain blur has no notion of a real edge and smooths
+ * straight across eyebrows, eyelids, and the nose/lip boundary just as
+ * readily as it smooths flat cheek skin, which is the actual mechanism
+ * behind heavily-smoothed skin reading as flat/plastic (this is also
+ * exactly how real "surface blur" skin-smoothing in shipped beauty camera
+ * pipelines differs from a naive blur-based approach). The guided filter
+ * keeps real boundaries sharp while still averaging away blotchy tone in
+ * between them.
  */
 /**
  * `bounds`, when given, is the face's own bounding box (padded well past
@@ -26,7 +43,23 @@ function blurredCopy(source: HTMLCanvasElement, radiusPx: number): HTMLCanvasEle
  * getImageData/putImageData calls and the per-pixel loop) changes nothing
  * about the result and is often a large chunk of the frame to not pay for.
  */
-export function smoothSkin(source: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: { minX: number; minY: number; maxX: number; maxY: number }): HTMLCanvasElement {
+/**
+ * `highQuality` picks the tone pass above: the guided filter is
+ * meaningfully better (see above) but, being a CPU per-pixel operation,
+ * costs on the order of 100ms+ per call at a typical face-region size —
+ * fine for a one-time static-photo edit, far too slow to run every frame
+ * of a live 30fps preview alongside the other effects that also need it.
+ * Live preview falls back to the original Gaussian blur for this step so
+ * the viewfinder stays responsive; the captured photo gets the accurate
+ * pass.
+ */
+export function smoothSkin(
+  source: HTMLCanvasElement,
+  mask: HTMLCanvasElement,
+  intensity: number,
+  bounds?: { minX: number; minY: number; maxX: number; maxY: number },
+  highQuality = true,
+): HTMLCanvasElement {
   const w = source.width
   const h = source.height
   const sctx = source.getContext('2d')!
@@ -45,11 +78,11 @@ export function smoothSkin(source: HTMLCanvasElement, mask: HTMLCanvasElement, i
   if (bw <= 0 || bh <= 0) return result
 
   const low = blurredCopy(source, 5)
-  const smoothedLow = blurredCopy(low, 7 + intensity * 10)
+  const toneRadius = Math.round(7 + intensity * 10)
 
   const origData = sctx.getImageData(bx, by, bw, bh)
   const lowData = low.getContext('2d')!.getImageData(bx, by, bw, bh)
-  const smoothedLowData = smoothedLow.getContext('2d')!.getImageData(bx, by, bw, bh)
+  const smoothedLowData = highQuality ? edgeAwareBlur(low, bx, by, bw, bh, toneRadius, TONE_EDGE_EPS) : blurredCopy(low, toneRadius).getContext('2d')!.getImageData(bx, by, bw, bh)
   const maskData = mctx.getImageData(bx, by, bw, bh)
 
   const out = new ImageData(bw, bh)

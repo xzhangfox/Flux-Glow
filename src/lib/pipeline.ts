@@ -26,7 +26,17 @@ export interface EditParams extends ReshapeParams {
  *  doesn't need a precision/cost tradeoff between static photos and live
  *  video, so there's no grid-step parameter to thread through here the
  *  way the old MLS version needed. */
-export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandmark[] | null, params: EditParams): HTMLCanvasElement {
+/**
+ * `highQuality` switches the tone-based effects (fill light, acne,
+ * wrinkle removal, skin smoothing) between a guided filter — edge-aware,
+ * but a CPU per-pixel operation costing 100ms+ per call at face-region
+ * size — and a plain Gaussian blur. The static photo editor always wants
+ * the accurate pass; the live preview, which must redo all of this every
+ * frame at 30fps, uses the cheaper one so the viewfinder stays responsive
+ * and gets upgraded to full quality the moment a photo is actually
+ * captured or confirmed.
+ */
+export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandmark[] | null, params: EditParams, highQuality = true): HTMLCanvasElement {
   const preset: FilterPreset = FILTER_PRESETS.find((p) => p.id === params.filterId) ?? FILTER_PRESETS[0]
   if (!landmarks) return applyFilter(base, preset)
 
@@ -40,16 +50,16 @@ export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandm
   // nothing, worth avoiding since most of these will be untouched most
   // of the time, especially in the live loop.
   let working = base
-  if (params.fillLight > 0.001) working = applyFillLight(working, mask, params.fillLight, bounds)
+  if (params.fillLight > 0.001) working = applyFillLight(working, mask, params.fillLight, bounds, highQuality)
   if (params.whitening > 0.001) working = applyWhitening(working, mask, params.whitening, bounds)
-  if (params.acneRemoval > 0.001) working = applyAcneRemoval(working, mask, params.acneRemoval, bounds)
-  if (params.wrinkleRemoval > 0.001) working = applyWrinkleRemoval(working, mask, params.wrinkleRemoval, bounds)
+  if (params.acneRemoval > 0.001) working = applyAcneRemoval(working, mask, params.acneRemoval, bounds, highQuality)
+  if (params.wrinkleRemoval > 0.001) working = applyWrinkleRemoval(working, mask, params.wrinkleRemoval, bounds, highQuality)
   if (params.mouthCornerSmooth > 0.001) {
     const corners = [LEFT_MOUTH_CORNER, RIGHT_MOUTH_CORNER].map((idx) => ({ x: landmarks[idx].x * base.width, y: landmarks[idx].y * base.height }))
     const radius = (bounds.maxX - bounds.minX) * 0.12
     working = applyMouthCornerSmoothing(working, corners, radius, params.mouthCornerSmooth)
   }
-  const smoothed = smoothSkin(working, mask, params.smoothness, bounds)
+  const smoothed = smoothSkin(working, mask, params.smoothness, bounds, highQuality)
   const reshaped = applyReshape(smoothed, landmarks, params)
   return applyFilter(reshaped, preset)
 }

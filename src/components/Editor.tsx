@@ -474,7 +474,7 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
             const landmarks = remapLandmarksToBase(rawLandmarks, cropZoom, facingModeRef.current === 'user')
             landmarksRef.current = landmarks
             setStatus(landmarks ? 'ready' : 'no-face')
-            resultRef.current = processFrame(base, landmarks, paramsRef.current)
+            resultRef.current = processFrame(base, landmarks, paramsRef.current, false)
             render()
           })
           .finally(() => {

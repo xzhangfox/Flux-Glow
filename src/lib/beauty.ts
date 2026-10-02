@@ -5,6 +5,8 @@
 // kind of correction rather than just being the same blur at another
 // strength.
 
+import { edgeAwareBlur } from './guidedFilter'
+
 function blurredCopy(source: HTMLCanvasElement, radiusPx: number): HTMLCanvasElement {
   const canvas = document.createElement('canvas')
   canvas.width = source.width
@@ -82,7 +84,7 @@ function luminancePercentile(data: Uint8ClampedArray, maskData: Uint8ClampedArra
  * face lit from one side has a wide range, so the genuinely dark side
  * gets lifted while the lit side doesn't.
  */
-export function applyFillLight(source: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds): HTMLCanvasElement {
+export function applyFillLight(source: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds, highQuality = true): HTMLCanvasElement {
   const w = source.width
   const h = source.height
   const result = document.createElement('canvas')
@@ -95,15 +97,20 @@ export function applyFillLight(source: HTMLCanvasElement, mask: HTMLCanvasElemen
   const { bx, by, bw, bh } = boundsRect(w, h, bounds)
   if (bw <= 0 || bh <= 0) return result
 
-  // Blur radius tuned to the scale facial shadows actually occur at, not
+  // Radius tuned to the scale facial shadows actually occur at, not
   // pixel-level darkness — this is what makes the lift map read as "is
   // this part of the face in shadow" rather than "is this exact pixel
-  // dark", which would just reintroduce a texture-flattening blur.
-  const shadowScale = Math.max(6, bw * 0.12)
-  const localExposure = blurredCopy(source, shadowScale)
+  // dark", which would just reintroduce a texture-flattening blur. A
+  // guided filter rather than a plain blur here too, so a hard real
+  // boundary (hairline, jaw against the background, a glasses rim) can't
+  // bleed its brightness into the exposure estimate on the other side of
+  // it — eps is looser than the other effects' since this estimate is
+  // meant to be broad/regional, not responsive to skin-texture-scale
+  // variance.
+  const shadowScale = Math.max(6, Math.round(bw * 0.12))
+  const localData = highQuality ? edgeAwareBlur(source, bx, by, bw, bh, shadowScale, 2000) : blurredCopy(source, shadowScale).getContext('2d')!.getImageData(bx, by, bw, bh)
 
   const orig = source.getContext('2d')!.getImageData(bx, by, bw, bh)
-  const localData = localExposure.getContext('2d')!.getImageData(bx, by, bw, bh)
   const maskData = mask.getContext('2d')!.getImageData(bx, by, bw, bh)
   const out = new ImageData(bw, bh)
 
@@ -208,12 +215,28 @@ export function applyWhitening(source: HTMLCanvasElement, mask: HTMLCanvasElemen
 /**
  * Acne/blemish removal: unlike `smoothSkin` (which smooths tone
  * everywhere in the mask uniformly), this only pulls a pixel toward its
- * local blurred average once it deviates from that average by more than
- * a threshold — ordinary skin texture stays untouched, and only actual
- * outliers (a spot, a red mark) get corrected, which is what a real
- * spot-removal tool does instead of a blanket blur.
+ * local average once it deviates from that average by more than a
+ * threshold — ordinary skin texture stays untouched, and only actual
+ * outliers (a spot, a red mark) get corrected. This is the same idea real
+ * blemish-removal tools use (match the spot's luminosity/color to its
+ * surroundings rather than blur it away), and the "local average" here is
+ * a guided filter rather than a Gaussian blur specifically so a strong
+ * real edge (nostril shadow, eyebrow) never reads as a false "deviation"
+ * and gets incorrectly smoothed — a plain blur's average right next to an
+ * edge is a muddy mix of both sides, which would otherwise flag the
+ * boundary itself as a blemish.
+ *
+ * The radius (14px) is deliberately bigger than a typical blemish itself:
+ * a filter radius comparable to or smaller than the blemish just averages
+ * the blemish with itself and barely registers any deviation at all
+ * (confirmed empirically — at radius 7 a clearly brighter ~8px spot barely
+ * moved after "correction" because the local average was computed mostly
+ * from the spot's own pixels). A wider radius means the average actually
+ * reflects the surrounding normal skin the blemish sits on top of, while
+ * the guided filter's edge-awareness still keeps it from reaching across
+ * a real nearby feature boundary despite the larger radius.
  */
-export function applyAcneRemoval(source: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds): HTMLCanvasElement {
+export function applyAcneRemoval(source: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds, highQuality = true): HTMLCanvasElement {
   const w = source.width
   const h = source.height
   const result = document.createElement('canvas')
@@ -226,9 +249,8 @@ export function applyAcneRemoval(source: HTMLCanvasElement, mask: HTMLCanvasElem
   const { bx, by, bw, bh } = boundsRect(w, h, bounds)
   if (bw <= 0 || bh <= 0) return result
 
-  const low = blurredCopy(source, 7)
+  const lowData = highQuality ? edgeAwareBlur(source, bx, by, bw, bh, 14, 300) : blurredCopy(source, 14).getContext('2d')!.getImageData(bx, by, bw, bh)
   const orig = source.getContext('2d')!.getImageData(bx, by, bw, bh)
-  const lowData = low.getContext('2d')!.getImageData(bx, by, bw, bh)
   const maskData = mask.getContext('2d')!.getImageData(bx, by, bw, bh)
   const out = new ImageData(bw, bh)
   const DEVIATION_THRESHOLD = 16
@@ -250,15 +272,30 @@ export function applyAcneRemoval(source: HTMLCanvasElement, mask: HTMLCanvasElem
 
 /**
  * Wrinkle removal: a three-band split — fine texture (pores, a very light
- * blur's residual) is preserved completely; the medium band in between a
- * light and a medium blur, where wrinkles and fine lines actually live,
- * is the only thing reduced; the medium-blurred base itself (overall
- * tone) is left for `smoothSkin` to handle. Reducing a frequency band
- * instead of just blurring harder is what keeps pores visible while
- * wrinkles fade — a stronger flat blur would take both together and
- * start looking plastic.
+ * blur's residual) is preserved completely; the medium band, where
+ * wrinkles and fine lines actually live, is the only thing reduced; the
+ * medium layer's own base tone is left for `smoothSkin` to handle.
+ * Reducing a frequency band instead of just blurring harder is what keeps
+ * pores visible while wrinkles fade.
+ *
+ * Both bands are extracted with a guided filter, not a Gaussian blur —
+ * and deliberately the *same kind* of filter for both fine and medium,
+ * not a Gaussian "fine" paired with a guided "medium". A Gaussian blur's
+ * response right at a real edge is a difference-of-Gaussians edge
+ * detector by construction, so a real boundary (eyelid crease, mouth
+ * corner) shows up as a large medium-band value and gets its contrast
+ * *reduced* like a wrinkle — and mixing filter types made it worse,
+ * producing outright overshoot (confirmed empirically: a synthetic sharp
+ * edge came out with MORE contrast after processing, not less, because
+ * the Gaussian-blurred fine layer and the edge-preserving medium layer
+ * disagreed about how sharp the edge should be and their difference
+ * spiked right at the boundary). With both layers edge-aware, a real
+ * edge makes both filters track the original value closely at roughly
+ * the same radius, so their difference — the "medium band" — correctly
+ * collapses to ~0 exactly where it shouldn't be touched, while still
+ * responding normally to genuine wrinkle-scale contrast in between.
  */
-export function applyWrinkleRemoval(source: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds): HTMLCanvasElement {
+export function applyWrinkleRemoval(source: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds, highQuality = true): HTMLCanvasElement {
   const w = source.width
   const h = source.height
   const result = document.createElement('canvas')
@@ -271,12 +308,10 @@ export function applyWrinkleRemoval(source: HTMLCanvasElement, mask: HTMLCanvasE
   const { bx, by, bw, bh } = boundsRect(w, h, bounds)
   if (bw <= 0 || bh <= 0) return result
 
-  const fine = blurredCopy(source, 3)
-  const medium = blurredCopy(source, 9)
+  const fineData = highQuality ? edgeAwareBlur(source, bx, by, bw, bh, 3, 200) : blurredCopy(source, 3).getContext('2d')!.getImageData(bx, by, bw, bh)
+  const mediumData = highQuality ? edgeAwareBlur(source, bx, by, bw, bh, 9, 500) : blurredCopy(source, 9).getContext('2d')!.getImageData(bx, by, bw, bh)
 
   const orig = source.getContext('2d')!.getImageData(bx, by, bw, bh)
-  const fineData = fine.getContext('2d')!.getImageData(bx, by, bw, bh)
-  const mediumData = medium.getContext('2d')!.getImageData(bx, by, bw, bh)
   const maskData = mask.getContext('2d')!.getImageData(bx, by, bw, bh)
   const out = new ImageData(bw, bh)
   const reduction = intensity * 0.7
