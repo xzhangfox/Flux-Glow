@@ -31,11 +31,22 @@ function boundsRect(w: number, h: number, bounds?: Bounds) {
 }
 
 /**
- * Fill light: a screen blend (`255 - (255-x)*(1-amount)`), not a flat
- * brightness add — it lifts shadows noticeably while leaving highlights
- * close to where they already were, which is what a reflector/fill light
- * does to a face and a flat additive brighten doesn't (it would wash out
- * highlights by the same amount as shadows, looking hazy rather than lit).
+ * Fill light: lifts shadows without flattening the face into a uniform
+ * pale "mask" — the failure mode of a flat screen blend applied to every
+ * skin pixel alike, which brightens an already-lit cheek by nearly the
+ * same amount as a genuinely shadowed jawline or nose side and so erases
+ * the light/shadow modeling that makes a face read as three-dimensional
+ * in the first place.
+ *
+ * This instead follows the same idea as Lightroom/Camera Raw's "Shadows"
+ * recovery: derive a *local* exposure map by blurring at roughly the
+ * scale real facial shadows occur at (nose bridge, under-eye, jawline) —
+ * well above pore/texture scale — then only lift pixels whose surrounding
+ * area actually reads as dark, with a smooth (smoothstep) falloff rather
+ * than a hard cutoff. Already-bright regions stay close to untouched. The
+ * lift is applied to each pixel's own full-resolution value, not the
+ * blurred copy, so fine skin texture is preserved exactly — only the
+ * broad tone balance changes, the way a reflector changes a photo.
  */
 export function applyFillLight(source: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds): HTMLCanvasElement {
   const w = source.width
@@ -50,16 +61,30 @@ export function applyFillLight(source: HTMLCanvasElement, mask: HTMLCanvasElemen
   const { bx, by, bw, bh } = boundsRect(w, h, bounds)
   if (bw <= 0 || bh <= 0) return result
 
+  // Blur radius tuned to the scale facial shadows actually occur at, not
+  // pixel-level darkness — this is what makes the lift map read as "is
+  // this part of the face in shadow" rather than "is this exact pixel
+  // dark", which would just reintroduce a texture-flattening blur.
+  const shadowScale = Math.max(6, bw * 0.12)
+  const localExposure = blurredCopy(source, shadowScale)
+
   const orig = source.getContext('2d')!.getImageData(bx, by, bw, bh)
+  const localData = localExposure.getContext('2d')!.getImageData(bx, by, bw, bh)
   const maskData = mask.getContext('2d')!.getImageData(bx, by, bw, bh)
   const out = new ImageData(bw, bh)
-  const screenAmount = intensity * 0.5
+
+  const SHADOW_THRESHOLD = 0.6 // local luminance (0-1) below which an area counts as "shadowed"
+  const MAX_LIFT = 0.55 // ceiling on the screen-blend amount even at intensity=1 in the darkest shadow
 
   for (let i = 0; i < orig.data.length; i += 4) {
     const maskAlpha = maskData.data[i + 3] / 255
+    const localLum = (localData.data[i] * 0.299 + localData.data[i + 1] * 0.587 + localData.data[i + 2] * 0.114) / 255
+    const t = Math.min(1, Math.max(0, (SHADOW_THRESHOLD - localLum) / SHADOW_THRESHOLD))
+    const shadowWeight = t * t * (3 - 2 * t) // smoothstep: soft falloff, no visible "shadow / not-shadow" boundary
+    const liftAmount = shadowWeight * intensity * MAX_LIFT
     for (let c = 0; c < 3; c++) {
       const v = orig.data[i + c]
-      const screened = 255 - (255 - v) * (1 - screenAmount)
+      const screened = 255 - (255 - v) * (1 - liftAmount)
       out.data[i + c] = v + (screened - v) * maskAlpha
     }
     out.data[i + 3] = orig.data[i + 3]
@@ -69,10 +94,23 @@ export function applyFillLight(source: HTMLCanvasElement, mask: HTMLCanvasElemen
 }
 
 /**
- * Whitening: a lighter screen blend than fill light, plus pulling color
- * toward its own luminance (desaturating) rather than toward a fixed pale
- * color — so it reduces ruddiness/sallowness generically instead of
- * pushing every skin tone toward the same target shade.
+ * Whitening/tone-evening: corrects the two things that actually read as
+ * "uneven, ruddy skin" — localized redness around the nose and cheeks,
+ * and dull midtones — instead of a flat screen blend plus a global
+ * desaturate-toward-luminance. The old approach ignored *where* the
+ * unevenness actually was and instead washed color out of the whole face
+ * at once, which is indistinguishable from a cheap pale overlay once the
+ * intensity went up.
+ *
+ * Redness is corrected as an *excess* above a normal baseline (the same
+ * deviation-thresholding idea `applyAcneRemoval` below uses for spots),
+ * so ordinary warm skin tones are left alone and only genuine
+ * blotchiness/ruddiness gets pulled toward neutral — closer to how a
+ * selective color correction targets a specific hue range than to a
+ * blanket desaturate. Brightening is weighted toward midtones (a bump
+ * centered on mid-gray, falling off toward both black and white) so dull
+ * areas lift without blowing out highlights that a flat screen blend
+ * would have brightened just as much.
  */
 export function applyWhitening(source: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds): HTMLCanvasElement {
   const w = source.width
@@ -90,21 +128,31 @@ export function applyWhitening(source: HTMLCanvasElement, mask: HTMLCanvasElemen
   const orig = source.getContext('2d')!.getImageData(bx, by, bw, bh)
   const maskData = mask.getContext('2d')!.getImageData(bx, by, bw, bh)
   const out = new ImageData(bw, bh)
-  const screenAmount = intensity * 0.22
-  const desatAmount = intensity * 0.35
+
+  const REDNESS_THRESHOLD = 8
+  const REDNESS_RANGE = 45
+  const BRIGHTEN_MAX = 0.16
 
   for (let i = 0; i < orig.data.length; i += 4) {
     const maskAlpha = maskData.data[i + 3] / 255
     const r = orig.data[i]
     const g = orig.data[i + 1]
     const b = orig.data[i + 2]
-    const screenedR = 255 - (255 - r) * (1 - screenAmount)
-    const screenedG = 255 - (255 - g) * (1 - screenAmount)
-    const screenedB = 255 - (255 - b) * (1 - screenAmount)
-    const luminance = screenedR * 0.299 + screenedG * 0.587 + screenedB * 0.114
-    const finalR = screenedR + (luminance - screenedR) * desatAmount
-    const finalG = screenedG + (luminance - screenedG) * desatAmount
-    const finalB = screenedB + (luminance - screenedB) * desatAmount
+
+    const avgGB = (g + b) / 2
+    const redness = r - avgGB
+    const excess = Math.max(0, redness - REDNESS_THRESHOLD)
+    const correction = Math.min(1, excess / REDNESS_RANGE) * intensity
+    const correctedR = r - excess * correction * 0.7
+
+    const lum = (correctedR * 0.299 + g * 0.587 + b * 0.114) / 255
+    const midtoneWeight = Math.max(0, 1 - Math.abs(lum - 0.55) * 2.2) // peaks near mid-gray, ~0 near black/white
+    const brighten = midtoneWeight * intensity * BRIGHTEN_MAX * 255
+
+    const finalR = correctedR + brighten
+    const finalG = g + brighten
+    const finalB = b + brighten
+
     out.data[i] = r + (finalR - r) * maskAlpha
     out.data[i + 1] = g + (finalG - g) * maskAlpha
     out.data[i + 2] = b + (finalB - b) * maskAlpha
