@@ -274,14 +274,24 @@ function buildVertexBuffers(landmarks: NormalizedLandmark[], params: ReshapePara
   }
 
   if (Math.abs(params.eyes) > 0.001) {
-    const scale = 1 + clamp11(params.eyes) * 0.3
+    // Widened more than it's heightened, not scaled uniformly: a glasses
+    // frame's rim sits closest to the eye right at its top and bottom (a
+    // lens is wider than the eye opening it surrounds, so there's more
+    // real clearance at the sides) — moving the eye loop less vertically
+    // there is a direct, low-cost way to leave a frame rim bending less,
+    // not just a cosmetic side effect. It also happens to look more like
+    // real "bigger eyes" filters (which bias toward widening) than a
+    // uniform bulge does.
+    const amount = clamp11(params.eyes)
+    const scaleX = 1 + amount * 0.3
+    const scaleY = 1 + amount * 0.14
     for (const [loop, center] of [
       [LEFT_EYE_LOOP, leftEyeCenter],
       [RIGHT_EYE_LOOP, rightEyeCenter],
     ] as const) {
       for (const idx of loop) {
-        targetPos[idx * 2] = center.x + (landmarks[idx].x - center.x) * scale
-        targetPos[idx * 2 + 1] = center.y + (landmarks[idx].y - center.y) * scale
+        targetPos[idx * 2] = center.x + (landmarks[idx].x - center.x) * scaleX
+        targetPos[idx * 2 + 1] = center.y + (landmarks[idx].y - center.y) * scaleY
       }
     }
   }
