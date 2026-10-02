@@ -1007,7 +1007,7 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
             into the preview above it), rather than sitting in the row with
             everything else. */}
         <div
-          className="relative bg-black/55 backdrop-blur-2xl border-t border-white/10 rounded-t-[28px] px-4 pt-5"
+          className="relative bg-black/55 backdrop-blur-2xl border-t border-white/10 rounded-t-[28px] px-4 pt-11"
           style={{ paddingBottom: 'max(1.1rem, env(safe-area-inset-bottom))' }}
         >
           {/* Centered independently of the upload icon beside it — sharing

@@ -14,6 +14,7 @@
 // brings that down to something a 30fps loop can actually afford.
 
 import { edgeAwareBlur, croppedBlur } from './guidedFilter'
+import { rgbToLab, labToRgb } from './colorSpace'
 
 export interface Bounds {
   minX: number
@@ -81,6 +82,14 @@ export function luminancePercentile(data: Uint8ClampedArray, maskData: Uint8Clam
  * problem, not a shadow problem, and isn't fill light's job to fix). A
  * face lit from one side has a wide range, so the genuinely dark side
  * gets lifted while the lit side doesn't.
+ *
+ * In high quality mode the local exposure estimate itself is multi-scale
+ * — three blurs at different radii, blended — rather than one single
+ * radius, the same idea Multi-Scale Retinex uses to estimate illumination
+ * (a single "surround" scale is a tradeoff: small enough to find a tight
+ * crease like an under-eye shadow and it's too twitchy to read a broad
+ * one-sided key-light shadow correctly, and vice versa). Blending a small,
+ * medium, and large surround catches both without having to pick one.
  */
 export function applyFillLight(canvas: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds, highQuality = true): void {
   if (intensity <= 0.001) return
@@ -98,7 +107,19 @@ export function applyFillLight(canvas: HTMLCanvasElement, mask: HTMLCanvasElemen
   // meant to be broad/regional, not responsive to skin-texture-scale
   // variance.
   const shadowScale = Math.max(6, Math.round(bw * 0.12))
-  const localData = highQuality ? edgeAwareBlur(canvas, bx, by, bw, bh, shadowScale, 2000) : croppedBlur(canvas, bx, by, bw, bh, shadowScale)
+  // Three scales blended (not averaged blindly — the medium scale, tuned
+  // to where real facial shadows live, carries the most weight) only in
+  // high quality mode: each extra scale is another full blur/getImageData
+  // round trip, affordable once for a static photo but not worth tripling
+  // the live path's per-frame cost for a refinement that mostly shows up
+  // at scales a reduced-resolution live preview is already smoothing over.
+  const localLayers = highQuality
+    ? [
+        { data: edgeAwareBlur(canvas, bx, by, bw, bh, Math.max(3, Math.round(shadowScale * 0.5)), 2000), weight: 0.25 },
+        { data: edgeAwareBlur(canvas, bx, by, bw, bh, shadowScale, 2000), weight: 0.5 },
+        { data: edgeAwareBlur(canvas, bx, by, bw, bh, Math.round(shadowScale * 1.8), 2000), weight: 0.25 },
+      ]
+    : [{ data: croppedBlur(canvas, bx, by, bw, bh, shadowScale), weight: 1 }]
 
   const ctx = canvas.getContext('2d')!
   const orig = ctx.getImageData(bx, by, bw, bh)
@@ -119,7 +140,10 @@ export function applyFillLight(canvas: HTMLCanvasElement, mask: HTMLCanvasElemen
 
   for (let i = 0; i < orig.data.length; i += 4) {
     const maskAlpha = maskData.data[i + 3] / 255
-    const localLum = localData.data[i] * 0.299 + localData.data[i + 1] * 0.587 + localData.data[i + 2] * 0.114
+    let localLum = 0
+    for (const layer of localLayers) {
+      localLum += (layer.data.data[i] * 0.299 + layer.data.data[i + 1] * 0.587 + layer.data.data[i + 2] * 0.114) * layer.weight
+    }
     const t = Math.min(1, Math.max(0, (shadowPoint - localLum) / span))
     const shadowWeight = t * t * (3 - 2 * t) // smoothstep: soft falloff, no visible "shadow / not-shadow" boundary
     const liftAmount = shadowWeight * intensity * MAX_LIFT
@@ -142,15 +166,23 @@ export function applyFillLight(canvas: HTMLCanvasElement, mask: HTMLCanvasElemen
  * at once, which is indistinguishable from a cheap pale overlay once the
  * intensity went up.
  *
- * Redness is corrected as an *excess* above a normal baseline (the same
- * deviation-thresholding idea `applyAcneRemoval` below uses for spots),
- * so ordinary warm skin tones are left alone and only genuine
- * blotchiness/ruddiness gets pulled toward neutral — closer to how a
- * selective color correction targets a specific hue range than to a
- * blanket desaturate. Brightening is weighted toward midtones (a bump
- * centered on mid-gray, falling off toward both black and white) so dull
- * areas lift without blowing out highlights that a flat screen blend
- * would have brightened just as much.
+ * Both corrections run in CIELAB, not RGB — the color space real skin-
+ * tone/whitening algorithms in the cosmetics-science and beauty-camera
+ * literature actually use, because L* (lightness) is fully decoupled from
+ * a* and b* (chroma). Lifting brightness by adjusting R/G/B independently
+ * (the previous version of this function) can't help nudging hue and
+ * saturation along with it, since each RGB channel mixes luminance and
+ * chrominance together — in Lab, a lightness lift touches only L*, so it
+ * can't accidentally shift the person's actual skin tone the way an RGB
+ * approximation can.
+ *
+ * Redness is corrected as an *excess* above a baseline directly on a*
+ * (the actual red-green axis, not the `r - avg(g,b)` RGB approximation
+ * the previous version used), so ordinary warm undertones are left alone
+ * and only genuine blotchiness/ruddiness gets pulled toward neutral.
+ * Lightness lift is weighted toward midtones (a bump centered on
+ * mid-lightness, falling off toward both black and white) so dull areas
+ * brighten without blowing out existing highlights.
  */
 export function applyWhitening(canvas: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds): void {
   if (intensity <= 0.001) return
@@ -162,33 +194,37 @@ export function applyWhitening(canvas: HTMLCanvasElement, mask: HTMLCanvasElemen
   const maskData = mask.getContext('2d')!.getImageData(bx, by, bw, bh)
   const out = new ImageData(bw, bh)
 
-  const REDNESS_THRESHOLD = 8
-  const REDNESS_RANGE = 45
-  const BRIGHTEN_MAX = 0.16
+  const REDNESS_THRESHOLD = 6 // a* units above which redness counts as excess, not normal warm undertone
+  const REDNESS_RANGE = 16
+  const LIFT_MAX = 9 // L* units (0-100 scale) at full intensity and full midtone weight
 
   for (let i = 0; i < orig.data.length; i += 4) {
     const maskAlpha = maskData.data[i + 3] / 255
     const r = orig.data[i]
     const g = orig.data[i + 1]
     const b = orig.data[i + 2]
+    if (maskAlpha < 0.004) {
+      out.data[i] = r
+      out.data[i + 1] = g
+      out.data[i + 2] = b
+      out.data[i + 3] = orig.data[i + 3]
+      continue
+    }
 
-    const avgGB = (g + b) / 2
-    const redness = r - avgGB
-    const excess = Math.max(0, redness - REDNESS_THRESHOLD)
+    const [L, a, labB] = rgbToLab(r, g, b)
+
+    const excess = Math.max(0, a - REDNESS_THRESHOLD)
     const correction = Math.min(1, excess / REDNESS_RANGE) * intensity
-    const correctedR = r - excess * correction * 0.7
+    const newA = a - excess * correction * 0.6
 
-    const lum = (correctedR * 0.299 + g * 0.587 + b * 0.114) / 255
-    const midtoneWeight = Math.max(0, 1 - Math.abs(lum - 0.55) * 2.2) // peaks near mid-gray, ~0 near black/white
-    const brighten = midtoneWeight * intensity * BRIGHTEN_MAX * 255
+    const midtoneWeight = Math.max(0, 1 - Math.abs(L / 100 - 0.55) * 2.2) // peaks near mid-lightness, ~0 near black/white
+    const newL = Math.min(100, L + midtoneWeight * intensity * LIFT_MAX)
 
-    const finalR = correctedR + brighten
-    const finalG = g + brighten
-    const finalB = b + brighten
+    const [nr, ng, nb] = labToRgb(newL, newA, labB)
 
-    out.data[i] = r + (finalR - r) * maskAlpha
-    out.data[i + 1] = g + (finalG - g) * maskAlpha
-    out.data[i + 2] = b + (finalB - b) * maskAlpha
+    out.data[i] = r + (nr - r) * maskAlpha
+    out.data[i + 1] = g + (ng - g) * maskAlpha
+    out.data[i + 2] = b + (nb - b) * maskAlpha
     out.data[i + 3] = orig.data[i + 3]
   }
   ctx.putImageData(out, bx, by)
