@@ -29,17 +29,19 @@ import {
 // more detail than this editor displays or than frequency separation
 // needs; working at this size keeps every slider drag responsive.
 const MAX_DIMENSION = 1600
-// Live mode works at a smaller size than a captured photo: the per-pixel
-// smoothing/reshape passes are plain JS, not GPU shaders. This is also the
-// canvas's actual backing-store resolution (see `render()` — it's sized to
-// match the processed frame, then stretched via CSS to fill the screen),
-// so anything too low visibly blurs on a high-DPI phone regardless of how
-// sharp the underlying camera feed is. `smoothSkin`'s and the reshape
-// passes' own bounding-box optimizations (only the face region, not the
-// full frame, gets touched) are most of what makes a resolution this high
-// affordable per live frame.
-const LIVE_MAX_DIMENSION = 960
-const LIVE_FRAME_INTERVAL_MS = 60 // floor on tick spacing — actual pace is also gated by processingRef below
+// Live mode used to need a smaller working size than a captured photo
+// because every pass — smoothing *and* reshape — was plain JS, not GPU
+// shaders; reshape moved to a WebGL mesh warp (see meshWarp.ts), so the
+// only remaining per-pixel CPU cost is smoothing (bounded to the face's
+// own bounding box) and the small isolated nose warp, both cheap enough
+// to afford matching the camera's own capture resolution instead of
+// downscaling further. This is also the canvas's actual backing-store
+// resolution (see `render()` — it's sized to match the processed frame,
+// then stretched via CSS to fill the screen), so anything lower than
+// what the camera actually delivers is a real, visible loss of sharpness
+// on a high-DPI phone, not a hidden margin of safety.
+const LIVE_MAX_DIMENSION = 1280
+const LIVE_FRAME_INTERVAL_MS = 33 // ~30fps ceiling, not a promise — actual pace is still gated by processingRef below, so a slower device just falls short of it instead of backlogging
 
 export type Source = { kind: 'image'; file: File } | { kind: 'live' }
 
@@ -155,10 +157,19 @@ function buildZoomPresets({ min, max }: ZoomRange): number[] {
 // absolute-position-is-value approach the previous vertical strip used,
 // just along the other axis) — simpler and more predictable than treating
 // it as a literal rotating dial someone has to sweep an arc to turn.
-const FAN_MAX_ANGLE_DEG = 55
-const FAN_PIVOT = { x: 140, y: 112 }
-const FAN_OUTER_R = 98
-const FAN_INNER_R = 72
+// A 270° sweep (not just the ~110° wedge a semicircle-ish fan would give)
+// — this reaches well past horizontal on both sides, which is why the
+// pivot sits vertically centered in a taller box instead of at its bottom
+// edge: at ±135° from straight up, the arc's own ends are already *below*
+// the pivot's own height (sin/cos of 135° puts them out and down), so
+// there has to be room for those two "wings" to hang below pivot level,
+// not just space above it.
+const FAN_MAX_ANGLE_DEG = 135
+const FAN_PIVOT = { x: 140, y: 108 }
+const FAN_OUTER_R = 92
+const FAN_INNER_R = 66
+const FAN_VIEW_W = 280
+const FAN_VIEW_H = 200
 
 function fanPoint(angleDeg: number, radius: number) {
   const rad = (angleDeg * Math.PI) / 180
@@ -169,6 +180,13 @@ function ZoomFanDial({ min, max, value, onChange }: { min: number; max: number; 
   const trackRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const handleMove = (e: PointerEvent) => {
+      // Now that the fan stays open after a release (see handleZoomPressEnd),
+      // a pointermove listener on `window` would otherwise react to every
+      // idle mouse hover across the whole page, not just an actual drag —
+      // harmless before, when the fan only existed for the instant a finger
+      // was physically down on it, but very much not now. `buttons` is 0
+      // whenever nothing is pressed, for both mouse and touch.
+      if (e.buttons === 0) return
       const el = trackRef.current
       if (!el) return
       const rect = el.getBoundingClientRect()
@@ -184,12 +202,15 @@ function ZoomFanDial({ min, max, value, onChange }: { min: number; max: number; 
   const needleTip = fanPoint(needleAngle, FAN_OUTER_R)
   const arcStart = fanPoint(-FAN_MAX_ANGLE_DEG, FAN_OUTER_R)
   const arcEnd = fanPoint(FAN_MAX_ANGLE_DEG, FAN_OUTER_R)
-  const sectorPath = `M ${FAN_PIVOT.x} ${FAN_PIVOT.y} L ${arcStart.x} ${arcStart.y} A ${FAN_OUTER_R} ${FAN_OUTER_R} 0 0 1 ${arcEnd.x} ${arcEnd.y} Z`
-  const tickCount = 13
+  // 270° is more than a half-circle, so the large-arc-flag has to be 1 —
+  // with it left at 0 (right for the ~110° sweep this used to be), SVG
+  // would silently draw the *short* way around instead (90° the wrong way).
+  const sectorPath = `M ${FAN_PIVOT.x} ${FAN_PIVOT.y} L ${arcStart.x} ${arcStart.y} A ${FAN_OUTER_R} ${FAN_OUTER_R} 0 1 1 ${arcEnd.x} ${arcEnd.y} Z`
+  const tickCount = 25
 
   return (
-    <div ref={trackRef} className="absolute left-1/2 -translate-x-1/2 bottom-56 w-[280px] h-[116px] touch-none">
-      <svg viewBox="0 0 280 116" className="w-full h-full overflow-visible">
+    <div ref={trackRef} className="absolute left-1/2 -translate-x-1/2 bottom-56 w-[280px] h-[200px] touch-none">
+      <svg viewBox={`0 0 ${FAN_VIEW_W} ${FAN_VIEW_H}`} className="w-full h-full overflow-visible">
         <path d={sectorPath} fill="rgba(15,15,15,0.55)" stroke="rgba(255,255,255,0.18)" strokeWidth={1} />
         {Array.from({ length: tickCount }, (_, i) => {
           const t = i / (tickCount - 1)
@@ -295,19 +316,6 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
     zoomRangeRef.current = zoomRange
   }, [zoomRange])
 
-  // Releasing anywhere closes the dial — the drag that's adjusting it
-  // isn't pointer-captured to the dial itself (see ZoomFanDial), so this is
-  // the one place that actually knows the gesture ended.
-  useEffect(() => {
-    if (!zoomDialOpen) return
-    const close = () => setZoomDialOpen(false)
-    window.addEventListener('pointerup', close)
-    window.addEventListener('pointercancel', close)
-    return () => {
-      window.removeEventListener('pointerup', close)
-      window.removeEventListener('pointercancel', close)
-    }
-  }, [zoomDialOpen])
 
   // Leaving the retouch panel always resets back to the region grid, so
   // reopening it never silently drops the visitor into whichever slider
@@ -566,20 +574,43 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
   // for anything continuous in between — the same two-tier interaction
   // most phone camera apps use, since a tap-only cycle can't reach, say,
   // 2.4x, and a drag-only dial is overkill for the common "just go to 2x"
-  // case.
+  // case. The fan stays open across multiple separate drags once a
+  // long-press opens it — releasing mid-adjustment doesn't close it, only
+  // a direct tap on the pill while it's already open does — since needing
+  // to hold the whole time to keep fine-tuning open defeats the point of
+  // "fine" adjustment.
   const ZOOM_LONG_PRESS_MS = 350
   const handleZoomPressStart = () => {
+    if (zoomDialOpen) return // this press's matching release is the close-tap, not a new long-press
     zoomPressMovedRef.current = false
     zoomPressTimerRef.current = window.setTimeout(() => {
       zoomPressTimerRef.current = null
       setZoomDialOpen(true)
     }, ZOOM_LONG_PRESS_MS)
   }
-  const handleZoomPressEnd = () => {
+  // A genuine release on the pill itself: closes the fan if it's already
+  // open (the only way to close it now that it persists across drags),
+  // otherwise this was a quick tap — cycle presets.
+  const handleZoomPointerUp = () => {
+    if (zoomDialOpen) {
+      setZoomDialOpen(false)
+      return
+    }
     if (zoomPressTimerRef.current !== null) {
       clearTimeout(zoomPressTimerRef.current)
       zoomPressTimerRef.current = null
       if (!zoomPressMovedRef.current) handleToggleZoom()
+    }
+  }
+  // Only ever cancels a *pending* long-press timer — never closes an
+  // already-open fan. The finger leaving the pill's small bounds is
+  // exactly what happens the instant someone slides up onto the fan
+  // itself to start dragging it; that's not a release.
+  const handleZoomPointerLeave = () => {
+    if (zoomDialOpen) return
+    if (zoomPressTimerRef.current !== null) {
+      clearTimeout(zoomPressTimerRef.current)
+      zoomPressTimerRef.current = null
     }
   }
 
@@ -734,8 +765,8 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
           )}
           <button
             onPointerDown={handleZoomPressStart}
-            onPointerUp={handleZoomPressEnd}
-            onPointerLeave={handleZoomPressEnd}
+            onPointerUp={handleZoomPointerUp}
+            onPointerLeave={handleZoomPointerLeave}
             aria-label="Zoom level — tap to cycle, hold for fine control"
             className={`absolute left-1/2 -translate-x-1/2 bottom-44 w-9 h-9 rounded-full backdrop-blur-sm border text-white text-[11px] font-semibold flex items-center justify-center select-none touch-none transition ${
               zoomDialOpen ? 'bg-primary text-black border-primary scale-110' : 'bg-black/50 border-white/20'
@@ -836,18 +867,22 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
           className="relative bg-black/55 backdrop-blur-2xl border-t border-white/10 rounded-t-[28px] px-4 pt-5"
           style={{ paddingBottom: 'max(1.1rem, env(safe-area-inset-bottom))' }}
         >
-          <div className="absolute left-1/2 -translate-x-1/2 -top-8 flex items-end gap-3">
-            {centerButton}
-            {liveActive && !confirmed && (
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                aria-label="Upload a photo instead"
-                className="w-9 h-9 mb-1 rounded-full bg-white/15 backdrop-blur-sm border border-white/25 flex items-center justify-center text-white"
-              >
-                <IconImage className="w-4 h-4" />
-              </button>
-            )}
-          </div>
+          {/* Centered independently of the upload icon beside it — sharing
+              one centered flex group (as this used to) centers the *pair*,
+              which pulls the shutter itself off-center to the left. The
+              upload icon is instead positioned at a fixed offset to the
+              shutter's right (half the shutter's own width, plus a gap). */}
+          <div className="absolute left-1/2 -translate-x-1/2 -top-8">{centerButton}</div>
+          {liveActive && !confirmed && (
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              aria-label="Upload a photo instead"
+              className="absolute -top-2 w-9 h-9 rounded-full bg-white/15 backdrop-blur-sm border border-white/25 flex items-center justify-center text-white"
+              style={{ left: 'calc(50% + 44px)' }}
+            >
+              <IconImage className="w-4 h-4" />
+            </button>
+          )}
 
           <div className="grid grid-cols-2 items-center gap-2">
             <div className="flex items-center gap-3 justify-self-start">
