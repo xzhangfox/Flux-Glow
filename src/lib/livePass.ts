@@ -36,6 +36,7 @@
 // approximation given the captured photo is unaffected.
 
 import { luminancePercentile } from './beauty'
+import { buildWhiteningLUT, applyLUT } from './whiteningLUT'
 
 export interface LiveToneParams {
   fillLight: number
@@ -68,6 +69,15 @@ export function applyLiveTonePass(canvas: HTMLCanvasElement, mask: HTMLCanvasEle
   const needWrinkle = params.wrinkleRemoval > 0.001
   const needSmooth = params.smoothness > 0.001
   if (!needFillLight && !needWhitening && !needAcne && !needWrinkle && !needSmooth) return
+
+  // Same CIELAB-based whitening transform the static pipeline uses (see
+  // beauty.ts/whiteningLUT.ts), via the same LUT — building the LUT costs
+  // a few ms regardless of image size (it's a fixed 17x17x17 grid, not
+  // per-pixel), so it's affordable here too; what the live path skips is
+  // the static path's extra frequency-separation blur, not the transform
+  // itself, so live and captured whitening now actually look the same.
+  const whiteningLut = needWhitening ? buildWhiteningLUT(params.whitening) : null
+  const whitenedPixel: [number, number, number] = [0, 0, 0]
 
   // Half resolution once the region is big enough that it matters — for
   // an already-small bounds rect (e.g. editing a small/cropped photo) the
@@ -130,9 +140,6 @@ export function applyLiveTonePass(canvas: HTMLCanvasElement, mask: HTMLCanvasEle
   const MAX_LIFT = 0.5
   const DEVIATION_THRESHOLD = 16
   const DEVIATION_RANGE = 40
-  const REDNESS_THRESHOLD = 8
-  const REDNESS_RANGE = 45
-  const BRIGHTEN_MAX = 0.16
   const wrinkleReduction = params.wrinkleRemoval * 0.7
 
   for (let i = 0; i < orig.data.length; i += 4) {
@@ -151,18 +158,11 @@ export function applyLiveTonePass(canvas: HTMLCanvasElement, mask: HTMLCanvasEle
       b = b + (255 - (255 - b) * (1 - liftAmount) - b)
     }
 
-    if (needWhitening) {
-      const avgGB = (g + b) / 2
-      const redness = r - avgGB
-      const excess = Math.max(0, redness - REDNESS_THRESHOLD)
-      const correction = Math.min(1, excess / REDNESS_RANGE) * params.whitening
-      const correctedR = r - excess * correction * 0.7
-      const lum = (correctedR * 0.299 + g * 0.587 + b * 0.114) / 255
-      const midtoneWeight = Math.max(0, 1 - Math.abs(lum - 0.55) * 2.2)
-      const brighten = midtoneWeight * params.whitening * BRIGHTEN_MAX * 255
-      r = r + (correctedR + brighten - r) * maskAlpha
-      g = g + brighten * maskAlpha
-      b = b + brighten * maskAlpha
+    if (whiteningLut) {
+      applyLUT(r, g, b, whiteningLut, whitenedPixel)
+      r = r + (whitenedPixel[0] - r) * maskAlpha
+      g = g + (whitenedPixel[1] - g) * maskAlpha
+      b = b + (whitenedPixel[2] - b) * maskAlpha
     }
 
     if (acneLocal) {

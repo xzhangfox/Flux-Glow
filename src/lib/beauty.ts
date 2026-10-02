@@ -14,7 +14,7 @@
 // brings that down to something a 30fps loop can actually afford.
 
 import { edgeAwareBlur, croppedBlur } from './guidedFilter'
-import { rgbToLab, labToRgb } from './colorSpace'
+import { buildWhiteningLUT, applyLUT } from './whiteningLUT'
 
 export interface Bounds {
   minX: number
@@ -166,37 +166,40 @@ export function applyFillLight(canvas: HTMLCanvasElement, mask: HTMLCanvasElemen
  * at once, which is indistinguishable from a cheap pale overlay once the
  * intensity went up.
  *
- * Both corrections run in CIELAB, not RGB — the color space real skin-
- * tone/whitening algorithms in the cosmetics-science and beauty-camera
- * literature actually use, because L* (lightness) is fully decoupled from
- * a* and b* (chroma). Lifting brightness by adjusting R/G/B independently
- * (the previous version of this function) can't help nudging hue and
- * saturation along with it, since each RGB channel mixes luminance and
- * chrominance together — in Lab, a lightness lift touches only L*, so it
- * can't accidentally shift the person's actual skin tone the way an RGB
- * approximation can.
+ * The color mapping itself (redness-excess correction on a*, midtone-
+ * weighted lift on L*) runs through a 3D LUT (see whiteningLUT.ts), not a
+ * live per-pixel Lab round trip — the same mechanism real camera color
+ * pipelines use a LUT for: build the transform once on a coarse grid,
+ * then every actual pixel is a cheap trilinear lookup, no transcendental
+ * math per pixel. Decoupling L*, a*, and b* is still what makes the transform
+ * itself correct (a lightness lift that can't help nudging hue the way
+ * adjusting R/G/B independently would); the LUT is what makes doing that
+ * at full image resolution affordable.
  *
- * Redness is corrected as an *excess* above a baseline directly on a*
- * (the actual red-green axis, not the `r - avg(g,b)` RGB approximation
- * the previous version used), so ordinary warm undertones are left alone
- * and only genuine blotchiness/ruddiness gets pulled toward neutral.
- * Lightness lift is weighted toward midtones (a bump centered on
- * mid-lightness, falling off toward both black and white) so dull areas
- * brighten without blowing out existing highlights.
+ * The LUT only touches a *low-frequency* base layer, not the original
+ * pixels directly — `edgeAwareBlur` (the guided filter already used
+ * elsewhere in this file) splits the face into a low-frequency tone layer
+ * and a high-frequency detail layer (pores, fine texture), the whitening
+ * map applies to the low layer only, and the untouched detail recombines
+ * on top at full strength afterward. Mapping the raw pixels directly
+ * would run the same lightness/redness correction on pore-level noise
+ * too, which is how aggressive whitening ends up looking waxy — flattened
+ * micro-contrast, not just brighter, even though nothing here blurs the
+ * final image (the detail layer is added back exactly, unblurred).
  */
 export function applyWhitening(canvas: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds): void {
   if (intensity <= 0.001) return
   const { bx, by, bw, bh } = boundsRect(canvas.width, canvas.height, bounds)
   if (bw <= 0 || bh <= 0) return
 
+  const lut = buildWhiteningLUT(intensity)
+  const lowData = edgeAwareBlur(canvas, bx, by, bw, bh, 12, 700) // same tone-vs-edge eps as smoothing.ts's TONE_EDGE_EPS
+
   const ctx = canvas.getContext('2d')!
   const orig = ctx.getImageData(bx, by, bw, bh)
   const maskData = mask.getContext('2d')!.getImageData(bx, by, bw, bh)
   const out = new ImageData(bw, bh)
-
-  const REDNESS_THRESHOLD = 6 // a* units above which redness counts as excess, not normal warm undertone
-  const REDNESS_RANGE = 16
-  const LIFT_MAX = 9 // L* units (0-100 scale) at full intensity and full midtone weight
+  const mapped: [number, number, number] = [0, 0, 0]
 
   for (let i = 0; i < orig.data.length; i += 4) {
     const maskAlpha = maskData.data[i + 3] / 255
@@ -211,20 +214,17 @@ export function applyWhitening(canvas: HTMLCanvasElement, mask: HTMLCanvasElemen
       continue
     }
 
-    const [L, a, labB] = rgbToLab(r, g, b)
+    const lowR = lowData.data[i]
+    const lowG = lowData.data[i + 1]
+    const lowB = lowData.data[i + 2]
+    applyLUT(lowR, lowG, lowB, lut, mapped)
+    const finalR = mapped[0] + (r - lowR)
+    const finalG = mapped[1] + (g - lowG)
+    const finalB = mapped[2] + (b - lowB)
 
-    const excess = Math.max(0, a - REDNESS_THRESHOLD)
-    const correction = Math.min(1, excess / REDNESS_RANGE) * intensity
-    const newA = a - excess * correction * 0.6
-
-    const midtoneWeight = Math.max(0, 1 - Math.abs(L / 100 - 0.55) * 2.2) // peaks near mid-lightness, ~0 near black/white
-    const newL = Math.min(100, L + midtoneWeight * intensity * LIFT_MAX)
-
-    const [nr, ng, nb] = labToRgb(newL, newA, labB)
-
-    out.data[i] = r + (nr - r) * maskAlpha
-    out.data[i + 1] = g + (ng - g) * maskAlpha
-    out.data[i + 2] = b + (nb - b) * maskAlpha
+    out.data[i] = r + (finalR - r) * maskAlpha
+    out.data[i + 1] = g + (finalG - g) * maskAlpha
+    out.data[i + 2] = b + (finalB - b) * maskAlpha
     out.data[i + 3] = orig.data[i + 3]
   }
   ctx.putImageData(out, bx, by)
