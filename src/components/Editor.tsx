@@ -22,6 +22,11 @@ import {
   IconDroplet,
   IconImage,
   IconBack,
+  IconSparkle,
+  IconSun,
+  IconWhiten,
+  IconTarget,
+  IconWave,
   RegionIcon,
 } from './icons'
 
@@ -47,7 +52,9 @@ export type Source = { kind: 'image'; file: File } | { kind: 'live' }
 
 type Status = 'loading' | 'ready' | 'no-face' | 'error'
 
-type RegionKey = 'smooth' | 'face' | 'temple' | 'cheekbone' | 'eyes' | 'eyebrow' | 'nose' | 'noseBridge' | 'mouth'
+type RegionKey = 'face' | 'temple' | 'cheekbone' | 'eyes' | 'eyebrow' | 'nose' | 'noseBridge' | 'mouth'
+type MouthSubKey = 'mouthSize' | 'mouthUpperLip' | 'mouthLowerLip' | 'mouthCorners' | 'mouthCornerSmooth'
+type BeautyKey = 'smooth' | 'fillLight' | 'whitening' | 'acneRemoval' | 'wrinkleRemoval'
 
 function loadImage(file: File): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -270,12 +277,22 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
   const [noseBridge, setNoseBridge] = useState(0)
   const [temple, setTemple] = useState(0)
   const [cheekbone, setCheekbone] = useState(0)
+  const [mouthUpperLip, setMouthUpperLip] = useState(0)
+  const [mouthLowerLip, setMouthLowerLip] = useState(0)
+  const [mouthCorners, setMouthCorners] = useState(0)
+  const [fillLight, setFillLight] = useState(0)
+  const [whitening, setWhitening] = useState(0)
+  const [acneRemoval, setAcneRemoval] = useState(0)
+  const [wrinkleRemoval, setWrinkleRemoval] = useState(0)
+  const [mouthCornerSmooth, setMouthCornerSmooth] = useState(0)
   const [filterId, setFilterId] = useState('none')
   const [showBefore, setShowBefore] = useState(false)
   const [liveActive, setLiveActive] = useState(source.kind === 'live')
   const [confirmed, setConfirmed] = useState(false)
-  const [openPanel, setOpenPanel] = useState<'retouch' | 'filter' | null>(null)
+  const [openPanel, setOpenPanel] = useState<'retouch' | 'beauty' | 'filter' | null>(null)
   const [selectedRegion, setSelectedRegion] = useState<RegionKey | null>(null)
+  const [selectedMouthSub, setSelectedMouthSub] = useState<MouthSubKey | null>(null)
+  const [selectedBeauty, setSelectedBeauty] = useState<BeautyKey | null>(null)
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user')
   const [zoom, setZoom] = useState(1)
   const [zoomRange, setZoomRange] = useState<ZoomRange>(DIGITAL_ZOOM_RANGE)
@@ -291,7 +308,7 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
   const lastProcessRef = useRef(0)
   const processingRef = useRef(false)
   const liveActiveRef = useRef(liveActive)
-  const paramsRef = useRef<EditParams>({ smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, filterId })
+  const paramsRef = useRef<EditParams>({ smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, mouthUpperLip, mouthLowerLip, mouthCorners, fillLight, whitening, acneRemoval, wrinkleRemoval, mouthCornerSmooth, filterId })
   const facingModeRef = useRef(facingMode)
   const zoomRef = useRef(zoom)
   const zoomRangeRef = useRef(zoomRange)
@@ -300,12 +317,13 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
   const zoomPressMovedRef = useRef(false)
   const panelRef = useRef<HTMLDivElement>(null)
   const retouchButtonRef = useRef<HTMLButtonElement>(null)
+  const beautyButtonRef = useRef<HTMLButtonElement>(null)
   const filterButtonRef = useRef<HTMLButtonElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    paramsRef.current = { smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, filterId }
-  }, [smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, filterId])
+    paramsRef.current = { smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, mouthUpperLip, mouthLowerLip, mouthCorners, fillLight, whitening, acneRemoval, wrinkleRemoval, mouthCornerSmooth, filterId }
+  }, [smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, mouthUpperLip, mouthLowerLip, mouthCorners, fillLight, whitening, acneRemoval, wrinkleRemoval, mouthCornerSmooth, filterId])
   useEffect(() => {
     liveActiveRef.current = liveActive
   }, [liveActive])
@@ -317,11 +335,20 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
   }, [zoomRange])
 
 
-  // Leaving the retouch panel always resets back to the region grid, so
-  // reopening it never silently drops the visitor into whichever slider
-  // they happened to be adjusting last time.
+  // Leaving a panel always resets it back to its own top-level grid, so
+  // reopening it never silently drops the visitor into whichever
+  // slider/sub-grid they happened to be adjusting last time.
   useEffect(() => {
-    if (openPanel !== 'retouch') setSelectedRegion(null)
+    if (openPanel !== 'retouch') {
+      setSelectedRegion(null)
+      setSelectedMouthSub(null)
+    }
+  }, [openPanel])
+  useEffect(() => {
+    if (selectedRegion !== 'mouth') setSelectedMouthSub(null)
+  }, [selectedRegion])
+  useEffect(() => {
+    if (openPanel !== 'beauty') setSelectedBeauty(null)
   }, [openPanel])
 
   // Tapping anywhere outside the open panel (or the Retouch/Filter buttons
@@ -332,6 +359,7 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
       const target = e.target as Node
       if (panelRef.current?.contains(target)) return
       if (retouchButtonRef.current?.contains(target)) return
+      if (beautyButtonRef.current?.contains(target)) return
       if (filterButtonRef.current?.contains(target)) return
       setOpenPanel(null)
     }
@@ -515,14 +543,14 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
     if (!baseRef.current) return
     const t = setTimeout(recomputeStatic, 60)
     return () => clearTimeout(t)
-  }, [smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, filterId, liveActive, recomputeStatic])
+  }, [smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, mouthUpperLip, mouthLowerLip, mouthCorners, fillLight, whitening, acneRemoval, wrinkleRemoval, mouthCornerSmooth, filterId, liveActive, recomputeStatic])
 
   // Any further adjustment after confirming means the exported image would
   // no longer match what's on screen — fall back to Confirm again rather
   // than silently leaving a stale Save/Share up.
   useEffect(() => {
     setConfirmed(false)
-  }, [smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, filterId])
+  }, [smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, mouthUpperLip, mouthLowerLip, mouthCorners, fillLight, whitening, acneRemoval, wrinkleRemoval, mouthCornerSmooth, filterId])
 
   const handleCapture = () => {
     stopLive()
@@ -654,7 +682,6 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
   // see at a glance which regions they've already touched without having
   // to open each one.
   const regions: { key: RegionKey; label: string; icon: ReactNode; value: number; onChange: (v: number) => void; bidirectional: boolean; active: boolean }[] = [
-    { key: 'smooth', label: 'Smooth', icon: <IconDroplet className="w-5 h-5" />, value: smoothness, onChange: setSmoothness, bidirectional: false, active: smoothness !== 0.6 },
     { key: 'face', label: 'Jaw', icon: <RegionIcon dot={[12, 16.8]} className="w-5 h-5" />, value: face, onChange: setFace, bidirectional: true, active: face !== 0.25 },
     { key: 'temple', label: 'Temple', icon: <RegionIcon dot={[7.2, 7.6]} pair className="w-5 h-5" />, value: temple, onChange: setTemple, bidirectional: true, active: temple !== 0 },
     { key: 'cheekbone', label: 'Cheekbone', icon: <RegionIcon dot={[6.8, 11.5]} pair className="w-5 h-5" />, value: cheekbone, onChange: setCheekbone, bidirectional: true, active: cheekbone !== 0 },
@@ -662,9 +689,37 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
     { key: 'eyebrow', label: 'Eyebrow', icon: <RegionIcon dot={[9, 8]} pair className="w-5 h-5" />, value: eyebrowHeight, onChange: setEyebrowHeight, bidirectional: true, active: eyebrowHeight !== 0 },
     { key: 'nose', label: 'Nose', icon: <RegionIcon dot={[12, 12.5]} className="w-5 h-5" />, value: nose, onChange: setNose, bidirectional: true, active: nose !== 0 },
     { key: 'noseBridge', label: 'Bridge', icon: <RegionIcon dot={[12, 9.3]} className="w-5 h-5" />, value: noseBridge, onChange: setNoseBridge, bidirectional: true, active: noseBridge !== 0 },
-    { key: 'mouth', label: 'Mouth', icon: <RegionIcon dot={[12, 14.3]} className="w-5 h-5" />, value: mouth, onChange: setMouth, bidirectional: true, active: mouth !== 0 },
+    {
+      key: 'mouth',
+      label: 'Mouth',
+      icon: <RegionIcon dot={[12, 14.3]} className="w-5 h-5" />,
+      value: mouth,
+      onChange: setMouth,
+      bidirectional: true,
+      active: mouth !== 0 || mouthUpperLip !== 0 || mouthLowerLip !== 0 || mouthCorners !== 0 || mouthCornerSmooth !== 0,
+    },
+  ]
+  // Mouth drills one level deeper than every other region: tapping it opens
+  // its own sub-grid (size/upper lip/lower lip/corners/fold) instead of
+  // going straight to a slider, since "mouth" bundles several independently
+  // adjustable things rather than being one knob the way jaw/nose are.
+  const mouthSubRegions: { key: MouthSubKey; label: string; icon: ReactNode; value: number; onChange: (v: number) => void; bidirectional: boolean; active: boolean }[] = [
+    { key: 'mouthSize', label: 'Size', icon: <RegionIcon dot={[12, 14.3]} className="w-5 h-5" />, value: mouth, onChange: setMouth, bidirectional: true, active: mouth !== 0 },
+    { key: 'mouthUpperLip', label: 'Upper Lip', icon: <RegionIcon dot={[12, 13.4]} className="w-5 h-5" />, value: mouthUpperLip, onChange: setMouthUpperLip, bidirectional: true, active: mouthUpperLip !== 0 },
+    { key: 'mouthLowerLip', label: 'Lower Lip', icon: <RegionIcon dot={[12, 15.3]} className="w-5 h-5" />, value: mouthLowerLip, onChange: setMouthLowerLip, bidirectional: true, active: mouthLowerLip !== 0 },
+    { key: 'mouthCorners', label: 'Corners', icon: <RegionIcon dot={[9.3, 14.3]} pair className="w-5 h-5" />, value: mouthCorners, onChange: setMouthCorners, bidirectional: true, active: mouthCorners !== 0 },
+    { key: 'mouthCornerSmooth', label: 'Fold', icon: <RegionIcon dot={[9, 15.6]} pair className="w-5 h-5" />, value: mouthCornerSmooth, onChange: setMouthCornerSmooth, bidirectional: false, active: mouthCornerSmooth !== 0 },
+  ]
+  const beautyRegions: { key: BeautyKey; label: string; icon: ReactNode; value: number; onChange: (v: number) => void; bidirectional: boolean; active: boolean }[] = [
+    { key: 'smooth', label: 'Smooth', icon: <IconDroplet className="w-5 h-5" />, value: smoothness, onChange: setSmoothness, bidirectional: false, active: smoothness !== 0.6 },
+    { key: 'fillLight', label: 'Fill Light', icon: <IconSun className="w-5 h-5" />, value: fillLight, onChange: setFillLight, bidirectional: false, active: fillLight !== 0 },
+    { key: 'whitening', label: 'Whiten', icon: <IconWhiten className="w-5 h-5" />, value: whitening, onChange: setWhitening, bidirectional: false, active: whitening !== 0 },
+    { key: 'acneRemoval', label: 'Acne', icon: <IconTarget className="w-5 h-5" />, value: acneRemoval, onChange: setAcneRemoval, bidirectional: false, active: acneRemoval !== 0 },
+    { key: 'wrinkleRemoval', label: 'Wrinkle', icon: <IconWave className="w-5 h-5" />, value: wrinkleRemoval, onChange: setWrinkleRemoval, bidirectional: false, active: wrinkleRemoval !== 0 },
   ]
   const activeRegion = regions.find((r) => r.key === selectedRegion) ?? null
+  const activeMouthSub = mouthSubRegions.find((r) => r.key === selectedMouthSub) ?? null
+  const activeBeauty = beautyRegions.find((r) => r.key === selectedBeauty) ?? null
 
   let centerButton: React.ReactNode
   if (liveActive) {
@@ -811,7 +866,46 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
           <div className="overflow-hidden">
             <div className="bg-black/55 backdrop-blur-2xl rounded-2xl p-4 border border-white/10">
               {openPanel === 'retouch' ? (
-                activeRegion ? (
+                selectedRegion === 'mouth' ? (
+                  activeMouthSub ? (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => setSelectedMouthSub(null)}
+                        aria-label="Back to mouth"
+                        className="w-8 h-8 rounded-full bg-white/10 border border-white/15 flex items-center justify-center text-white flex-shrink-0"
+                      >
+                        <IconBack className="w-4 h-4" />
+                      </button>
+                      <div className="flex-1">
+                        <Slider label={activeMouthSub.label} value={activeMouthSub.value} onChange={activeMouthSub.onChange} bidirectional={activeMouthSub.bidirectional} disabled={disabled} />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => setSelectedRegion(null)}
+                        aria-label="Back to regions"
+                        className="w-8 h-8 rounded-full bg-white/10 border border-white/15 flex items-center justify-center text-white flex-shrink-0"
+                      >
+                        <IconBack className="w-4 h-4" />
+                      </button>
+                      <div className="flex items-center gap-4 overflow-x-auto pb-0.5 -mx-1 px-1">
+                        {mouthSubRegions.map((r) => (
+                          <button key={r.key} onClick={() => setSelectedMouthSub(r.key)} aria-label={`Adjust ${r.label}`} className="flex flex-col items-center gap-1 flex-shrink-0 w-14">
+                            <span
+                              className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
+                                r.active ? 'bg-primary/20 border-primary text-primary' : 'bg-white/5 border-white/15 text-white/85'
+                              }`}
+                            >
+                              {r.icon}
+                            </span>
+                            <span className="text-[10px] font-medium leading-none text-white/85 whitespace-nowrap">{r.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                ) : activeRegion ? (
                   <div className="flex items-center gap-3">
                     <button
                       onClick={() => setSelectedRegion(null)}
@@ -828,6 +922,36 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
                   <div className="flex items-center gap-4 overflow-x-auto pb-0.5 -mx-1 px-1">
                     {regions.map((r) => (
                       <button key={r.key} onClick={() => setSelectedRegion(r.key)} aria-label={`Adjust ${r.label}`} className="flex flex-col items-center gap-1 flex-shrink-0 w-14">
+                        <span
+                          className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
+                            r.active ? 'bg-primary/20 border-primary text-primary' : 'bg-white/5 border-white/15 text-white/85'
+                          }`}
+                        >
+                          {r.icon}
+                        </span>
+                        <span className="text-[10px] font-medium leading-none text-white/85 whitespace-nowrap">{r.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                )
+              ) : openPanel === 'beauty' ? (
+                activeBeauty ? (
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => setSelectedBeauty(null)}
+                      aria-label="Back to beauty"
+                      className="w-8 h-8 rounded-full bg-white/10 border border-white/15 flex items-center justify-center text-white flex-shrink-0"
+                    >
+                      <IconBack className="w-4 h-4" />
+                    </button>
+                    <div className="flex-1">
+                      <Slider label={activeBeauty.label} value={activeBeauty.value} onChange={activeBeauty.onChange} bidirectional={activeBeauty.bidirectional} disabled={disabled} />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-4 overflow-x-auto pb-0.5 -mx-1 px-1">
+                    {beautyRegions.map((r) => (
+                      <button key={r.key} onClick={() => setSelectedBeauty(r.key)} aria-label={`Adjust ${r.label}`} className="flex flex-col items-center gap-1 flex-shrink-0 w-14">
                         <span
                           className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
                             r.active ? 'bg-primary/20 border-primary text-primary' : 'bg-white/5 border-white/15 text-white/85'
@@ -900,6 +1024,21 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
                   <IconFaceOutline className="w-5 h-5" />
                 </span>
                 <span className="text-[10px] font-medium leading-none">Retouch</span>
+              </button>
+              <button
+                ref={beautyButtonRef}
+                onClick={() => setOpenPanel((v) => (v === 'beauty' ? null : 'beauty'))}
+                aria-label="Beauty"
+                className="flex flex-col items-center gap-1 w-14 text-white/85"
+              >
+                <span
+                  className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
+                    openPanel === 'beauty' ? 'bg-primary text-black border-primary' : 'bg-white/5 border-white/15'
+                  }`}
+                >
+                  <IconSparkle className="w-5 h-5" />
+                </span>
+                <span className="text-[10px] font-medium leading-none">Beauty</span>
               </button>
               <button
                 ref={filterButtonRef}

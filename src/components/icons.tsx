@@ -208,6 +208,44 @@ export function RegionIcon({ dot, pair, ...props }: IconProps & { dot: [number, 
   )
 }
 
+// The Beauty panel's four tone/light effects — distinct glyphs since none
+// of them map to a face position the way RegionIcon's dot does.
+export function IconSun(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 3v2.2M12 18.8V21M4.5 12H3M21 12h-1.5M6.3 6.3L5 5M18 5l-1.3 1.3M6.3 17.7L5 19M18 19l-1.3-1.3" />
+    </svg>
+  )
+}
+
+export function IconWhiten(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M12 3.5l1.6 4.6 4.9.2-3.9 3 1.4 4.8L12 13.4l-4 2.7 1.4-4.8-3.9-3 4.9-.2z" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+export function IconTarget(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <circle cx="12" cy="12" r="8" />
+      <circle cx="12" cy="12" r="4" />
+      <circle cx="12" cy="12" r="0.4" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
+export function IconWave(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M3 9c2 0 2-2.5 4-2.5S9 9 11 9s2-2.5 4-2.5S17 9 19 9" />
+      <path d="M3 14.5c2 0 2-2.5 4-2.5s2 2.5 4 2.5 2-2.5 4-2.5 2 2.5 4 2.5" />
+    </svg>
+  )
+}
+
 export function IconBack(props: IconProps) {
   return (
     <svg {...base} {...props}>

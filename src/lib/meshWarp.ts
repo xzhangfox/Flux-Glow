@@ -148,6 +148,12 @@ export interface ReshapeParams {
   temple: number
   /** Cheekbone (颧骨): negative widens, positive narrows. */
   cheekbone: number
+  /** Upper lip thickness: negative thins, positive thickens. */
+  mouthUpperLip: number
+  /** Lower lip thickness: negative thins, positive thickens. */
+  mouthLowerLip: number
+  /** Mouth corners: negative downturns, positive lifts. */
+  mouthCorners: number
 }
 
 const OVAL_LOOP = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_FACE_OVAL)
@@ -164,6 +170,13 @@ const RIGHT_CHEEK = 454
 // all 468 indices on a real photo and visually confirming 6's position —
 // see the session's landmark-crop-nosebridge.png.
 const NOSE_BRIDGE_POINT = 6
+// Mouth corners — not a guess either: verified by computing the lips
+// loop's own leftmost/rightmost points programmatically on a real photo
+// and confirming they land exactly on indices 61 and 291 (the same two
+// indices nearly every public MediaPipe reference cites for this, but
+// confirmed here directly rather than trusted on citation alone).
+export const LEFT_MOUTH_CORNER = 61
+export const RIGHT_MOUTH_CORNER = 291
 
 // Temple and cheekbone are not separate landmark loops — they're specific
 // points *on* the oval (also verified visually: 21/251 sit exactly at the
@@ -303,6 +316,31 @@ function buildVertexBuffers(landmarks: NormalizedLandmark[], params: ReshapePara
       targetPos[idx * 2] = lipsCenter.x + (landmarks[idx].x - lipsCenter.x) * scale
       targetPos[idx * 2 + 1] = lipsCenter.y + (landmarks[idx].y - lipsCenter.y) * scale
     }
+  }
+
+  // Finer mouth sub-controls, each layered additively on top of whatever
+  // the overall mouth scale above already did to the same points — same
+  // compositing pattern as temple/cheekbone on top of jaw. Upper/lower
+  // lip split the lips loop by which half of it (above/below the loop's
+  // own vertical center) a point falls in, rather than needing a separate
+  // "which points are upper lip" list.
+  if (Math.abs(params.mouthUpperLip) > 0.001 || Math.abs(params.mouthLowerLip) > 0.001) {
+    const lipsCenter = loopCenterNorm(LIPS_LOOP, landmarks)
+    const upperShift = clamp11(params.mouthUpperLip) * eyeSpan * 0.03
+    const lowerShift = clamp11(params.mouthLowerLip) * eyeSpan * 0.03
+    for (const idx of LIPS_LOOP) {
+      const p = landmarks[idx]
+      if (p.y < lipsCenter.y) {
+        targetPos[idx * 2 + 1] -= upperShift // negative y = up = away from center = thicker
+      } else {
+        targetPos[idx * 2 + 1] += lowerShift // positive y = down = away from center = thicker
+      }
+    }
+  }
+  if (Math.abs(params.mouthCorners) > 0.001) {
+    const shift = -clamp11(params.mouthCorners) * eyeSpan * 0.025 // negative y = up = lifted
+    targetPos[LEFT_MOUTH_CORNER * 2 + 1] += shift
+    targetPos[RIGHT_MOUTH_CORNER * 2 + 1] += shift
   }
 
   // Eyebrows: the official loop, shifted vertically. A small, purely
