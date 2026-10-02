@@ -1,43 +1,13 @@
 import { useState } from 'react'
-import UploadArea from './components/UploadArea'
 import Editor, { type Source } from './components/Editor'
-import { IconFaceGlow } from './components/icons'
 
+// Opens straight into the live camera — no upload-or-live landing screen —
+// since that's the primary path (a selfie retouch app someone opens to
+// take a photo, not browse to one); Editor's own toolbar carries a small
+// photo icon next to the shutter for the secondary "edit an existing
+// photo" path instead of presenting both as an equal up-front choice.
 export default function App() {
-  const [source, setSource] = useState<Source | null>(null)
+  const [source, setSource] = useState<Source>({ kind: 'live' })
 
-  // The editor is a full-screen camera/photo view with its own chrome
-  // (Editor.tsx renders `fixed inset-0`) — the landing header/footer
-  // below belong only to the upload screen, so they're skipped entirely
-  // once a source is picked rather than just hidden behind it.
-  if (source) {
-    return <Editor source={source} onReset={() => setSource(null)} />
-  }
-
-  return (
-    <div className="min-h-screen bg-background flex flex-col items-center relative overflow-hidden">
-      <div
-        className="pointer-events-none absolute top-0 left-1/2 -translate-x-1/2 w-[900px] h-[500px] opacity-20 blur-3xl"
-        style={{ background: 'radial-gradient(ellipse at top, #D4AF37, transparent 70%)' }}
-      />
-
-      <header className="relative w-full max-w-4xl px-6 py-6 flex items-center gap-3">
-        <div className="w-9 h-9 rounded-lg border border-primary/40 bg-primary/5 flex items-center justify-center">
-          <IconFaceGlow className="w-5 h-5 text-primary" />
-        </div>
-        <div>
-          <h1 className="text-lg font-bold text-white tracking-tight">Flux Glow</h1>
-          <p className="text-xs text-text-secondary">Skin, contour &amp; filters — live or from a photo, all in your browser</p>
-        </div>
-      </header>
-
-      <main className="relative flex-1 w-full flex items-center justify-center px-6 pb-16">
-        <UploadArea onImage={(file) => setSource({ kind: 'image', file })} onLive={() => setSource({ kind: 'live' })} />
-      </main>
-
-      <footer className="relative pb-8 text-center">
-        <p className="text-text-secondary text-xs">Photos never leave your device — no uploads, no account.</p>
-      </footer>
-    </div>
-  )
+  return <Editor source={source} onReset={() => setSource({ kind: 'live' })} onPickImage={(file) => setSource({ kind: 'image', file })} />
 }

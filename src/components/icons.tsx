@@ -192,6 +192,30 @@ export function IconFlipCamera(props: IconProps) {
   )
 }
 
+// One shared face silhouette with a dot at a different spot for each of the
+// retouch drill-down's regions — faster and more legible at a glance than
+// nine unrelated abstract glyphs would be, since it shows *where on the
+// face* each control reaches rather than asking the label alone to carry
+// that meaning (eyebrow/temple/cheekbone are easy to mix up as text).
+export function RegionIcon({ dot, pair, ...props }: IconProps & { dot: [number, number]; pair?: boolean }) {
+  const [x, y] = dot
+  return (
+    <svg {...base} {...props}>
+      <path d="M12 3.5c-3.6 0-5.8 2.6-5.8 6.3 0 2 .5 4 1.5 5.7.9 1.5 2.4 2.5 4.3 2.5s3.4-1 4.3-2.5c1-1.7 1.5-3.7 1.5-5.7 0-3.7-2.2-6.3-5.8-6.3z" opacity={0.45} />
+      <circle cx={x} cy={y} r={1.4} fill="currentColor" stroke="none" />
+      {pair && <circle cx={24 - x} cy={y} r={1.4} fill="currentColor" stroke="none" />}
+    </svg>
+  )
+}
+
+export function IconBack(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M15 5l-7 7 7 7" />
+    </svg>
+  )
+}
+
 export function IconSpinner(props: IconProps) {
   return (
     <svg {...base} viewBox="0 0 24 24" fill="none" {...props}>

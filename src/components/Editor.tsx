@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, type ComponentType, type SVGProps } from 'react'
+import { useEffect, useRef, useState, useCallback, type ComponentType, type ReactNode, type SVGProps } from 'react'
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
 import { detectFaceLandmarks, detectFaceLandmarksForVideo } from '../lib/faceLandmarker'
 import { processFrame, type EditParams } from '../lib/pipeline'
@@ -19,6 +19,10 @@ import {
   IconFaceOutline,
   IconPalette,
   IconFlipCamera,
+  IconDroplet,
+  IconImage,
+  IconBack,
+  RegionIcon,
 } from './icons'
 
 // Downscale before processing — phone photos run 3000px+ on a side, far
@@ -40,6 +44,8 @@ const LIVE_FRAME_INTERVAL_MS = 60 // floor on tick spacing — actual pace is al
 export type Source = { kind: 'image'; file: File } | { kind: 'live' }
 
 type Status = 'loading' | 'ready' | 'no-face' | 'error'
+
+type RegionKey = 'smooth' | 'face' | 'temple' | 'cheekbone' | 'eyes' | 'eyebrow' | 'nose' | 'noseBridge' | 'mouth'
 
 function loadImage(file: File): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -137,39 +143,68 @@ function buildZoomPresets({ min, max }: ZoomRange): number[] {
     .sort((a, b) => a - b)
 }
 
-// A vertical drag strip for continuous zoom, shown while the zoom pill is
-// held. Reads clientY straight off `window` pointermove rather than using
-// pointer capture: the finger is already down on the pill (not this strip)
+// A fan/sector-shaped ruler, shown while the zoom pill is held, swept by
+// dragging left-right — a protractor-like arc of tick marks rather than a
+// straight track, closer to the dedicated zoom ring a real camera has.
+// Reads clientX straight off `window` pointermove rather than using
+// pointer capture: the finger is already down on the pill (not this fan)
 // when the long-press timer opens it, and pointermove bubbles to window
 // regardless of which element is currently under the finger, so this needs
-// no capture handoff from the pill to work.
-function ZoomDial({ min, max, value, onChange }: { min: number; max: number; value: number; onChange: (v: number) => void }) {
+// no capture handoff from the pill to work. Horizontal position across the
+// whole control maps directly to a value in [min, max] (the same
+// absolute-position-is-value approach the previous vertical strip used,
+// just along the other axis) — simpler and more predictable than treating
+// it as a literal rotating dial someone has to sweep an arc to turn.
+const FAN_MAX_ANGLE_DEG = 55
+const FAN_PIVOT = { x: 140, y: 112 }
+const FAN_OUTER_R = 98
+const FAN_INNER_R = 72
+
+function fanPoint(angleDeg: number, radius: number) {
+  const rad = (angleDeg * Math.PI) / 180
+  return { x: FAN_PIVOT.x + radius * Math.sin(rad), y: FAN_PIVOT.y - radius * Math.cos(rad) }
+}
+
+function ZoomFanDial({ min, max, value, onChange }: { min: number; max: number; value: number; onChange: (v: number) => void }) {
   const trackRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const handleMove = (e: PointerEvent) => {
       const el = trackRef.current
       if (!el) return
       const rect = el.getBoundingClientRect()
-      const fraction = 1 - Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height))
+      const fraction = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
       onChange(Math.round((min + fraction * (max - min)) * 10) / 10)
     }
     window.addEventListener('pointermove', handleMove)
     return () => window.removeEventListener('pointermove', handleMove)
   }, [min, max, onChange])
 
-  const fraction = (max - min) > 0 ? (value - min) / (max - min) : 0
+  const fraction = max - min > 0 ? (value - min) / (max - min) : 0
+  const needleAngle = -FAN_MAX_ANGLE_DEG + fraction * (2 * FAN_MAX_ANGLE_DEG)
+  const needleTip = fanPoint(needleAngle, FAN_OUTER_R)
+  const arcStart = fanPoint(-FAN_MAX_ANGLE_DEG, FAN_OUTER_R)
+  const arcEnd = fanPoint(FAN_MAX_ANGLE_DEG, FAN_OUTER_R)
+  const sectorPath = `M ${FAN_PIVOT.x} ${FAN_PIVOT.y} L ${arcStart.x} ${arcStart.y} A ${FAN_OUTER_R} ${FAN_OUTER_R} 0 0 1 ${arcEnd.x} ${arcEnd.y} Z`
+  const tickCount = 13
+
   return (
-    <div
-      ref={trackRef}
-      className="absolute left-1/2 -translate-x-1/2 bottom-56 w-10 h-40 rounded-full bg-black/60 backdrop-blur-sm border border-white/20 touch-none"
-    >
-      <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-[11px] font-semibold text-black bg-primary px-2 py-0.5 rounded-full whitespace-nowrap">
+    <div ref={trackRef} className="absolute left-1/2 -translate-x-1/2 bottom-56 w-[280px] h-[116px] touch-none">
+      <svg viewBox="0 0 280 116" className="w-full h-full overflow-visible">
+        <path d={sectorPath} fill="rgba(15,15,15,0.55)" stroke="rgba(255,255,255,0.18)" strokeWidth={1} />
+        {Array.from({ length: tickCount }, (_, i) => {
+          const t = i / (tickCount - 1)
+          const angle = -FAN_MAX_ANGLE_DEG + t * (2 * FAN_MAX_ANGLE_DEG)
+          const major = i === 0 || i === tickCount - 1 || i === (tickCount - 1) / 2
+          const inner = fanPoint(angle, major ? FAN_INNER_R - 6 : FAN_INNER_R)
+          const outer = fanPoint(angle, FAN_OUTER_R - 3)
+          return <line key={i} x1={inner.x} y1={inner.y} x2={outer.x} y2={outer.y} stroke="rgba(255,255,255,0.45)" strokeWidth={1.4} strokeLinecap="round" />
+        })}
+        <line x1={FAN_PIVOT.x} y1={FAN_PIVOT.y} x2={needleTip.x} y2={needleTip.y} className="stroke-primary" strokeWidth={2.5} strokeLinecap="round" />
+        <circle cx={FAN_PIVOT.x} cy={FAN_PIVOT.y} r={4} className="fill-primary" />
+      </svg>
+      <div className="absolute left-1/2 -translate-x-1/2 top-0 text-[11px] font-semibold text-black bg-primary px-2 py-0.5 rounded-full whitespace-nowrap">
         {value.toFixed(1)}×
       </div>
-      <div
-        className="absolute left-1/2 -translate-x-1/2 w-7 h-7 rounded-full bg-primary border-2 border-black/40"
-        style={{ bottom: `calc(${fraction * 100}% - 0.875rem)` }}
-      />
     </div>
   )
 }
@@ -203,18 +238,23 @@ function ChromeButton({
   )
 }
 
-export default function Editor({ source, onReset }: { source: Source; onReset: () => void }) {
+export default function Editor({ source, onReset, onPickImage }: { source: Source; onReset: () => void; onPickImage?: (file: File) => void }) {
   const [status, setStatus] = useState<Status>('loading')
   const [smoothness, setSmoothness] = useState(0.6)
   const [face, setFace] = useState(0.25)
   const [eyes, setEyes] = useState(0)
   const [nose, setNose] = useState(0)
   const [mouth, setMouth] = useState(0)
+  const [eyebrowHeight, setEyebrowHeight] = useState(0)
+  const [noseBridge, setNoseBridge] = useState(0)
+  const [temple, setTemple] = useState(0)
+  const [cheekbone, setCheekbone] = useState(0)
   const [filterId, setFilterId] = useState('none')
   const [showBefore, setShowBefore] = useState(false)
   const [liveActive, setLiveActive] = useState(source.kind === 'live')
   const [confirmed, setConfirmed] = useState(false)
   const [openPanel, setOpenPanel] = useState<'retouch' | 'filter' | null>(null)
+  const [selectedRegion, setSelectedRegion] = useState<RegionKey | null>(null)
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user')
   const [zoom, setZoom] = useState(1)
   const [zoomRange, setZoomRange] = useState<ZoomRange>(DIGITAL_ZOOM_RANGE)
@@ -230,7 +270,7 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   const lastProcessRef = useRef(0)
   const processingRef = useRef(false)
   const liveActiveRef = useRef(liveActive)
-  const paramsRef = useRef<EditParams>({ smoothness, face, eyes, nose, mouth, filterId })
+  const paramsRef = useRef<EditParams>({ smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, filterId })
   const facingModeRef = useRef(facingMode)
   const zoomRef = useRef(zoom)
   const zoomRangeRef = useRef(zoomRange)
@@ -240,10 +280,11 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   const panelRef = useRef<HTMLDivElement>(null)
   const retouchButtonRef = useRef<HTMLButtonElement>(null)
   const filterButtonRef = useRef<HTMLButtonElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    paramsRef.current = { smoothness, face, eyes, nose, mouth, filterId }
-  }, [smoothness, face, eyes, nose, mouth, filterId])
+    paramsRef.current = { smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, filterId }
+  }, [smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, filterId])
   useEffect(() => {
     liveActiveRef.current = liveActive
   }, [liveActive])
@@ -255,7 +296,7 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
   }, [zoomRange])
 
   // Releasing anywhere closes the dial — the drag that's adjusting it
-  // isn't pointer-captured to the dial itself (see ZoomDial), so this is
+  // isn't pointer-captured to the dial itself (see ZoomFanDial), so this is
   // the one place that actually knows the gesture ended.
   useEffect(() => {
     if (!zoomDialOpen) return
@@ -268,6 +309,13 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
     }
   }, [zoomDialOpen])
 
+  // Leaving the retouch panel always resets back to the region grid, so
+  // reopening it never silently drops the visitor into whichever slider
+  // they happened to be adjusting last time.
+  useEffect(() => {
+    if (openPanel !== 'retouch') setSelectedRegion(null)
+  }, [openPanel])
+
   // Tapping anywhere outside the open panel (or the Retouch/Filter buttons
   // that toggle it, which handle themselves) collapses it — same pattern
   // as a tap-away menu.
@@ -279,8 +327,18 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
       if (filterButtonRef.current?.contains(target)) return
       setOpenPanel(null)
     }
-    document.addEventListener('click', onClick)
-    return () => document.removeEventListener('click', onClick)
+    // Capture phase, not bubble: a click inside the panel (e.g. picking a
+    // region) can make React synchronously swap that exact element out of
+    // the DOM (region grid -> slider) as part of handling the very same
+    // click. By the time a bubble-phase listener on `document` ran, the
+    // clicked node was already detached, and a detached node's
+    // `.contains()` check always reads as "outside" no matter where it
+    // used to be — closing the whole panel the moment anyone picked a
+    // region. Capture fires before the target's own handlers (and any
+    // resulting DOM mutation), while the node is still exactly where this
+    // check needs it to be.
+    document.addEventListener('click', onClick, true)
+    return () => document.removeEventListener('click', onClick, true)
   }, [])
 
   const render = useCallback(() => {
@@ -398,6 +456,15 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
     if (source.kind !== 'image') return
     let cancelled = false
     setStatus('loading')
+    // Switching source from live to an uploaded photo (the new toolbar
+    // upload icon) is a mid-session transition the live/capture flow
+    // never used to need — picking a photo always used to mean Editor
+    // itself was just being mounted fresh with an image source, so
+    // nothing previously had to reset `liveActive` on an existing
+    // instance. Without this, the LIVE badge and flip-camera button kept
+    // showing over a now-static photo.
+    setLiveActive(false)
+    setConfirmed(false)
     ;(async () => {
       try {
         const img = await loadImage(source.file)
@@ -440,14 +507,14 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
     if (!baseRef.current) return
     const t = setTimeout(recomputeStatic, 60)
     return () => clearTimeout(t)
-  }, [smoothness, face, eyes, nose, mouth, filterId, liveActive, recomputeStatic])
+  }, [smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, filterId, liveActive, recomputeStatic])
 
   // Any further adjustment after confirming means the exported image would
   // no longer match what's on screen — fall back to Confirm again rather
   // than silently leaving a stale Save/Share up.
   useEffect(() => {
     setConfirmed(false)
-  }, [smoothness, face, eyes, nose, mouth, filterId])
+  }, [smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, filterId])
 
   const handleCapture = () => {
     stopLive()
@@ -550,6 +617,24 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
     handleDownload()
   }
 
+  // The retouch drill-down's region list — tapping one in the grid morphs
+  // the same row into this region's own slider (see the panel JSX below).
+  // `active` drives the highlighted-icon state in the grid, so someone can
+  // see at a glance which regions they've already touched without having
+  // to open each one.
+  const regions: { key: RegionKey; label: string; icon: ReactNode; value: number; onChange: (v: number) => void; bidirectional: boolean; active: boolean }[] = [
+    { key: 'smooth', label: 'Smooth', icon: <IconDroplet className="w-5 h-5" />, value: smoothness, onChange: setSmoothness, bidirectional: false, active: smoothness !== 0.6 },
+    { key: 'face', label: 'Jaw', icon: <RegionIcon dot={[12, 16.8]} className="w-5 h-5" />, value: face, onChange: setFace, bidirectional: true, active: face !== 0.25 },
+    { key: 'temple', label: 'Temple', icon: <RegionIcon dot={[7.2, 7.6]} pair className="w-5 h-5" />, value: temple, onChange: setTemple, bidirectional: true, active: temple !== 0 },
+    { key: 'cheekbone', label: 'Cheekbone', icon: <RegionIcon dot={[6.8, 11.5]} pair className="w-5 h-5" />, value: cheekbone, onChange: setCheekbone, bidirectional: true, active: cheekbone !== 0 },
+    { key: 'eyes', label: 'Eyes', icon: <RegionIcon dot={[9, 10.2]} pair className="w-5 h-5" />, value: eyes, onChange: setEyes, bidirectional: true, active: eyes !== 0 },
+    { key: 'eyebrow', label: 'Eyebrow', icon: <RegionIcon dot={[9, 8]} pair className="w-5 h-5" />, value: eyebrowHeight, onChange: setEyebrowHeight, bidirectional: true, active: eyebrowHeight !== 0 },
+    { key: 'nose', label: 'Nose', icon: <RegionIcon dot={[12, 12.5]} className="w-5 h-5" />, value: nose, onChange: setNose, bidirectional: true, active: nose !== 0 },
+    { key: 'noseBridge', label: 'Bridge', icon: <RegionIcon dot={[12, 9.3]} className="w-5 h-5" />, value: noseBridge, onChange: setNoseBridge, bidirectional: true, active: noseBridge !== 0 },
+    { key: 'mouth', label: 'Mouth', icon: <RegionIcon dot={[12, 14.3]} className="w-5 h-5" />, value: mouth, onChange: setMouth, bidirectional: true, active: mouth !== 0 },
+  ]
+  const activeRegion = regions.find((r) => r.key === selectedRegion) ?? null
+
   let centerButton: React.ReactNode
   if (liveActive) {
     centerButton = (
@@ -637,7 +722,7 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
       {liveActive && status !== 'loading' && (
         <>
           {zoomDialOpen && (
-            <ZoomDial
+            <ZoomFanDial
               min={zoomRange.min}
               max={zoomRange.max}
               value={zoom}
@@ -671,13 +756,10 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
         </div>
       )}
 
-      <div
-        className="absolute inset-x-0 bottom-0 flex flex-col gap-3 px-4 pt-8"
-        style={{ paddingBottom: 'max(1.25rem, env(safe-area-inset-bottom))', background: 'linear-gradient(to top, rgba(0,0,0,0.85), rgba(0,0,0,0.4) 60%, transparent)' }}
-      >
+      <div className="absolute inset-x-0 bottom-0 flex flex-col">
         {(status === 'no-face' || status === 'error') && (
           <p
-            className={`self-center text-xs text-center flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-sm ${
+            className={`self-center mb-3 text-xs text-center flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-sm ${
               status === 'error' ? 'text-danger' : 'text-white/80'
             }`}
           >
@@ -692,19 +774,41 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
 
         <div
           ref={panelRef}
-          className={`grid transition-all duration-250 ease-out ${openPanel ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}
-          style={{ transitionProperty: 'grid-template-rows, opacity' }}
+          className={`grid transition-all duration-250 ease-out px-4 ${openPanel ? 'grid-rows-[1fr] opacity-100 mb-3' : 'grid-rows-[0fr] opacity-0'}`}
+          style={{ transitionProperty: 'grid-template-rows, opacity, margin' }}
         >
           <div className="overflow-hidden">
-            <div className="bg-black/70 backdrop-blur-md rounded-2xl p-4 border border-white/10">
+            <div className="bg-black/55 backdrop-blur-2xl rounded-2xl p-4 border border-white/10">
               {openPanel === 'retouch' ? (
-                <div className="space-y-4 max-h-[42vh] overflow-y-auto pr-1">
-                  <Slider label="Smooth & Clear" value={smoothness} onChange={setSmoothness} disabled={disabled} />
-                  <Slider label="Face" value={face} onChange={setFace} disabled={disabled} />
-                  <Slider label="Eyes" value={eyes} onChange={setEyes} disabled={disabled} />
-                  <Slider label="Nose" value={nose} onChange={setNose} disabled={disabled} />
-                  <Slider label="Mouth" value={mouth} onChange={setMouth} disabled={disabled} />
-                </div>
+                activeRegion ? (
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => setSelectedRegion(null)}
+                      aria-label="Back to regions"
+                      className="w-8 h-8 rounded-full bg-white/10 border border-white/15 flex items-center justify-center text-white flex-shrink-0"
+                    >
+                      <IconBack className="w-4 h-4" />
+                    </button>
+                    <div className="flex-1">
+                      <Slider label={activeRegion.label} value={activeRegion.value} onChange={activeRegion.onChange} bidirectional={activeRegion.bidirectional} disabled={disabled} />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-4 overflow-x-auto pb-0.5 -mx-1 px-1">
+                    {regions.map((r) => (
+                      <button key={r.key} onClick={() => setSelectedRegion(r.key)} aria-label={`Adjust ${r.label}`} className="flex flex-col items-center gap-1 flex-shrink-0 w-14">
+                        <span
+                          className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
+                            r.active ? 'bg-primary/20 border-primary text-primary' : 'bg-white/5 border-white/15 text-white/85'
+                          }`}
+                        >
+                          {r.icon}
+                        </span>
+                        <span className="text-[10px] font-medium leading-none text-white/85 whitespace-nowrap">{r.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                )
               ) : (
                 <div className="grid grid-cols-3 gap-2">
                   {FILTER_PRESETS.map((p) => (
@@ -724,53 +828,85 @@ export default function Editor({ source, onReset }: { source: Source; onReset: (
           </div>
         </div>
 
-        <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-2 pt-1">
-          <div className="flex items-center gap-3 justify-self-start">
-            <button
-              ref={retouchButtonRef}
-              onClick={() => setOpenPanel((v) => (v === 'retouch' ? null : 'retouch'))}
-              aria-label="Retouch"
-              className="flex flex-col items-center gap-1 w-14 text-white/85"
-            >
-              <span
-                className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
-                  openPanel === 'retouch' ? 'bg-primary text-black border-primary' : 'bg-black/40 border-white/15'
-                }`}
+        {/* The frosted toolbar tray — a native-camera-style shutter button
+            straddles its top edge (half inside the tray, half protruding
+            into the preview above it), rather than sitting in the row with
+            everything else. */}
+        <div
+          className="relative bg-black/55 backdrop-blur-2xl border-t border-white/10 rounded-t-[28px] px-4 pt-5"
+          style={{ paddingBottom: 'max(1.1rem, env(safe-area-inset-bottom))' }}
+        >
+          <div className="absolute left-1/2 -translate-x-1/2 -top-8 flex items-end gap-3">
+            {centerButton}
+            {liveActive && !confirmed && (
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="Upload a photo instead"
+                className="w-9 h-9 mb-1 rounded-full bg-white/15 backdrop-blur-sm border border-white/25 flex items-center justify-center text-white"
               >
-                <IconFaceOutline className="w-5 h-5" />
-              </span>
-              <span className="text-[10px] font-medium leading-none">Retouch</span>
-            </button>
-            <button
-              ref={filterButtonRef}
-              onClick={() => setOpenPanel((v) => (v === 'filter' ? null : 'filter'))}
-              aria-label="Filter"
-              className="flex flex-col items-center gap-1 w-14 text-white/85"
-            >
-              <span
-                className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
-                  openPanel === 'filter' ? 'bg-primary text-black border-primary' : 'bg-black/40 border-white/15'
-                }`}
-              >
-                <IconPalette className="w-5 h-5" />
-              </span>
-              <span className="text-[10px] font-medium leading-none">Filter</span>
-            </button>
-            {source.kind === 'live' && !liveActive && <ChromeButton icon={IconRefresh} label="Retake" onClick={handleRetake} />}
+                <IconImage className="w-4 h-4" />
+              </button>
+            )}
           </div>
 
-          <div className="justify-self-center">{centerButton}</div>
+          <div className="grid grid-cols-2 items-center gap-2">
+            <div className="flex items-center gap-3 justify-self-start">
+              <button
+                ref={retouchButtonRef}
+                onClick={() => setOpenPanel((v) => (v === 'retouch' ? null : 'retouch'))}
+                aria-label="Retouch"
+                className="flex flex-col items-center gap-1 w-14 text-white/85"
+              >
+                <span
+                  className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
+                    openPanel === 'retouch' ? 'bg-primary text-black border-primary' : 'bg-white/5 border-white/15'
+                  }`}
+                >
+                  <IconFaceOutline className="w-5 h-5" />
+                </span>
+                <span className="text-[10px] font-medium leading-none">Retouch</span>
+              </button>
+              <button
+                ref={filterButtonRef}
+                onClick={() => setOpenPanel((v) => (v === 'filter' ? null : 'filter'))}
+                aria-label="Filter"
+                className="flex flex-col items-center gap-1 w-14 text-white/85"
+              >
+                <span
+                  className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
+                    openPanel === 'filter' ? 'bg-primary text-black border-primary' : 'bg-white/5 border-white/15'
+                  }`}
+                >
+                  <IconPalette className="w-5 h-5" />
+                </span>
+                <span className="text-[10px] font-medium leading-none">Filter</span>
+              </button>
+              {source.kind === 'live' && !liveActive && <ChromeButton icon={IconRefresh} label="Retake" onClick={handleRetake} />}
+            </div>
 
-          <div className="flex items-center gap-3 justify-self-end">
-            {confirmed && (
-              <>
-                <ChromeButton icon={IconDownload} label="Save" primary onClick={handleDownload} />
-                <ChromeButton icon={IconShare} label="Share" onClick={handleShare} />
-              </>
-            )}
+            <div className="flex items-center gap-3 justify-self-end">
+              {confirmed && (
+                <>
+                  <ChromeButton icon={IconDownload} label="Save" primary onClick={handleDownload} />
+                  <ChromeButton icon={IconShare} label="Share" onClick={handleShare} />
+                </>
+              )}
+            </div>
           </div>
         </div>
       </div>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          if (file) onPickImage?.(file)
+          e.target.value = ''
+        }}
+      />
     </div>
   )
 }

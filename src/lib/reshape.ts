@@ -60,8 +60,13 @@ function radialWarpInPlace(srcData: Uint8ClampedArray, outData: Uint8ClampedArra
   }
 }
 
+const MESH_FIELDS = ['face', 'eyes', 'mouth', 'eyebrowHeight', 'noseBridge', 'temple', 'cheekbone'] as const
+
 export function applyReshape(source: HTMLCanvasElement, landmarks: NormalizedLandmark[], params: ReshapeParams): HTMLCanvasElement {
-  const meshed = params.face > 0.001 || params.eyes > 0.001 || params.mouth > 0.001 ? renderMeshWarp(source, landmarks, params) : source
+  // Bidirectional now (negative values are meaningful, e.g. face<0 widens)
+  // — checking `> 0.001` alone would silently skip every negative value.
+  const anyMeshFieldActive = MESH_FIELDS.some((key) => Math.abs(params[key]) > 0.001)
+  const meshed = anyMeshFieldActive ? renderMeshWarp(source, landmarks, params) : source
 
   if (Math.abs(params.nose) <= 0.001) return meshed
 
