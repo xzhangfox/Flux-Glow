@@ -152,85 +152,95 @@ function buildZoomPresets({ min, max }: ZoomRange): number[] {
     .sort((a, b) => a - b)
 }
 
-// A fan/sector-shaped ruler, shown while the zoom pill is held, swept by
-// dragging left-right — a protractor-like arc of tick marks rather than a
-// straight track, closer to the dedicated zoom ring a real camera has.
-// Reads clientX straight off `window` pointermove rather than using
-// pointer capture: the finger is already down on the pill (not this fan)
-// when the long-press timer opens it, and pointermove bubbles to window
-// regardless of which element is currently under the finger, so this needs
-// no capture handoff from the pill to work. Horizontal position across the
-// whole control maps directly to a value in [min, max] (the same
-// absolute-position-is-value approach the previous vertical strip used,
-// just along the other axis) — simpler and more predictable than treating
-// it as a literal rotating dial someone has to sweep an arc to turn.
-// A 270° sweep (not just the ~110° wedge a semicircle-ish fan would give)
-// — this reaches well past horizontal on both sides, which is why the
-// pivot sits vertically centered in a taller box instead of at its bottom
-// edge: at ±135° from straight up, the arc's own ends are already *below*
-// the pivot's own height (sin/cos of 135° puts them out and down), so
-// there has to be room for those two "wings" to hang below pivot level,
-// not just space above it.
-const FAN_MAX_ANGLE_DEG = 135
-const FAN_PIVOT = { x: 140, y: 108 }
-const FAN_OUTER_R = 92
-const FAN_INNER_R = 66
-const FAN_VIEW_W = 280
-const FAN_VIEW_H = 200
+// A horizontal ruler, shown while the zoom pill is held — the same
+// interaction a phone camera's own long-press zoom scrubber uses: a fixed
+// "droplet" lens stays put at the control's center and the tick-marked
+// ruler slides left/right underneath it as a finger drags, rather than the
+// finger dragging a needle/handle across a fixed track. That inversion is
+// what the physical metaphor asks for (the reading lens doesn't move, the
+// scale does) and it's also what makes a *relative* drag feel right here:
+// unlike the old fan dial's "absolute screen position is the value"
+// mapping, this tracks the drag's own delta from wherever it started, so
+// the ruler never jumps when a drag begins — it starts centered on
+// whatever the value already was and only moves from there.
+const RULER_PX_PER_UNIT = 100 // drag distance for one full 1.0x zoom step — spacious enough for fine control across a phone-width swipe
+const RULER_VIEWPORT_W = 260
+const RULER_VIEWPORT_H = 64
 
-function fanPoint(angleDeg: number, radius: number) {
-  const rad = (angleDeg * Math.PI) / 180
-  return { x: FAN_PIVOT.x + radius * Math.sin(rad), y: FAN_PIVOT.y - radius * Math.cos(rad) }
-}
-
-function ZoomFanDial({ min, max, value, onChange }: { min: number; max: number; value: number; onChange: (v: number) => void }) {
-  const trackRef = useRef<HTMLDivElement>(null)
+function ZoomRulerDial({ min, max, value, onChange }: { min: number; max: number; value: number; onChange: (v: number) => void }) {
+  // `dragStartXRef` is null between drags (reset on pointerup) so each new
+  // drag establishes its own fresh reference point on its first move,
+  // rather than reusing a stale one from a previous, already-finished
+  // drag — the same "dial persists across multiple separate drags"
+  // behavior the fan dial had, just with a relative instead of absolute
+  // mapping underneath it.
+  const dragStartXRef = useRef<number | null>(null)
+  const dragStartValueRef = useRef(value)
+  const valueRef = useRef(value)
   useEffect(() => {
-    const handleMove = (e: PointerEvent) => {
-      // Now that the fan stays open after a release (see handleZoomPressEnd),
-      // a pointermove listener on `window` would otherwise react to every
-      // idle mouse hover across the whole page, not just an actual drag —
-      // harmless before, when the fan only existed for the instant a finger
-      // was physically down on it, but very much not now. `buttons` is 0
-      // whenever nothing is pressed, for both mouse and touch.
+    valueRef.current = value
+  }, [value])
+
+  useEffect(() => {
+    function handleMove(e: PointerEvent) {
       if (e.buttons === 0) return
-      const el = trackRef.current
-      if (!el) return
-      const rect = el.getBoundingClientRect()
-      const fraction = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
-      onChange(Math.round((min + fraction * (max - min)) * 10) / 10)
+      if (dragStartXRef.current === null) {
+        dragStartXRef.current = e.clientX
+        dragStartValueRef.current = valueRef.current
+        return
+      }
+      const deltaX = e.clientX - dragStartXRef.current
+      const next = dragStartValueRef.current - deltaX / RULER_PX_PER_UNIT
+      onChange(Math.min(max, Math.max(min, Math.round(next * 10) / 10)))
+    }
+    function handleRelease() {
+      dragStartXRef.current = null
     }
     window.addEventListener('pointermove', handleMove)
-    return () => window.removeEventListener('pointermove', handleMove)
+    window.addEventListener('pointerup', handleRelease)
+    window.addEventListener('pointercancel', handleRelease)
+    return () => {
+      window.removeEventListener('pointermove', handleMove)
+      window.removeEventListener('pointerup', handleRelease)
+      window.removeEventListener('pointercancel', handleRelease)
+    }
   }, [min, max, onChange])
 
-  const fraction = max - min > 0 ? (value - min) / (max - min) : 0
-  const needleAngle = -FAN_MAX_ANGLE_DEG + fraction * (2 * FAN_MAX_ANGLE_DEG)
-  const needleTip = fanPoint(needleAngle, FAN_OUTER_R)
-  const arcStart = fanPoint(-FAN_MAX_ANGLE_DEG, FAN_OUTER_R)
-  const arcEnd = fanPoint(FAN_MAX_ANGLE_DEG, FAN_OUTER_R)
-  // 270° is more than a half-circle, so the large-arc-flag has to be 1 —
-  // with it left at 0 (right for the ~110° sweep this used to be), SVG
-  // would silently draw the *short* way around instead (90° the wrong way).
-  const sectorPath = `M ${FAN_PIVOT.x} ${FAN_PIVOT.y} L ${arcStart.x} ${arcStart.y} A ${FAN_OUTER_R} ${FAN_OUTER_R} 0 1 1 ${arcEnd.x} ${arcEnd.y} Z`
-  const tickCount = 25
+  // Ticks are laid out in strip-local coordinates (0 at `min`), and the
+  // whole strip is repositioned via `transform` so the tick at `value`
+  // always sits exactly under the fixed droplet — the ruler moves, not a
+  // reader sliding along a fixed scale.
+  const ticks: { v: number; major: boolean }[] = []
+  for (let raw = min; raw <= max + 1e-6; raw += 0.1) {
+    const v = Math.round(raw * 10) / 10
+    ticks.push({ v, major: Math.abs(v - Math.round(v)) < 0.001 })
+  }
+  const stripOffset = RULER_VIEWPORT_W / 2 - (value - min) * RULER_PX_PER_UNIT
 
   return (
-    <div ref={trackRef} className="absolute left-1/2 -translate-x-1/2 bottom-56 w-[280px] h-[200px] touch-none">
-      <svg viewBox={`0 0 ${FAN_VIEW_W} ${FAN_VIEW_H}`} className="w-full h-full overflow-visible">
-        <path d={sectorPath} fill="rgba(15,15,15,0.55)" stroke="rgba(255,255,255,0.18)" strokeWidth={1} />
-        {Array.from({ length: tickCount }, (_, i) => {
-          const t = i / (tickCount - 1)
-          const angle = -FAN_MAX_ANGLE_DEG + t * (2 * FAN_MAX_ANGLE_DEG)
-          const major = i === 0 || i === tickCount - 1 || i === (tickCount - 1) / 2
-          const inner = fanPoint(angle, major ? FAN_INNER_R - 6 : FAN_INNER_R)
-          const outer = fanPoint(angle, FAN_OUTER_R - 3)
-          return <line key={i} x1={inner.x} y1={inner.y} x2={outer.x} y2={outer.y} stroke="rgba(255,255,255,0.45)" strokeWidth={1.4} strokeLinecap="round" />
-        })}
-        <line x1={FAN_PIVOT.x} y1={FAN_PIVOT.y} x2={needleTip.x} y2={needleTip.y} className="stroke-primary" strokeWidth={2.5} strokeLinecap="round" />
-        <circle cx={FAN_PIVOT.x} cy={FAN_PIVOT.y} r={4} className="fill-primary" />
-      </svg>
-      <div className="absolute left-1/2 -translate-x-1/2 top-0 text-[11px] font-semibold text-black bg-primary px-2 py-0.5 rounded-full whitespace-nowrap">
+    <div className="absolute left-1/2 -translate-x-1/2 bottom-44 touch-none select-none" style={{ width: RULER_VIEWPORT_W, height: RULER_VIEWPORT_H }}>
+      <div className="absolute inset-0 overflow-hidden rounded-2xl bg-black/35 backdrop-blur-sm border border-white/10">
+        <div className="absolute top-1/2 -translate-y-1/2 h-9 w-0" style={{ transform: `translateX(${stripOffset}px)` }}>
+          {ticks.map((t) => (
+            <div
+              key={t.v}
+              className="absolute bottom-0 bg-white/50 rounded-full"
+              style={{ left: (t.v - min) * RULER_PX_PER_UNIT, width: t.major ? 2 : 1, height: t.major ? 18 : 10 }}
+            />
+          ))}
+        </div>
+      </div>
+      {/* The droplet: fixed in place while the ruler slides beneath/through
+          it — a frosted glass bubble rather than a plain pointer, so it
+          reads as a lens resting on the scale instead of a cursor on top
+          of it. */}
+      <div className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 pointer-events-none">
+        <div className="relative w-14 h-14 rounded-full bg-white/10 backdrop-blur-md border border-white/40 shadow-lg overflow-hidden">
+          <div className="absolute inset-0 bg-gradient-to-br from-white/35 via-transparent to-transparent" />
+          <div className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 w-[2px] h-7 bg-primary rounded-full" />
+        </div>
+      </div>
+      <div className="absolute left-1/2 -translate-x-1/2 -top-7 text-[11px] font-semibold text-black bg-primary px-2 py-0.5 rounded-full whitespace-nowrap">
         {value.toFixed(1)}×
       </div>
     </div>
@@ -808,7 +818,7 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
       {liveActive && status !== 'loading' && (
         <>
           {zoomDialOpen && (
-            <ZoomFanDial
+            <ZoomRulerDial
               min={zoomRange.min}
               max={zoomRange.max}
               value={zoom}
