@@ -208,7 +208,7 @@ function clamp11(v: number): number {
   return Math.min(1, Math.max(-1, v))
 }
 
-function buildVertexBuffers(landmarks: NormalizedLandmark[], params: ReshapeParams) {
+function buildVertexBuffers(landmarks: NormalizedLandmark[], params: ReshapeParams, aspect: number) {
   const n = landmarks.length // 468
   const texCoord = new Float32Array((n + OVAL_LOOP.length) * 2)
   const targetPos = new Float32Array((n + OVAL_LOOP.length) * 2)
@@ -224,7 +224,16 @@ function buildVertexBuffers(landmarks: NormalizedLandmark[], params: ReshapePara
   const rightEyeCenter = loopCenterNorm(RIGHT_EYE_LOOP, landmarks)
   const trueEyeLineY = (leftEyeCenter.y + rightEyeCenter.y) / 2
   const faceCenterX = (landmarks[LEFT_CHEEK].x + landmarks[RIGHT_CHEEK].x) / 2
-  const eyeSpan = Math.hypot(rightEyeCenter.x - leftEyeCenter.x, rightEyeCenter.y - leftEyeCenter.y)
+  // Landmarks are normalized per-axis (x by width, y by height), so a raw
+  // hypot of normalized dx/dy only measures true distance when the frame
+  // is square — on a non-square frame one unit of normalized-x covers a
+  // different real pixel distance than one unit of normalized-y. Scaling
+  // dx by `aspect` (width/height) first converts it into the same
+  // normalized-y-equivalent unit as dy, so this is a real-world distance
+  // (expressed in units consistent with the Y-axis shifts it scales
+  // below) regardless of aspect ratio — and reduces to the original
+  // formula exactly when aspect === 1, so the square case is unchanged.
+  const eyeSpan = Math.hypot((rightEyeCenter.x - leftEyeCenter.x) * aspect, rightEyeCenter.y - leftEyeCenter.y)
 
   // "Push toward centerX" assumes a roughly frontal face — the real slim
   // effect is narrowing width around the face's symmetry axis, and
@@ -367,7 +376,11 @@ function buildVertexBuffers(landmarks: NormalizedLandmark[], params: ReshapePara
     for (let idx = 0; idx < n; idx++) {
       const dx = landmarks[idx].x - center.x
       const dy = landmarks[idx].y - center.y
-      const d = Math.hypot(dx, dy)
+      // Same normalized-x-to-y-equivalent scaling as eyeSpan above — without
+      // it, this falloff region is a true circle only on a square frame and
+      // an ellipse (stretched along whichever axis has more pixels per
+      // normalized unit) on any other aspect ratio.
+      const d = Math.hypot(dx * aspect, dy)
       if (d >= radius) continue
       const w = Math.cos((d / radius) * (Math.PI / 2)) ** 2
       targetPos[idx * 2 + 1] += shift * w
@@ -456,7 +469,7 @@ export function renderMeshWarp(source: HTMLCanvasElement, landmarks: NormalizedL
   gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0)
 
   // Pass 2: the warped face mesh + anchored skirt on top.
-  const { texCoord, targetPos, vertexCount } = buildVertexBuffers(landmarks, params)
+  const { texCoord, targetPos, vertexCount } = buildVertexBuffers(landmarks, params, source.width / source.height)
   gl.bindBuffer(gl.ARRAY_BUFFER, s.texCoordBuffer)
   gl.bufferData(gl.ARRAY_BUFFER, texCoord, gl.DYNAMIC_DRAW)
   gl.vertexAttribPointer(s.texCoordLoc, 2, gl.FLOAT, false, 0, 0)

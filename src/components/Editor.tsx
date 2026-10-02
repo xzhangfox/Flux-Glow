@@ -423,8 +423,17 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
   const startLive = useCallback(async () => {
     setStatus('loading')
     try {
+      // No `height` constraint: most phone camera sensors are natively
+      // wider than square (4:3 or similar), and asking for an exact 1280x1280
+      // square forces the browser/driver to center-crop that native field of
+      // view down to a square *before* our own digital zoom ever runs —
+      // discarding real field of view the lens actually captured. Letting
+      // height float lets the device hand back its natural aspect ratio at
+      // roughly this width instead. The rest of the pipeline (drawDownscaled,
+      // the mesh warp, the skin mask) already works in terms of whatever
+      // width/height the frame actually has rather than assuming square.
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facingModeRef.current, width: { ideal: 1280 }, height: { ideal: 1280 } },
+        video: { facingMode: facingModeRef.current, width: { ideal: 1280 } },
       })
       streamRef.current = stream
       const video = videoRef.current!
