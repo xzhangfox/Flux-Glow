@@ -48,7 +48,7 @@ export function buildSkinMask(landmarks: NormalizedLandmark[], w: number, h: num
   feathered.width = w
   feathered.height = h
   const fctx = feathered.getContext('2d')!
-  fctx.filter = `blur(${Math.max(3, Math.round(w / 170))}px)`
+  fctx.filter = `blur(${Math.max(6, Math.round(w / 60))}px)`
   fctx.drawImage(canvas, 0, 0)
   return feathered
 }
