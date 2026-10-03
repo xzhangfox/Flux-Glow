@@ -1,7 +1,7 @@
 import { FaceLandmarker, type NormalizedLandmark } from '@mediapipe/tasks-vision'
 import { buildSkinMask } from './skinMask'
 import { smoothSkin } from './smoothing'
-import { applyFillLight, applyWhitening, applyAcneRemoval, applyWrinkleRemoval, applyMouthCornerSmoothing } from './beauty'
+import { applyWhitening, applyAcneRemoval, applyWrinkleRemoval, applyMouthCornerSmoothing } from './beauty'
 import { applyLiveTonePass } from './livePass'
 import { applyReshape, type ReshapeParams } from './reshape'
 import { LEFT_MOUTH_CORNER, RIGHT_MOUTH_CORNER } from './meshWarp'
@@ -20,22 +20,28 @@ export interface EditParams extends ReshapeParams {
 
 /** The full edit pipeline, shared by the static photo editor and the live
  *  camera preview so the two never drift into visibly different results:
- *  skin mask -> beauty (fill light, whitening, acne, wrinkles) ->
- *  frequency-separation smoothing -> per-region reshape (face/eyes/
- *  nose/mouth/...) -> filter. Reshape is a GPU triangulated-mesh warp
- *  (see meshWarp.ts) — unlike the CPU per-pixel approach it replaced, it
- *  doesn't need a precision/cost tradeoff between static photos and live
- *  video, so there's no grid-step parameter to thread through here the
- *  way the old MLS version needed. */
+ *  skin mask -> beauty (whitening, acne, wrinkles) -> frequency-separation
+ *  smoothing -> per-region reshape + 3D relighting (face/eyes/nose/
+ *  mouth/fill light/...) -> filter. Reshape and fill light both run as
+ *  part of the same GPU triangulated-mesh pass (see meshWarp.ts) — fill
+ *  light specifically needs the mesh's 3D vertex geometry for its per-
+ *  vertex surface normals, which only exists in that pass, so it isn't a
+ *  CPU beauty.ts effect the way whitening/acne/wrinkles are. Unlike the
+ *  CPU per-pixel reshape approach this replaced, the GPU pass doesn't
+ *  need a precision/cost tradeoff between static photos and live video,
+ *  so there's no grid-step parameter to thread through here the way the
+ *  old MLS version needed, and no highQuality branch for it below either.
+ */
 /**
- * `highQuality` switches the tone-based effects (fill light, acne,
+ * `highQuality` switches the CPU tone-based effects (whitening, acne,
  * wrinkle removal, skin smoothing) between a guided filter — edge-aware,
  * but a CPU per-pixel operation costing 100ms+ per call at face-region
  * size — and a plain Gaussian blur. The static photo editor always wants
  * the accurate pass; the live preview, which must redo all of this every
  * frame at 30fps, uses the cheaper one so the viewfinder stays responsive
  * and gets upgraded to full quality the moment a photo is actually
- * captured or confirmed.
+ * captured or confirmed. Fill light's GPU relighting is unaffected by
+ * this flag — it's equally cheap (a shader, not a CPU blur) either way.
  */
 export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandmark[] | null, params: EditParams, highQuality = true): HTMLCanvasElement {
   const preset: FilterPreset = FILTER_PRESETS.find((p) => p.id === params.filterId) ?? FILTER_PRESETS[0]
@@ -57,7 +63,6 @@ export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandm
   working.getContext('2d')!.drawImage(base, 0, 0)
 
   if (highQuality) {
-    if (params.fillLight > 0.001) applyFillLight(working, mask, params.fillLight, bounds, true)
     if (params.whitening > 0.001) applyWhitening(working, mask, params.whitening, bounds)
     if (params.acneRemoval > 0.001) applyAcneRemoval(working, mask, params.acneRemoval, bounds, true)
     if (params.wrinkleRemoval > 0.001) applyWrinkleRemoval(working, mask, params.wrinkleRemoval, bounds, true)

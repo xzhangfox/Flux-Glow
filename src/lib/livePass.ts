@@ -1,27 +1,30 @@
-// A single consolidated pass for the live 30fps preview, covering exactly
-// the same five tone effects as fillLight/whitening/acne/wrinkle/
-// smoothSkin in beauty.ts and smoothing.ts, with the same math — but
-// reading the face's pixel data and mask ONCE and writing the result ONCE,
-// instead of each effect doing its own getImageData/putImageData pair.
+// A single consolidated pass for the live 30fps preview, covering the same
+// four tone effects as whitening/acne/wrinkle/smoothSkin in beauty.ts and
+// smoothing.ts, with the same math — but reading the face's pixel data and
+// mask ONCE and writing the result ONCE, instead of each effect doing its
+// own getImageData/putImageData pair. (Fill light isn't part of this pass
+// — it's a GPU shader pass in meshWarp.ts now, using the mesh's own 3D
+// vertex normals for real directional shading, equally cheap for live and
+// static since it's a shader, not a CPU blur.)
 //
-// Fusing the five effects' own reads/writes turned out not to be the main
+// Fusing the four effects' own reads/writes turned out not to be the main
 // win: measured, the dominant cost was the *blur* operations themselves
-// (fillLight's exposure map, acne's local average, wrinkle's two bands,
-// smoothing's two layers — six `croppedBlur` calls total, each a real
-// getImageData/GPU-readback), not the handful of extra reads around them.
-// Six of those on a ~500x600 face region still cost 120-150ms/frame even
-// after consolidating everything else, far past a 33ms budget.
+// (acne's local average, wrinkle's two bands, smoothing's two layers —
+// five `croppedBlur` calls total, each a real getImageData/GPU-readback),
+// not the handful of extra reads around them. Those on a ~500x600 face
+// region still cost real time even after consolidating everything else,
+// far past a 33ms budget.
 //
 // So this also downsamples the whole working region once before running
-// any of the six blurs, and upsamples the single corrected result back at
-// the end — cutting every one of those six readbacks' pixel counts by the
-// square of the scale factor (4x at the default half-resolution), the
-// same "work at reduced resolution for an edge-preserving/blur-based
-// operation, then upsample" idea the guided filter's own fast variant
-// uses (see guidedFilter.ts), applied here across the whole pass instead
-// of inside a single filter. This only reduces the live *preview's*
-// resolution for these effects — the captured/confirmed photo still runs
-// the full-resolution sequential guided-filter pipeline.
+// any of the blurs, and upsamples the single corrected result back at the
+// end — cutting every one of those readbacks' pixel counts by the square
+// of the scale factor (4x at the default half-resolution), the same "work
+// at reduced resolution for an edge-preserving/blur-based operation, then
+// upsample" idea the guided filter's own fast variant uses (see
+// guidedFilter.ts), applied here across the whole pass instead of inside
+// a single filter. This only reduces the live *preview's* resolution for
+// these effects — the captured/confirmed photo still runs the full-
+// resolution sequential guided-filter pipeline.
 //
 // This path is deliberately lower-fidelity than the per-function static
 // pipeline in one more way beyond the downsampling and the Gaussian-vs-
@@ -35,11 +38,9 @@
 // toward their maximum simultaneously — an acceptable live-preview
 // approximation given the captured photo is unaffected.
 
-import { luminancePercentile } from './beauty'
 import { buildWhiteningLUT, applyLUT } from './whiteningLUT'
 
 export interface LiveToneParams {
-  fillLight: number
   whitening: number
   acneRemoval: number
   wrinkleRemoval: number
@@ -63,12 +64,11 @@ export function applyLiveTonePass(canvas: HTMLCanvasElement, mask: HTMLCanvasEle
   const bh = Math.min(canvas.height, Math.ceil(bounds.maxY)) - by
   if (bw <= 0 || bh <= 0) return
 
-  const needFillLight = params.fillLight > 0.001
   const needWhitening = params.whitening > 0.001
   const needAcne = params.acneRemoval > 0.001
   const needWrinkle = params.wrinkleRemoval > 0.001
   const needSmooth = params.smoothness > 0.001
-  if (!needFillLight && !needWhitening && !needAcne && !needWrinkle && !needSmooth) return
+  if (!needWhitening && !needAcne && !needWrinkle && !needSmooth) return
 
   // Same CIELAB-based whitening transform the static pipeline uses (see
   // beauty.ts/whiteningLUT.ts), via the same LUT — building the LUT costs
@@ -81,8 +81,8 @@ export function applyLiveTonePass(canvas: HTMLCanvasElement, mask: HTMLCanvasEle
 
   // Half resolution once the region is big enough that it matters — for
   // an already-small bounds rect (e.g. editing a small/cropped photo) the
-  // six blurs are cheap regardless and downsampling would only cost
-  // quality for no real speed gain.
+  // blurs are cheap regardless and downsampling would only cost quality
+  // for no real speed gain.
   const scale = bw * bh > 120_000 ? 2 : 1
   const sw = Math.max(1, Math.round(bw / scale))
   const sh = Math.max(1, Math.round(bh / scale))
@@ -104,17 +104,6 @@ export function applyLiveTonePass(canvas: HTMLCanvasElement, mask: HTMLCanvasEle
   // one canvas round trip per distinct radius (unavoidable: a CSS blur
   // needs an actual canvas), but exactly one per effect, not one per
   // effect per channel of math, and 1/scale^2 the pixels of before.
-  let fillLightLocal: ImageData | null = null
-  let shadowPoint = 0
-  let span = 28
-  if (needFillLight) {
-    const shadowScale = Math.max(3, Math.round((bw * 0.12) / scale))
-    fillLightLocal = blurSmall(small, shadowScale)
-    shadowPoint = luminancePercentile(orig.data, maskData.data, 0.35)
-    const darkPoint = luminancePercentile(orig.data, maskData.data, 0.1)
-    span = Math.max(28, shadowPoint - darkPoint)
-  }
-
   const acneLocal = needAcne ? blurSmall(small, Math.max(1, Math.round(14 / scale))) : null
 
   let wrinkleFine: ImageData | null = null
@@ -137,7 +126,6 @@ export function applyLiveTonePass(canvas: HTMLCanvasElement, mask: HTMLCanvasEle
   }
 
   const out = new ImageData(sw, sh)
-  const MAX_LIFT = 0.5
   const DEVIATION_THRESHOLD = 16
   const DEVIATION_RANGE = 40
   const wrinkleReduction = params.wrinkleRemoval * 0.7
@@ -147,16 +135,6 @@ export function applyLiveTonePass(canvas: HTMLCanvasElement, mask: HTMLCanvasEle
     let r = orig.data[i]
     let g = orig.data[i + 1]
     let b = orig.data[i + 2]
-
-    if (fillLightLocal) {
-      const localLum = fillLightLocal.data[i] * 0.299 + fillLightLocal.data[i + 1] * 0.587 + fillLightLocal.data[i + 2] * 0.114
-      const t = Math.min(1, Math.max(0, (shadowPoint - localLum) / span))
-      const shadowWeight = t * t * (3 - 2 * t)
-      const liftAmount = shadowWeight * params.fillLight * MAX_LIFT * maskAlpha
-      r = r + (255 - (255 - r) * (1 - liftAmount) - r)
-      g = g + (255 - (255 - g) * (1 - liftAmount) - g)
-      b = b + (255 - (255 - b) * (1 - liftAmount) - b)
-    }
 
     if (whiteningLut) {
       applyLUT(r, g, b, whiteningLut, whitenedPixel)

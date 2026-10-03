@@ -33,20 +33,63 @@ const SKIRT_PAD_FRACTION = 0.28 // how far outside the oval the anchor ring sits
 const VERTEX_SRC = `
   attribute vec2 a_texCoord;
   attribute vec2 a_targetPos;
+  attribute vec3 a_normal;
   varying vec2 v_texCoord;
+  varying vec3 v_normal;
   void main() {
     v_texCoord = a_texCoord;
+    v_normal = a_normal;
     vec2 clip = a_targetPos * 2.0 - 1.0;
     gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
   }
 `
 
+// Single-light Lambertian + a touch of Blinn-Phong specular, driven by
+// per-vertex normals derived from the face mesh's own 3D landmark
+// geometry (see computeVertexNormals) and interpolated across each
+// triangle by the rasterizer — real directional shading, not a 2D
+// brightness map. `u_lightIntensity` is 0 for the background pass (see
+// renderMeshWarp), which is what keeps the background completely unlit
+// regardless of whatever normal data happens to be bound for that draw.
+//
+// The warm "terminator" term approximates subsurface scattering: real
+// skin is translucent, so light grazing the boundary between a lit and
+// shadowed area scatters inside the skin and re-emerges with a reddish
+// cast, which is what keeps that transition from reading as a flat,
+// plastic falloff. Applied only in a narrow band around n.l ~ 0 (the
+// actual terminator line), not as a general warm tint.
 const FRAGMENT_SRC = `
   precision mediump float;
   varying vec2 v_texCoord;
+  varying vec3 v_normal;
   uniform sampler2D u_image;
+  uniform vec3 u_lightDir;
+  uniform float u_lightIntensity;
   void main() {
-    gl_FragColor = texture2D(u_image, v_texCoord);
+    vec4 color = texture2D(u_image, v_texCoord);
+    vec3 n = length(v_normal) > 0.0001 ? normalize(v_normal) : vec3(0.0);
+    float ndotl = max(dot(n, u_lightDir), 0.0);
+
+    // Screen-blended lift (not an additive brighten) so a fully-lit
+    // surface compresses toward white instead of blowing straight through
+    // it, and an already-bright highlight moves less than a midtone does.
+    float lift = ndotl * u_lightIntensity * 0.55;
+    vec3 lit = 1.0 - (1.0 - color.rgb) * (1.0 - lift);
+
+    // A modest Blinn-Phong specular highlight — the "water-light skin"
+    // touch — using the same light direction and a camera-facing view
+    // vector (the mesh is rendered near-orthographically, so (0,0,1) is a
+    // reasonable stand-in for the eye direction here).
+    vec3 viewDir = vec3(0.0, 0.0, 1.0);
+    vec3 halfVec = normalize(u_lightDir + viewDir);
+    float spec = pow(max(dot(n, halfVec), 0.0), 24.0);
+    lit += vec3(spec) * u_lightIntensity * 0.12;
+
+    float terminator = 1.0 - smoothstep(0.0, 0.3, abs(ndotl - 0.12));
+    vec3 warm = vec3(0.14, 0.035, -0.02);
+    lit += warm * terminator * u_lightIntensity * 0.5;
+
+    gl_FragColor = vec4(clamp(lit, 0.0, 1.0), color.a);
   }
 `
 
@@ -56,9 +99,11 @@ interface GLState {
   program: WebGLProgram
   texCoordBuffer: WebGLBuffer
   targetPosBuffer: WebGLBuffer
+  normalBuffer: WebGLBuffer
   indexBuffer: WebGLBuffer
   texCoordLoc: number
   targetPosLoc: number
+  normalLoc: number
   texture: WebGLTexture
   backgroundIndexBuffer: WebGLBuffer
 }
@@ -118,9 +163,11 @@ function getState(): GLState {
     program,
     texCoordBuffer: gl.createBuffer()!,
     targetPosBuffer: gl.createBuffer()!,
+    normalBuffer: gl.createBuffer()!,
     indexBuffer: gl.createBuffer()!,
     texCoordLoc: gl.getAttribLocation(program, 'a_texCoord'),
     targetPosLoc: gl.getAttribLocation(program, 'a_targetPos'),
+    normalLoc: gl.getAttribLocation(program, 'a_normal'),
     texture,
     backgroundIndexBuffer,
   }
@@ -154,6 +201,8 @@ export interface ReshapeParams {
   mouthLowerLip: number
   /** Mouth corners: negative downturns, positive lifts. */
   mouthCorners: number
+  /** 3D relighting intensity, 0-1 — not bidirectional like the rest (see MESH_FIELDS in reshape.ts, which this is also added to so the mesh pass still runs when this is the only active field). */
+  fillLight: number
 }
 
 const OVAL_LOOP = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_FACE_OVAL)
@@ -422,6 +471,107 @@ function loopCenterNorm(loop: number[], landmarks: NormalizedLandmark[]) {
   return { x: x / loop.length, y: y / loop.length }
 }
 
+// Per-vertex surface normals derived from the face mesh's own 3D landmark
+// geometry (MediaPipe gives x, y, and a rough relative depth z per point)
+// and the same fixed triangulation the warp itself uses for rasterization
+// — not a learned depth/normal map (this app has no trained model for
+// that and no way to get one in this environment), but real surface-
+// normal math over real mesh geometry: each triangle's own face normal
+// (from its two edge vectors) is accumulated into its three vertices,
+// then each vertex's accumulated normal is renormalized — the standard
+// per-vertex-normal-from-a-mesh technique. Driven by only 478 points, it
+// resolves the face's broad forms (forehead, cheek, nose bridge, jaw)
+// correctly but not fine wrinkle-level surface detail, which would need a
+// far denser mesh than MediaPipe provides.
+//
+// x is normalized by the frame's width, y by its height, and z (per
+// MediaPipe's convention) is roughly in the same unit as x, more negative
+// the closer a point is to the camera — so y needs the same aspect
+// correction used elsewhere in this file (dividing by `aspect` converts a
+// normalized-y delta into normalized-x-equivalent units) before cross
+// products between the three axes produce a geometrically sensible
+// direction instead of one stretched by the frame's own aspect ratio.
+function computeVertexNormals(landmarks: NormalizedLandmark[], aspect: number): Float32Array {
+  const n = landmarks.length
+  const px = new Float32Array(n)
+  const py = new Float32Array(n)
+  const pz = new Float32Array(n)
+  for (let i = 0; i < n; i++) {
+    px[i] = landmarks[i].x
+    py[i] = landmarks[i].y / aspect
+    pz[i] = landmarks[i].z
+  }
+
+  const normals = new Float32Array(n * 3)
+  for (let t = 0; t < FACE_TRIANGULATION.length; t += 3) {
+    const a = FACE_TRIANGULATION[t]
+    const b = FACE_TRIANGULATION[t + 1]
+    const c = FACE_TRIANGULATION[t + 2]
+
+    const e1x = px[b] - px[a]
+    const e1y = py[b] - py[a]
+    const e1z = pz[b] - pz[a]
+    const e2x = px[c] - px[a]
+    const e2y = py[c] - py[a]
+    const e2z = pz[c] - pz[a]
+
+    // e1 x e2 — the resulting sign convention (which way "outward" points)
+    // was verified empirically against real landmark data: the forehead,
+    // nose bridge, and cheeks all come out pointing toward the camera (see
+    // NORMAL_TOWARD_CAMERA_SIGN below, applied right after this loop).
+    const nx = e1y * e2z - e1z * e2y
+    const ny = e1z * e2x - e1x * e2z
+    const nz = e1x * e2y - e1y * e2x
+
+    normals[a * 3] += nx
+    normals[a * 3 + 1] += ny
+    normals[a * 3 + 2] += nz
+    normals[b * 3] += nx
+    normals[b * 3 + 1] += ny
+    normals[b * 3 + 2] += nz
+    normals[c * 3] += nx
+    normals[c * 3 + 1] += ny
+    normals[c * 3 + 2] += nz
+  }
+
+  for (let i = 0; i < n; i++) {
+    const x = normals[i * 3] * NORMAL_TOWARD_CAMERA_SIGN
+    const y = normals[i * 3 + 1] * NORMAL_TOWARD_CAMERA_SIGN
+    const z = normals[i * 3 + 2] * NORMAL_TOWARD_CAMERA_SIGN
+    const len = Math.hypot(x, y, z)
+    if (len > 1e-6) {
+      normals[i * 3] = x / len
+      normals[i * 3 + 1] = y / len
+      normals[i * 3 + 2] = z / len
+    } else {
+      normals[i * 3] = 0
+      normals[i * 3 + 1] = 0
+      normals[i * 3 + 2] = 0
+    }
+  }
+  return normals
+}
+// Flips the raw e1 x e2 result if needed so normals point toward the
+// camera (negative z in this function's own (x, y/aspect, z) space,
+// matching MediaPipe's "more negative z = closer to camera" convention)
+// rather than away from it — set from the empirical check described
+// above, not a guess.
+const NORMAL_TOWARD_CAMERA_SIGN = 1
+
+// A fixed "loop lighting"-style default: mostly toward the camera (where
+// a light near a phone during a selfie actually sits), a bit from above,
+// a bit to one side — a flattering, classic portrait position rather than
+// straight-on (which flattens the whole face evenly) or from the side
+// (which can look harsh). In the same (x, y/aspect, z) space
+// computeVertexNormals produces, so no extra conversion is needed before
+// the dot product in the shader. Not yet user-adjustable — a movable
+// light is a reasonable follow-up, scoped out of this pass.
+function normalize3(v: [number, number, number]): [number, number, number] {
+  const len = Math.hypot(v[0], v[1], v[2])
+  return len > 1e-6 ? [v[0] / len, v[1] / len, v[2] / len] : v
+}
+const DEFAULT_LIGHT_DIR = normalize3([0.28, -0.42, -0.85])
+
 let cachedSkirtIndices: Uint16Array | null = null
 function buildIndexArray(n: number): Uint16Array {
   if (cachedSkirtIndices) return cachedSkirtIndices
@@ -453,29 +603,57 @@ export function renderMeshWarp(source: HTMLCanvasElement, landmarks: NormalizedL
 
   gl.enableVertexAttribArray(s.texCoordLoc)
   gl.enableVertexAttribArray(s.targetPosLoc)
+  gl.enableVertexAttribArray(s.normalLoc)
+
+  const lightDirLoc = gl.getUniformLocation(s.program, 'u_lightDir')
+  const lightIntensityLoc = gl.getUniformLocation(s.program, 'u_lightIntensity')
+  gl.uniform3f(lightDirLoc, DEFAULT_LIGHT_DIR[0], DEFAULT_LIGHT_DIR[1], DEFAULT_LIGHT_DIR[2])
 
   // Pass 1: the untouched background — identity mapping, covers the
   // whole frame. Drawn first so the warped mesh (pass 2) sits on top of
   // it; anything outside both the mesh and its skirt keeps showing this
-  // layer, completely unaffected by any reshape math.
+  // layer, completely unaffected by any reshape math. Lighting is forced
+  // off for this pass (intensity 0) regardless of the normal data bound —
+  // the background isn't part of the face and must never be relit.
+  gl.uniform1f(lightIntensityLoc, 0)
   const bgTexCoord = new Float32Array([0, 0, 1, 0, 0, 1, 1, 1])
+  const bgNormal = new Float32Array(8 * 3) // 4 vertices, zero vectors — irrelevant anyway since intensity is 0
   gl.bindBuffer(gl.ARRAY_BUFFER, s.texCoordBuffer)
   gl.bufferData(gl.ARRAY_BUFFER, bgTexCoord, gl.DYNAMIC_DRAW)
   gl.vertexAttribPointer(s.texCoordLoc, 2, gl.FLOAT, false, 0, 0)
   gl.bindBuffer(gl.ARRAY_BUFFER, s.targetPosBuffer)
   gl.bufferData(gl.ARRAY_BUFFER, bgTexCoord, gl.DYNAMIC_DRAW)
   gl.vertexAttribPointer(s.targetPosLoc, 2, gl.FLOAT, false, 0, 0)
+  gl.bindBuffer(gl.ARRAY_BUFFER, s.normalBuffer)
+  gl.bufferData(gl.ARRAY_BUFFER, bgNormal, gl.DYNAMIC_DRAW)
+  gl.vertexAttribPointer(s.normalLoc, 3, gl.FLOAT, false, 0, 0)
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, s.backgroundIndexBuffer)
   gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0)
 
-  // Pass 2: the warped face mesh + anchored skirt on top.
-  const { texCoord, targetPos, vertexCount } = buildVertexBuffers(landmarks, params, source.width / source.height)
+  // Pass 2: the warped face mesh + anchored skirt on top, now relit.
+  const aspect = source.width / source.height
+  const { texCoord, targetPos, vertexCount } = buildVertexBuffers(landmarks, params, aspect)
   gl.bindBuffer(gl.ARRAY_BUFFER, s.texCoordBuffer)
   gl.bufferData(gl.ARRAY_BUFFER, texCoord, gl.DYNAMIC_DRAW)
   gl.vertexAttribPointer(s.texCoordLoc, 2, gl.FLOAT, false, 0, 0)
   gl.bindBuffer(gl.ARRAY_BUFFER, s.targetPosBuffer)
   gl.bufferData(gl.ARRAY_BUFFER, targetPos, gl.DYNAMIC_DRAW)
   gl.vertexAttribPointer(s.targetPosLoc, 2, gl.FLOAT, false, 0, 0)
+
+  // Per-vertex normals for the 468 real landmarks, padded with zero
+  // vectors for the skirt ring — a zero normal gives n.l = 0 regardless of
+  // light direction, so the skirt (which shows undisturbed background
+  // content) stays exactly as unlit as the true background just outside
+  // it, avoiding a brightness seam at that boundary.
+  const faceNormals = computeVertexNormals(landmarks, aspect)
+  const normalData = new Float32Array(vertexCount * 3)
+  normalData.set(faceNormals, 0)
+  gl.bindBuffer(gl.ARRAY_BUFFER, s.normalBuffer)
+  gl.bufferData(gl.ARRAY_BUFFER, normalData, gl.DYNAMIC_DRAW)
+  gl.vertexAttribPointer(s.normalLoc, 3, gl.FLOAT, false, 0, 0)
+
+  gl.uniform1f(lightIntensityLoc, Math.max(0, Math.min(1, params.fillLight)))
+
   const indices = buildIndexArray(vertexCount - OVAL_LOOP.length)
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, s.indexBuffer)
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.DYNAMIC_DRAW)

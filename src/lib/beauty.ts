@@ -1,9 +1,11 @@
-// Four independent skin/tone adjustments, separate from `smoothSkin`'s
+// Three independent skin/tone adjustments, separate from `smoothSkin`'s
 // frequency-separation blemish/tone smoothing — each is mask-bounded the
 // same way (only the face's own bounding box is ever touched, since the
 // mask is zero everywhere else anyway) but does a genuinely different
 // kind of correction rather than just being the same blur at another
-// strength.
+// strength. (Fill light used to live here too — it's now a GPU shader
+// pass in meshWarp.ts, since real directional relighting needs the mesh's
+// 3D vertex normals, which only exist in that pass.)
 //
 // Each function mutates `canvas` in place over just its bounds rect
 // instead of allocating a full-frame copy and returning it. The pipeline
@@ -29,132 +31,6 @@ function boundsRect(w: number, h: number, bounds?: Bounds) {
   const bw = (bounds ? Math.min(w, Math.ceil(bounds.maxX)) : w) - bx
   const bh = (bounds ? Math.min(h, Math.ceil(bounds.maxY)) : h) - by
   return { bx, by, bw, bh }
-}
-
-/**
- * Builds a 256-bucket luminance histogram over a canvas's pixels that fall
- * inside a mask (`maskAlpha > 0.1`), and returns the value at a given
- * percentile (0-1). Used to find where "shadow" actually starts *for this
- * specific face*, instead of guessing a fixed brightness number that only
- * fits one lighting condition.
- */
-export function luminancePercentile(data: Uint8ClampedArray, maskData: Uint8ClampedArray, percentile: number): number {
-  const buckets = new Uint32Array(256)
-  let total = 0
-  for (let i = 0; i < data.length; i += 4) {
-    if (maskData[i + 3] < 26) continue // ~0.1 alpha — skip pixels outside the face
-    const lum = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114
-    buckets[Math.round(lum)]++
-    total++
-  }
-  if (total === 0) return 128
-  const target = total * percentile
-  let cumulative = 0
-  for (let v = 0; v < 256; v++) {
-    cumulative += buckets[v]
-    if (cumulative >= target) return v
-  }
-  return 255
-}
-
-/**
- * Fill light: lifts shadows without flattening the face into a uniform
- * pale "mask" — the failure mode of a flat screen blend applied to every
- * skin pixel alike, which brightens an already-lit cheek by nearly the
- * same amount as a genuinely shadowed jawline or nose side and so erases
- * the light/shadow modeling that makes a face read as three-dimensional
- * in the first place.
- *
- * The first version of this function fixed that with a *local* exposure
- * map (blur at the scale real facial shadows occur at) but still compared
- * it against a fixed absolute brightness — which fails under ordinary
- * indoor lighting, where a whole face can sit below that fixed number at
- * once, so "lift anything darker than X" ends up meaning "lift the whole
- * face" again, the exact symptom this was meant to fix.
- *
- * The actual fix: judge "shadow" relative to *this face's own* tonal
- * range (its 15th/85th luminance percentiles), the same way Lightroom/
- * Camera Raw derive Shadows/Highlights behavior from the image's own
- * histogram rather than a hardcoded brightness value. A face that's
- * evenly lit — even if the whole frame is dim — has a narrow range, so
- * almost nothing registers as "below the shadow point" and the effect
- * correctly stays close to a no-op (dim-but-even lighting is an exposure
- * problem, not a shadow problem, and isn't fill light's job to fix). A
- * face lit from one side has a wide range, so the genuinely dark side
- * gets lifted while the lit side doesn't.
- *
- * In high quality mode the local exposure estimate itself is multi-scale
- * — three blurs at different radii, blended — rather than one single
- * radius, the same idea Multi-Scale Retinex uses to estimate illumination
- * (a single "surround" scale is a tradeoff: small enough to find a tight
- * crease like an under-eye shadow and it's too twitchy to read a broad
- * one-sided key-light shadow correctly, and vice versa). Blending a small,
- * medium, and large surround catches both without having to pick one.
- */
-export function applyFillLight(canvas: HTMLCanvasElement, mask: HTMLCanvasElement, intensity: number, bounds?: Bounds, highQuality = true): void {
-  if (intensity <= 0.001) return
-  const { bx, by, bw, bh } = boundsRect(canvas.width, canvas.height, bounds)
-  if (bw <= 0 || bh <= 0) return
-
-  // Radius tuned to the scale facial shadows actually occur at, not
-  // pixel-level darkness — this is what makes the lift map read as "is
-  // this part of the face in shadow" rather than "is this exact pixel
-  // dark", which would just reintroduce a texture-flattening blur. A
-  // guided filter rather than a plain blur here too, so a hard real
-  // boundary (hairline, jaw against the background, a glasses rim) can't
-  // bleed its brightness into the exposure estimate on the other side of
-  // it — eps is looser than the other effects' since this estimate is
-  // meant to be broad/regional, not responsive to skin-texture-scale
-  // variance.
-  const shadowScale = Math.max(6, Math.round(bw * 0.12))
-  // Three scales blended (not averaged blindly — the medium scale, tuned
-  // to where real facial shadows live, carries the most weight) only in
-  // high quality mode: each extra scale is another full blur/getImageData
-  // round trip, affordable once for a static photo but not worth tripling
-  // the live path's per-frame cost for a refinement that mostly shows up
-  // at scales a reduced-resolution live preview is already smoothing over.
-  const localLayers = highQuality
-    ? [
-        { data: edgeAwareBlur(canvas, bx, by, bw, bh, Math.max(3, Math.round(shadowScale * 0.5)), 2000), weight: 0.25 },
-        { data: edgeAwareBlur(canvas, bx, by, bw, bh, shadowScale, 2000), weight: 0.5 },
-        { data: edgeAwareBlur(canvas, bx, by, bw, bh, Math.round(shadowScale * 1.8), 2000), weight: 0.25 },
-      ]
-    : [{ data: croppedBlur(canvas, bx, by, bw, bh, shadowScale), weight: 1 }]
-
-  const ctx = canvas.getContext('2d')!
-  const orig = ctx.getImageData(bx, by, bw, bh)
-  const maskData = mask.getContext('2d')!.getImageData(bx, by, bw, bh)
-  const out = new ImageData(bw, bh)
-
-  // The shadow point sits at this face's own 35th percentile — below that,
-  // an area counts as genuinely shadowed *for this photo*; above it, it
-  // doesn't, no matter how dim the overall shot is. `span` is the gap back
-  // to the darkest 10% of the face, giving the falloff room to be smooth
-  // instead of a hard cutoff right at the shadow point; it's floored so a
-  // near-flat histogram (very evenly lit face) can't produce a near-zero
-  // span and make ordinary texture noise register as "deep shadow".
-  const shadowPoint = luminancePercentile(orig.data, maskData.data, 0.35)
-  const darkPoint = luminancePercentile(orig.data, maskData.data, 0.1)
-  const span = Math.max(28, shadowPoint - darkPoint)
-  const MAX_LIFT = 0.5 // ceiling on the screen-blend amount even at intensity=1 in the darkest shadow
-
-  for (let i = 0; i < orig.data.length; i += 4) {
-    const maskAlpha = maskData.data[i + 3] / 255
-    let localLum = 0
-    for (const layer of localLayers) {
-      localLum += (layer.data.data[i] * 0.299 + layer.data.data[i + 1] * 0.587 + layer.data.data[i + 2] * 0.114) * layer.weight
-    }
-    const t = Math.min(1, Math.max(0, (shadowPoint - localLum) / span))
-    const shadowWeight = t * t * (3 - 2 * t) // smoothstep: soft falloff, no visible "shadow / not-shadow" boundary
-    const liftAmount = shadowWeight * intensity * MAX_LIFT
-    for (let c = 0; c < 3; c++) {
-      const v = orig.data[i + c]
-      const screened = 255 - (255 - v) * (1 - liftAmount)
-      out.data[i + c] = v + (screened - v) * maskAlpha
-    }
-    out.data[i + 3] = orig.data[i + 3]
-  }
-  ctx.putImageData(out, bx, by)
 }
 
 /**

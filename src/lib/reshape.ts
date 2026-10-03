@@ -60,7 +60,7 @@ function radialWarpInPlace(srcData: Uint8ClampedArray, outData: Uint8ClampedArra
   }
 }
 
-const MESH_FIELDS = ['face', 'eyes', 'mouth', 'eyebrowHeight', 'noseBridge', 'temple', 'cheekbone', 'mouthUpperLip', 'mouthLowerLip', 'mouthCorners'] as const
+const MESH_FIELDS = ['face', 'eyes', 'mouth', 'eyebrowHeight', 'noseBridge', 'temple', 'cheekbone', 'mouthUpperLip', 'mouthLowerLip', 'mouthCorners', 'fillLight'] as const
 
 export function applyReshape(source: HTMLCanvasElement, landmarks: NormalizedLandmark[], params: ReshapeParams): HTMLCanvasElement {
   // Bidirectional now (negative values are meaningful, e.g. face<0 widens)
