@@ -9,5 +9,18 @@ import Editor, { type Source } from './components/Editor'
 export default function App() {
   const [source, setSource] = useState<Source>({ kind: 'live' })
 
-  return <Editor source={source} onReset={() => setSource({ kind: 'live' })} onPickImage={(file) => setSource({ kind: 'image', file })} />
+  // A ready portrait for anyone without a usable camera.
+  const trySample = async () => {
+    const blob = await (await fetch('/samples/portrait.jpg')).blob()
+    setSource({ kind: 'image', file: new File([blob], 'sample-portrait.jpg', { type: blob.type || 'image/jpeg' }) })
+  }
+
+  return (
+    <Editor
+      source={source}
+      onReset={() => setSource({ kind: 'live' })}
+      onPickImage={(file) => setSource({ kind: 'image', file })}
+      onTrySample={trySample}
+    />
+  )
 }

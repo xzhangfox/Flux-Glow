@@ -158,7 +158,7 @@ function GridOverlay() {
   )
 }
 
-export default function Editor({ source, onReset, onPickImage }: { source: Source; onReset: () => void; onPickImage?: (file: File) => void }) {
+export default function Editor({ source, onReset, onPickImage, onTrySample }: { source: Source; onReset: () => void; onPickImage?: (file: File) => void; onTrySample?: () => void }) {
   const [params, setParams] = useState<EditParams>(DEFAULT_PARAMS)
   const [status, setStatus] = useState<Status>('loading')
   const [live, setLive] = useState(source.kind === 'live')
@@ -693,6 +693,16 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
                 : "Couldn't open that photo."
               : 'No face found — Beauty and Shape need one. Filters still apply.'}
           </p>
+        )}
+        {/* No camera (denied, absent, or a desktop without one): offer a
+            ready portrait so every tool can still be tried right away. */}
+        {status === 'error' && source.kind === 'live' && !panel && onTrySample && (
+          <button
+            onClick={onTrySample}
+            className="self-center mb-14 px-5 py-2.5 rounded-full bg-primary text-black text-sm font-semibold shadow-glow transition active:scale-95"
+          >
+            Try a sample photo
+          </button>
         )}
 
         {live && !panel && status !== 'loading' && status !== 'error' && countdown === null && (
