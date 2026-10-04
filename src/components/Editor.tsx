@@ -6,6 +6,15 @@ import { renderFilterThumbnails } from '../lib/filters'
 import { ASPECT_MODES, aspectRatioFor, cropRectFor, drawFrame, remapLandmarks, type AspectMode } from '../lib/frame'
 import AdjustPanel, { type AdjustItem } from './AdjustPanel'
 import FilterPanel from './FilterPanel'
+import ThumbStrip from './ThumbStrip'
+import Slider from './Slider'
+import StickerPanel, { type StickerRequest } from './StickerPanel'
+import StickerLayer from './StickerLayer'
+import { SHAPE_PARAMS } from '../lib/deform'
+import { LOOKS, applyLook, findLook } from '../lib/looks'
+import { EFFECTS, findEffect } from '../lib/effects'
+import { renderFaceThumbs } from '../lib/thumbs'
+import { artImage, drawStickers, emojiCanvas, photoSticker, placeSticker, textCanvas, type Sticker } from '../lib/stickers'
 import ZoomControl from './ZoomControl'
 import { DIGITAL_ZOOM_RANGE, type ZoomRange } from '../lib/zoom'
 import {
@@ -30,6 +39,10 @@ import {
   IconTimer,
   IconGrid,
   RegionIcon,
+  IconWand,
+  IconEars,
+  IconSticker,
+  IconRefresh,
 } from './icons'
 
 // Saved photos and uploads are worked on at up to this size — phone photos
@@ -47,12 +60,12 @@ const LIVE_FRAME_INTERVAL_MS = 33
 const TIMER_STEPS = [0, 3, 10] as const
 
 const BEAUTY_KEYS: NumericParam[] = ['smoothness', 'whitening', 'acneRemoval', 'wrinkleRemoval', 'mouthCornerSmooth', 'fillLight']
-const SHAPE_KEYS: NumericParam[] = ['face', 'temple', 'cheekbone', 'eyes', 'eyebrowHeight', 'nose', 'noseBridge', 'mouth', 'mouthUpperLip', 'mouthLowerLip', 'mouthCorners']
+const SHAPE_KEYS: NumericParam[] = [...SHAPE_PARAMS]
 
 export type Source = { kind: 'image'; file: File } | { kind: 'live' }
 
 type Status = 'loading' | 'ready' | 'no-face' | 'error'
-type Panel = 'beauty' | 'shape' | 'filter'
+type Panel = 'looks' | 'beauty' | 'shape' | 'filter' | 'effects' | 'stickers'
 
 function loadImage(file: File): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -135,7 +148,7 @@ function TopButton({ label, active, children, ...rest }: { label: string; active
 
 function TrayButton({ icon: Icon, label, onClick, active, dot, toggle }: { icon: ComponentType<SVGProps<SVGSVGElement>>; label: string; onClick: () => void; active?: boolean; dot?: boolean; toggle?: boolean }) {
   return (
-    <button onClick={onClick} aria-label={label} aria-pressed={toggle ? !!active : undefined} data-panel-toggle={toggle ? '' : undefined} className="flex flex-col items-center gap-1.5 w-14 text-white/85">
+    <button onClick={onClick} aria-label={label} aria-pressed={toggle ? !!active : undefined} data-panel-toggle={toggle ? '' : undefined} className="flex flex-col items-center gap-1.5 w-[3.15rem] text-white/85">
       <span className={`relative w-11 h-11 rounded-full flex items-center justify-center border transition ${active ? 'bg-primary text-black border-primary' : 'bg-white/[0.06] border-white/15'}`}>
         <Icon className="w-5 h-5" />
         {dot && !active && <span className="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-primary ring-2 ring-black/60" />}
@@ -177,6 +190,12 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
   const [frameAspect, setFrameAspect] = useState(3 / 4)
   const [frameVersion, setFrameVersion] = useState(0)
   const [thumbs, setThumbs] = useState<Map<string, string> | null>(null)
+  const [lookId, setLookId] = useState<string | null>(null)
+  const [lookStrength, setLookStrength] = useState(1)
+  const [lookThumbs, setLookThumbs] = useState<Record<string, string>>({})
+  const [effectThumbs, setEffectThumbs] = useState<Record<string, string>>({})
+  const [stickers, setStickers] = useState<Sticker[]>([])
+  const [selectedSticker, setSelectedSticker] = useState<number | null>(null)
 
   const displayRef = useRef<HTMLCanvasElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -207,8 +226,10 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
   const frameAspectRef = useRef(frameAspect)
   const countdownTimerRef = useRef<number | null>(null)
 
+  const stickersRef = useRef<Sticker[]>(stickers)
   paramsRef.current = params
   showBeforeRef.current = showBefore
+  stickersRef.current = stickers
 
   const previewBox = useElementSize(previewRef)
   const trayBox = useElementSize(trayRef)
@@ -232,7 +253,7 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
     function onClick(e: MouseEvent) {
       const target = e.target as Element
       if (panelRef.current?.contains(target)) return
-      if (target.closest?.('[data-panel-toggle]')) return
+      if (target.closest?.('[data-panel-toggle], [data-keep-panel]')) return
       setPanel(null)
     }
     document.addEventListener('click', onClick, true)
@@ -248,7 +269,9 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
       canvas.width = src.width
       canvas.height = src.height
     }
-    canvas.getContext('2d')!.drawImage(src, 0, 0)
+    const ctx = canvas.getContext('2d')!
+    ctx.drawImage(src, 0, 0)
+    if (!showBeforeRef.current && stickersRef.current.length) drawStickers(ctx, stickersRef.current, canvas.width, canvas.height)
     const a = base.width / base.height
     if (Math.abs(a - frameAspectRef.current) > 0.002) {
       frameAspectRef.current = a
@@ -258,7 +281,7 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
 
   useEffect(() => {
     render()
-  }, [showBefore, render])
+  }, [showBefore, stickers, render])
 
   const recomputeStatic = useCallback(() => {
     const base = baseRef.current
@@ -402,6 +425,8 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
     staticBusyRef.current = true
     setLive(false)
     setStatus('loading')
+    setStickers([])
+    setSelectedSticker(null)
     resultRef.current = null
     ;(async () => {
       try {
@@ -451,6 +476,80 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
     return () => clearTimeout(t)
   }, [panel, frameVersion, frameReady])
 
+  // Looks and Effects preview on this very face, rendered when their panel
+  // opens (and again for each new still), progressively, not per live frame.
+  useEffect(() => {
+    if (panel !== 'looks' && panel !== 'effects') return
+    const base = baseRef.current
+    if (!base || status === 'loading') return
+    let cancelled = false
+    const t = setTimeout(() => {
+      if (panel === 'looks') {
+        const items = LOOKS.map((l) => ({ id: l.id, params: applyLook(l, 1, { ...DEFAULT_PARAMS, effectId: 'none' }) }))
+        renderFaceThumbs(base, landmarksRef.current, items, 1, (id, url) => setLookThumbs((m) => ({ ...m, [id]: url })), () => cancelled)
+      } else {
+        const items = EFFECTS.filter((e) => e.id !== 'none').map((e) => ({ id: e.id, params: { ...paramsRef.current, effectId: e.id } }))
+        renderFaceThumbs(base, landmarksRef.current, items, 1.75, (id, url) => setEffectThumbs((m) => ({ ...m, [id]: url })), () => cancelled)
+      }
+    }, 40)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panel, frameVersion, frameReady])
+
+  const selectLook = (id: string | null, strength = lookStrength) => {
+    setLookId(id)
+    const look = findLook(id)
+    setParams((p) => (look ? applyLook(look, strength, p) : { ...DEFAULT_PARAMS, effectId: p.effectId }))
+  }
+
+  const addSticker = async (req: StickerRequest) => {
+    const base = baseRef.current
+    if (!base) return
+    let img: CanvasImageSource
+    let ratio: number
+    let w = 0.3
+    try {
+      if (req.kind === 'art') {
+        const el = await artImage(req.svg)
+        img = el
+        ratio = el.naturalHeight / el.naturalWidth || 1
+      } else if (req.kind === 'emoji') {
+        img = emojiCanvas(req.char)
+        ratio = 1
+        w = 0.24
+      } else if (req.kind === 'text') {
+        const c = textCanvas(req.text, req.style)
+        img = c
+        ratio = c.height / c.width
+        w = Math.min(0.75, 0.16 * Math.max(2.5, req.text.length * 0.55))
+      } else {
+        const c = await photoSticker(req.file)
+        img = c
+        ratio = c.height / c.width
+        w = 0.42
+      }
+    } catch {
+      showToast("Couldn't add that sticker")
+      return
+    }
+    const st = placeSticker(img, ratio, w, base.width / base.height)
+    // Stagger new stickers so they don't land exactly on top of each other.
+    const k = stickers.length % 5
+    st.x += (k % 2 ? 1 : -1) * Math.ceil(k / 2) * 0.07
+    st.y += Math.ceil(k / 2) * 0.05
+    setStickers((list) => [...list, st])
+    setSelectedSticker(st.id)
+  }
+  const updateSticker = (id: number, patch: Partial<Sticker>) => setStickers((list) => list.map((s) => (s.id === id ? { ...s, ...patch } : s)))
+  const selectSticker = (id: number | null) => {
+    setSelectedSticker(id)
+    // The touched sticker comes to the front.
+    if (id !== null) setStickers((list) => (list[list.length - 1]?.id === id ? list : [...list.filter((s) => s.id !== id), list.find((s) => s.id === id)!]))
+  }
+
   const handleShutter = () => {
     if (countdown !== null) {
       cancelCountdown()
@@ -480,6 +579,8 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
   // ✕ in review: discard and go back to the camera.
   const handleClose = () => {
     setPanel(null)
+    setStickers([])
+    setSelectedSticker(null)
     if (source.kind === 'live') startLive()
     else onReset()
   }
@@ -509,8 +610,17 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
   }
 
   const exportBlob = (): Promise<Blob | null> => {
-    const canvas = resultRef.current ?? baseRef.current
-    if (!canvas) return Promise.resolve(null)
+    const src = resultRef.current ?? baseRef.current
+    if (!src) return Promise.resolve(null)
+    let canvas = src
+    if (stickers.length) {
+      canvas = document.createElement('canvas')
+      canvas.width = src.width
+      canvas.height = src.height
+      const ctx = canvas.getContext('2d')!
+      ctx.drawImage(src, 0, 0)
+      drawStickers(ctx, stickers, canvas.width, canvas.height)
+    }
     return new Promise((resolve) => canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.95))
   }
 
@@ -569,25 +679,45 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
     item('mouthCornerSmooth', 'Folds', <RegionIcon dot={[9, 15.6]} pair className="w-5 h-5" />),
     item('fillLight', 'Light', <IconSun className="w-5 h-5" />),
   ]
+  const R = (dot: [number, number], pair = false) => <RegionIcon dot={dot} pair={pair} className="w-5 h-5" />
+  const group = (key: string, label: string, children: AdjustItem[]): AdjustItem => ({ key, label, icon: null, children })
   const shapeItems: AdjustItem[] = [
-    item('face', 'Jaw', <RegionIcon dot={[12, 16.8]} className="w-5 h-5" />, true),
-    item('temple', 'Temple', <RegionIcon dot={[7.2, 7.6]} pair className="w-5 h-5" />, true),
-    item('cheekbone', 'Cheekbone', <RegionIcon dot={[6.8, 11.5]} pair className="w-5 h-5" />, true),
-    item('eyes', 'Eyes', <RegionIcon dot={[9, 10.2]} pair className="w-5 h-5" />, true),
-    item('eyebrowHeight', 'Brow', <RegionIcon dot={[9, 8]} pair className="w-5 h-5" />, true),
-    item('nose', 'Nose', <RegionIcon dot={[12, 12.5]} className="w-5 h-5" />, true),
-    item('noseBridge', 'Bridge', <RegionIcon dot={[12, 9.3]} className="w-5 h-5" />, true),
-    {
-      key: 'mouthGroup',
-      label: 'Mouth',
-      icon: <RegionIcon dot={[12, 14.3]} className="w-5 h-5" />,
-      children: [
-        item('mouth', 'Size', <RegionIcon dot={[12, 14.3]} className="w-5 h-5" />, true),
-        item('mouthUpperLip', 'Upper Lip', <RegionIcon dot={[12, 13.4]} className="w-5 h-5" />, true),
-        item('mouthLowerLip', 'Lower Lip', <RegionIcon dot={[12, 15.3]} className="w-5 h-5" />, true),
-        item('mouthCorners', 'Corners', <RegionIcon dot={[9.3, 14.3]} pair className="w-5 h-5" />, true),
-      ],
-    },
+    group('faceGroup', 'Face', [
+      item('face', 'Slim', R([7.2, 13.8], true), true),
+      item('vJaw', 'V Jaw', R([8.2, 15.6], true), true),
+      item('chin', 'Chin', R([12, 17.2]), true),
+      item('forehead', 'Forehead', R([12, 5.2]), true),
+      item('temple', 'Temple', R([7.2, 7.6], true), true),
+      item('cheekbone', 'Cheekbone', R([6.8, 11.5], true), true),
+    ]),
+    group('eyeGroup', 'Eyes', [
+      item('eyes', 'Size', R([9, 10.2], true), true),
+      item('eyeWidth', 'Width', R([8.4, 10.2], true), true),
+      item('eyeHeight', 'Height', R([9, 9.8], true), true),
+      item('eyeTilt', 'Tilt', R([7.8, 9.7], true), true),
+      item('eyeDistance', 'Spacing', R([7.6, 10.2], true), true),
+      item('eyePosition', 'Position', R([9, 9.4], true), true),
+    ]),
+    group('browGroup', 'Brows', [
+      item('eyebrowHeight', 'Height', R([9, 8], true), true),
+      item('browTilt', 'Tilt', R([7.4, 7.6], true), true),
+      item('browDistance', 'Spacing', R([10.4, 8], true), true),
+    ]),
+    group('noseGroup', 'Nose', [
+      item('nose', 'Size', R([12, 12.5]), true),
+      item('noseWings', 'Wings', R([10.8, 12.8], true), true),
+      item('noseTip', 'Tip', R([12, 13]), true),
+      item('noseLength', 'Length', R([12, 11.6]), true),
+      item('noseBridge', 'Bridge', R([12, 9.3]), true),
+    ]),
+    group('mouthGroup', 'Mouth', [
+      item('mouth', 'Size', R([12, 14.3]), true),
+      item('mouthWidth', 'Width', R([10, 14.3], true), true),
+      item('mouthUpperLip', 'Upper Lip', R([12, 13.6]), true),
+      item('mouthLowerLip', 'Lower Lip', R([12, 15.1]), true),
+      item('mouthCorners', 'Smile', R([9.6, 14], true), true),
+      item('mouthPosition', 'Position', R([12, 13.2]), true),
+    ]),
   ]
   const changedFrom = (keys: NumericParam[]) => keys.some((k) => Math.abs(params[k] - DEFAULT_PARAMS[k]) > 0.005)
 
@@ -607,6 +737,22 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
         <div className="relative" style={{ width: fit.width, height: fit.height }}>
           <canvas ref={displayRef} className="block w-full h-full" />
           {grid && live && <GridOverlay />}
+          {!live && !showBefore && status !== 'loading' && (stickers.length > 0 || panel === 'stickers') && (
+            <div data-keep-panel className="absolute inset-0">
+              <StickerLayer
+                stickers={stickers}
+                selectedId={selectedSticker}
+                width={fit.width}
+                height={fit.height}
+                onSelect={selectSticker}
+                onUpdate={updateSticker}
+                onDelete={(id) => {
+                  setStickers((list) => list.filter((x) => x.id !== id))
+                  setSelectedSticker(null)
+                }}
+              />
+            </div>
+          )}
           {countdown !== null && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <span key={countdown} className="fg-count w-36 h-36 rounded-full bg-black/35 backdrop-blur-sm flex items-center justify-center text-8xl font-light text-white tabular-nums">
@@ -661,9 +807,13 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
           >
             <IconCompare className="w-5 h-5" />
           </TopButton>
-          {live && (
+          {live ? (
             <TopButton label="Flip camera" onClick={handleFlip} disabled={status === 'loading'}>
               <IconFlipCamera className="w-5 h-5" />
+            </TopButton>
+          ) : (
+            <TopButton label="Share" onClick={handleShare} disabled={status === 'loading' || status === 'error' || processing}>
+              <IconShare className="w-5 h-5" />
             </TopButton>
           )}
         </div>
@@ -713,8 +863,60 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
 
         {panel && (
           <div ref={panelRef} key={panel} className="fg-panel mx-3 mb-12 rounded-2xl bg-black/60 backdrop-blur-2xl border border-white/10 p-4">
+            {panel === 'looks' && (
+              <div>
+                <div className="flex items-center justify-between h-7 mb-3">
+                  <span className="text-[13px] font-semibold text-white">Looks</span>
+                  <button onClick={() => selectLook(null)} disabled={!lookId} className="flex items-center gap-1 text-[11px] font-medium text-white/70 hover:text-white disabled:opacity-30 transition">
+                    <IconRefresh className="w-3.5 h-3.5" />
+                    Reset
+                  </button>
+                </div>
+                {noFace ? (
+                  <p className="text-xs text-white/60 py-4 text-center">Looks need a face in the frame.</p>
+                ) : (
+                  <ThumbStrip items={LOOKS} thumbs={lookThumbs} selected={lookId} onSelect={(id) => selectLook(id)} />
+                )}
+                {findLook(lookId) && !noFace && (
+                  <div className="mt-3">
+                    <p className="text-[11px] text-white/55 mb-2">{findLook(lookId)!.hint} · fine-tune any part in Beauty and Shape.</p>
+                    <Slider
+                      label="Intensity"
+                      value={lookStrength}
+                      defaultValue={1}
+                      onChange={(v) => {
+                        setLookStrength(v)
+                        selectLook(lookId, v)
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
             {panel === 'beauty' && <AdjustPanel title="Beauty" items={beautyItems} disabled={noFace} />}
-            {panel === 'shape' && <AdjustPanel title="Shape" items={shapeItems} disabled={noFace} />}
+            {panel === 'shape' && <AdjustPanel title="Shape" items={shapeItems} disabled={noFace} tabs />}
+            {panel === 'effects' && (
+              <div>
+                <div className="flex items-center justify-between h-7 mb-3">
+                  <span className="text-[13px] font-semibold text-white">Effects</span>
+                  <span className="text-[10.5px] text-white/45">{live ? 'Tracks your face live' : 'Placed on your face'}</span>
+                </div>
+                {noFace ? (
+                  <p className="text-xs text-white/60 py-4 text-center">Effects need a face in the frame.</p>
+                ) : (
+                  <ThumbStrip
+                    items={EFFECTS.map((e) => ({ id: e.id, label: e.label, badge: e.boost ? '♥' : undefined }))}
+                    thumbs={effectThumbs}
+                    selected={params.effectId}
+                    onSelect={(id) => setParams((p) => ({ ...p, effectId: id }))}
+                    fallback={(id) => (id === 'none' ? <IconClose className="w-6 h-6 text-white/60" /> : null)}
+                  />
+                )}
+                {findEffect(params.effectId).boost && !noFace && <p className="text-[11px] text-white/55 mt-2.5">Comes with a baby-face touch-up on top of your own Beauty and Shape settings.</p>}
+                {params.effectId === 'puppy' && live && <p className="text-[11px] text-white/55 mt-1">Open your mouth 👅</p>}
+              </div>
+            )}
+            {panel === 'stickers' && <StickerPanel count={stickers.length} onAdd={addSticker} onClearAll={() => { setStickers([]); setSelectedSticker(null) }} />}
             {panel === 'filter' && (
               <FilterPanel
                 thumbs={thumbs}
@@ -731,7 +933,7 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
         {/* Frosted tray with a native-camera-style shutter straddling its
             top edge, centered on its own rather than as part of the icon
             row (sharing a centered group would pull it off-center). */}
-        <div ref={trayRef} className="relative bg-black/55 backdrop-blur-2xl border-t border-white/10 rounded-t-[28px] px-5 pt-12" style={{ paddingBottom: 'max(1.1rem, env(safe-area-inset-bottom))' }}>
+        <div ref={trayRef} className="relative bg-black/55 backdrop-blur-2xl border-t border-white/10 rounded-t-[28px] px-3 pt-12" style={{ paddingBottom: 'max(1.1rem, env(safe-area-inset-bottom))' }}>
           <div className="absolute left-1/2 -translate-x-1/2 -top-9">
             {live ? (
               <button
@@ -755,16 +957,18 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
           </div>
 
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1">
+              <TrayButton icon={IconWand} label="Looks" toggle active={panel === 'looks'} dot={lookId !== null} onClick={() => togglePanel('looks')} />
               <TrayButton icon={IconSparkle} label="Beauty" toggle active={panel === 'beauty'} dot={changedFrom(BEAUTY_KEYS)} onClick={() => togglePanel('beauty')} />
               <TrayButton icon={IconFaceOutline} label="Shape" toggle active={panel === 'shape'} dot={changedFrom(SHAPE_KEYS)} onClick={() => togglePanel('shape')} />
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1">
               <TrayButton icon={IconPalette} label="Filter" toggle active={panel === 'filter'} dot={params.filterId !== 'none'} onClick={() => togglePanel('filter')} />
+              <TrayButton icon={IconEars} label="Effects" toggle active={panel === 'effects'} dot={params.effectId !== 'none'} onClick={() => togglePanel('effects')} />
               {live ? (
                 <TrayButton icon={IconImage} label="Album" onClick={() => fileInputRef.current?.click()} />
               ) : (
-                <TrayButton icon={IconShare} label="Share" onClick={handleShare} />
+                <TrayButton icon={IconSticker} label="Stickers" toggle active={panel === 'stickers'} dot={stickers.length > 0} onClick={() => togglePanel('stickers')} />
               )}
             </div>
           </div>

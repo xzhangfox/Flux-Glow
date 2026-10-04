@@ -32,13 +32,18 @@ function resetItem(item: AdjustItem) {
 // panel at once — so nobody has to hunt down which of a dozen sliders
 // they nudged. Drill-down state is local: the parent unmounts the panel
 // on close, so reopening always starts at the top level.
-export default function AdjustPanel({ title, items, disabled }: { title: string; items: AdjustItem[]; disabled?: boolean }) {
+// `tabs`: the top-level items are categories (Face, Eyes, Nose…) shown as a
+// chip row, with the chosen category's controls in the icon row below —
+// one tap to any control instead of drilling through a group first.
+export default function AdjustPanel({ title, items, disabled, tabs }: { title: string; items: AdjustItem[]; disabled?: boolean; tabs?: boolean }) {
   const [path, setPath] = useState<string[]>([])
+  const [tab, setTab] = useState(items[0]?.key)
   const rowRef = useRef<HTMLDivElement>(null)
-  const fadeRight = useScrollFade(rowRef, [path.join('/')])
+  const fadeRight = useScrollFade(rowRef, [path.join('/'), tab])
 
-  let level = items
-  const trail: AdjustItem[] = []
+  const tabItem = tabs ? items.find((i) => i.key === tab) ?? items[0] : null
+  let level = tabItem?.children ?? items
+  const trail: AdjustItem[] = tabItem ? [tabItem] : []
   for (const key of path) {
     const next = level.find((i) => i.key === key)
     if (!next) break
@@ -48,13 +53,14 @@ export default function AdjustPanel({ title, items, disabled }: { title: string;
   }
   const current = trail[trail.length - 1]
   const showingSlider = current && !current.children
+  const depth = trail.length - (tabItem ? 1 : 0)
   const anyChanged = items.some(isChanged)
 
   return (
     <div>
       <div className="flex items-center justify-between h-7 mb-3">
         <div className="flex items-center gap-2 min-w-0">
-          {trail.length > 0 && (
+          {depth > 0 && (
             <button
               onClick={() => setPath((p) => p.slice(0, -1))}
               aria-label="Back"
@@ -63,7 +69,7 @@ export default function AdjustPanel({ title, items, disabled }: { title: string;
               <IconBack className="w-4 h-4" />
             </button>
           )}
-          <span className="text-[13px] font-semibold text-white truncate">{[title, ...trail.map((t) => t.label)].join(' · ')}</span>
+          <span className="text-[13px] font-semibold text-white truncate">{[title, ...trail.slice(tabItem && !showingSlider ? 1 : 0).map((t) => t.label)].join(' · ')}</span>
         </div>
         <button
           onClick={() => items.forEach(resetItem)}
@@ -85,6 +91,29 @@ export default function AdjustPanel({ title, items, disabled }: { title: string;
           disabled={disabled}
         />
       ) : (
+        <>
+        {tabs && (
+          <div className="flex gap-1.5 mb-3 overflow-x-auto no-scrollbar -mx-1 px-1" role="tablist">
+            {items.map((t) => {
+              const on = t.key === tabItem?.key
+              return (
+                <button
+                  key={t.key}
+                  role="tab"
+                  aria-selected={on}
+                  onClick={() => {
+                    setTab(t.key)
+                    setPath([])
+                  }}
+                  className={`relative flex-shrink-0 h-7 px-3 rounded-full text-[11.5px] font-semibold transition ${on ? 'bg-primary text-black' : 'bg-white/[0.07] text-white/75'}`}
+                >
+                  {t.label}
+                  {!on && isChanged(t) && <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-primary ring-2 ring-black/60" />}
+                </button>
+              )
+            })}
+          </div>
+        )}
         <div ref={rowRef} className="flex gap-3 overflow-x-auto no-scrollbar -mx-1 px-1 pb-0.5" style={fadeRight ? FADE_RIGHT_STYLE : undefined}>
           {level.map((item) => {
             const changed = isChanged(item)
@@ -108,6 +137,7 @@ export default function AdjustPanel({ title, items, disabled }: { title: string;
             )
           })}
         </div>
+        </>
       )}
     </div>
   )

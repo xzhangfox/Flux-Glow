@@ -238,3 +238,73 @@ export function IconGrid(props: IconProps) {
     </svg>
   )
 }
+
+// Looks: a wand with a spark — "apply a finished style".
+export function IconWand(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M4 20L15 9" />
+      <path d="M13.5 7.5l3 3" />
+      <path d="M18 3v3M16.5 4.5h3M20.5 9.5v2M19.5 10.5h2M8.5 3.5v2M7.5 4.5h2" />
+    </svg>
+  )
+}
+
+// Effects: a face with cat ears.
+export function IconEars(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M5.5 10.5L5 4l4.5 3.2M18.5 10.5L19 4l-4.5 3.2" strokeLinejoin="round" />
+      <path d="M12 6.6c-4.2 0-6.8 2.7-6.8 6.6 0 4 3 6.8 6.8 6.8s6.8-2.8 6.8-6.8c0-3.9-2.6-6.6-6.8-6.6z" />
+      <circle cx="9.4" cy="12.6" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="14.6" cy="12.6" r="0.9" fill="currentColor" stroke="none" />
+      <path d="M11 15.4l1 .8 1-.8" />
+    </svg>
+  )
+}
+
+// Stickers: a square with a peeled corner.
+export function IconSticker(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M20 13V6.5A2.5 2.5 0 0 0 17.5 4h-11A2.5 2.5 0 0 0 4 6.5v11A2.5 2.5 0 0 0 6.5 20H13z" strokeLinejoin="round" />
+      <path d="M13 20c0-3.9 3.1-7 7-7" />
+      <circle cx="9.3" cy="10" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="14.7" cy="10" r="0.9" fill="currentColor" stroke="none" />
+      <path d="M9.5 14.2c.8.8 1.6 1.1 2.5 1.1" />
+    </svg>
+  )
+}
+
+export function IconText(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M5 6.5V5h14v1.5M12 5v14M9.5 19h5" />
+    </svg>
+  )
+}
+
+export function IconTrash(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M4.5 7h15M9.5 7V4.8h5V7M6.5 7l.8 12.2h9.4L17.5 7" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+export function IconRotate(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M19 12a7 7 0 1 1-2.1-5" />
+      <path d="M17.5 3.5v3.8h-3.8" />
+    </svg>
+  )
+}
+
+export function IconPlus(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  )
+}

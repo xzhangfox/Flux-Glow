@@ -1,6 +1,6 @@
-import { FaceLandmarker, type NormalizedLandmark } from '@mediapipe/tasks-vision'
-import { connectorsToLoop } from './landmarks'
+import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
 import { FACE_TRIANGULATION } from './faceTriangulation'
+import { deformTargets, OVAL_LOOP, type ReshapeParams } from './deform'
 
 // Why this replaced the old CPU per-pixel warp (MLS + radial zoom):
 //
@@ -67,8 +67,10 @@ const FRAGMENT_SRC = `
   uniform float u_lightIntensity;
   void main() {
     vec4 color = texture2D(u_image, v_texCoord);
-    vec3 n = length(v_normal) > 0.0001 ? normalize(v_normal) : vec3(0.0);
-    float ndotl = max(dot(n, u_lightDir), 0.0);
+    // The normal's length carries the edge fade (see computeVertexNormals).
+    float edge = min(length(v_normal), 1.0);
+    vec3 n = edge > 0.0001 ? normalize(v_normal) : vec3(0.0);
+    float ndotl = max(dot(n, u_lightDir), 0.0) * edge;
 
     // Screen-blended lift (not an additive brighten) so a fully-lit
     // surface compresses toward white instead of blowing straight through
@@ -174,283 +176,36 @@ function getState(): GLState {
   return state
 }
 
-// Every field is bidirectional: negative/positive move the feature the two
-// opposite ways, 0 is the untouched original — a drag-bar-from-the-middle
-// control, not a one-directional intensity slider. All but `nose` are
-// clamped to [-1, 1] right where they're consumed below.
-export interface ReshapeParams {
-  /** Jaw/cheek: negative widens, positive narrows. */
-  face: number
-  /** Eyes: negative shrinks, positive enlarges. */
-  eyes: number
-  /** Nose: negative widens, positive narrows (handled separately — see reshape.ts). */
-  nose: number
-  /** Mouth: negative shrinks, positive enlarges. */
-  mouth: number
-  /** Eyebrows: negative lowers, positive raises. */
-  eyebrowHeight: number
-  /** Nose bridge (山根): negative flattens, positive raises/sharpens. */
-  noseBridge: number
-  /** Temple (太阳穴/颞区): negative widens, positive narrows. */
-  temple: number
-  /** Cheekbone (颧骨): negative widens, positive narrows. */
-  cheekbone: number
-  /** Upper lip thickness: negative thins, positive thickens. */
-  mouthUpperLip: number
-  /** Lower lip thickness: negative thins, positive thickens. */
-  mouthLowerLip: number
-  /** Mouth corners: negative downturns, positive lifts. */
-  mouthCorners: number
-  /** 3D relighting intensity, 0-1 — not bidirectional like the rest (see MESH_FIELDS in reshape.ts, which this is also added to so the mesh pass still runs when this is the only active field). */
-  fillLight: number
-}
+export type { ReshapeParams }
 
-const OVAL_LOOP = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_FACE_OVAL)
-const LEFT_EYE_LOOP = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_LEFT_EYE)
-const RIGHT_EYE_LOOP = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE)
-const LIPS_LOOP = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_LIPS)
-const LEFT_EYEBROW_LOOP = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_LEFT_EYEBROW)
-const RIGHT_EYEBROW_LOOP = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_RIGHT_EYEBROW)
-const LEFT_CHEEK = 234
-const RIGHT_CHEEK = 454
-// Nose bridge (山根): the well-known vertical nose centerline is landmarks
-// 6 -> 197 -> 195 -> 5 -> 4 (bridge to tip) in every public MediaPipe face
-// mesh reference; 6 sits right at the bridge itself. Verified by rendering
-// all 468 indices on a real photo and visually confirming 6's position —
-// see the session's landmark-crop-nosebridge.png.
-const NOSE_BRIDGE_POINT = 6
-// Mouth corners — not a guess either: verified by computing the lips
-// loop's own leftmost/rightmost points programmatically on a real photo
-// and confirming they land exactly on indices 61 and 291 (the same two
-// indices nearly every public MediaPipe reference cites for this, but
-// confirmed here directly rather than trusted on citation alone).
+// Mouth corners — verified by computing the lips loop's own leftmost/
+// rightmost points programmatically on a real photo (61 and 291).
 export const LEFT_MOUTH_CORNER = 61
 export const RIGHT_MOUTH_CORNER = 291
-
-// Temple and cheekbone are not separate landmark loops — they're specific
-// points *on* the oval (also verified visually: 21/251 sit exactly at the
-// hairline beside the eyebrow tail, 234/454 at the widest point of the
-// cheek — see landmark-crop-temple.png / landmark-crop-cheekbone.png).
-// Rather than hand-picking a few neighboring indices with a hard edge
-// between "affected" and "not", each gets a smooth cosine-squared falloff
-// in *oval arc position* around its center — zero past `ARC_HALF_WIDTH`
-// indices away, full strength at the center. That's what lets temple and
-// cheekbone be independent sliders from face/jaw without a visible seam
-// where their influence ends: the weight itself tapers to zero smoothly,
-// so there's nothing to cut off abruptly when it's layered additively on
-// top of whatever face/jaw already did to that same point.
-const ARC_HALF_WIDTH = 3
-const OVAL_RIGHT_TEMPLE_CENTER = OVAL_LOOP.indexOf(251)
-const OVAL_LEFT_TEMPLE_CENTER = OVAL_LOOP.indexOf(21)
-const OVAL_RIGHT_CHEEKBONE_CENTER = OVAL_LOOP.indexOf(454)
-const OVAL_LEFT_CHEEKBONE_CENTER = OVAL_LOOP.indexOf(234)
-
-function ovalArcWeight(loopIndex: number, center: number): number {
-  const loopLen = OVAL_LOOP.length
-  let d = Math.abs(loopIndex - center)
-  d = Math.min(d, loopLen - d)
-  if (d >= ARC_HALF_WIDTH) return 0
-  return Math.cos((d / ARC_HALF_WIDTH) * (Math.PI / 2)) ** 2
-}
-
-function clamp11(v: number): number {
-  return Math.min(1, Math.max(-1, v))
-}
 
 function buildVertexBuffers(landmarks: NormalizedLandmark[], params: ReshapeParams, aspect: number) {
   const n = landmarks.length // 468
   const texCoord = new Float32Array((n + OVAL_LOOP.length) * 2)
   const targetPos = new Float32Array((n + OVAL_LOOP.length) * 2)
-
   for (let i = 0; i < n; i++) {
     texCoord[i * 2] = landmarks[i].x
     texCoord[i * 2 + 1] = landmarks[i].y
-    targetPos[i * 2] = landmarks[i].x
-    targetPos[i * 2 + 1] = landmarks[i].y
   }
-
-  const leftEyeCenter = loopCenterNorm(LEFT_EYE_LOOP, landmarks)
-  const rightEyeCenter = loopCenterNorm(RIGHT_EYE_LOOP, landmarks)
-  const trueEyeLineY = (leftEyeCenter.y + rightEyeCenter.y) / 2
-  const faceCenterX = (landmarks[LEFT_CHEEK].x + landmarks[RIGHT_CHEEK].x) / 2
-  // Landmarks are normalized per-axis (x by width, y by height), so a raw
-  // hypot of normalized dx/dy only measures true distance when the frame
-  // is square — on a non-square frame one unit of normalized-x covers a
-  // different real pixel distance than one unit of normalized-y. Scaling
-  // dx by `aspect` (width/height) first converts it into the same
-  // normalized-y-equivalent unit as dy, so this is a real-world distance
-  // (expressed in units consistent with the Y-axis shifts it scales
-  // below) regardless of aspect ratio — and reduces to the original
-  // formula exactly when aspect === 1, so the square case is unchanged.
-  const eyeSpan = Math.hypot((rightEyeCenter.x - leftEyeCenter.x) * aspect, rightEyeCenter.y - leftEyeCenter.y)
-
-  // "Push toward centerX" assumes a roughly frontal face — the real slim
-  // effect is narrowing width around the face's symmetry axis, and
-  // centerX only approximates that axis when the face is facing the
-  // camera. Turn the head and the two sides of the oval are at very
-  // different depths (one near, one foreshortened far), so pushing both
-  // toward the same centerX by the same fraction moves them by very
-  // different real amounts — right where the near and far side's
-  // triangles meet (around the nose bridge), that mismatch showed up as
-  // a visible vertical seam, worst against a lighting gradient across
-  // the face (the same "invisible on skin, obvious against a gradient"
-  // lesson as the original wavy-background bug, just with the gradient
-  // now a shadow instead of a door frame). Rather than modeling head
-  // pose properly, fade every horizontal oval push out as the face turns
-  // away from frontal: measured via how far the eye-corners' own midpoint
-  // sits from the cheek-to-cheek midpoint, relative to how far apart the
-  // cheeks are (0.07-0.14 on frontal/mildly-turned test photos, 0.36-0.57
-  // on a turned photo that produced the seam — a clean separation). This
-  // applies to face/temple/cheekbone alike since all three push the oval
-  // horizontally toward the same centerX.
-  const cheekSpan = Math.abs(landmarks[RIGHT_CHEEK].x - landmarks[LEFT_CHEEK].x)
-  const eyesCenterX = (landmarks[33].x + landmarks[133].x + landmarks[362].x + landmarks[263].x) / 4
-  const yawProxy = cheekSpan > 1e-5 ? Math.abs(eyesCenterX - faceCenterX) / cheekSpan : 0
-  const yawFalloff = 1 - Math.min(1, Math.max(0, (yawProxy - 0.15) / 0.2))
-
-  // Jaw/cheek: oval points below the eye-line get pushed toward (positive)
-  // or away from (negative) the face's own horizontal center. Points
-  // at/above the eye-line are simply never touched (they keep
-  // target === original from the loop above) — no explicit "anchor"
-  // bookkeeping needed, unlike the old MLS version, because leaving a
-  // vertex alone IS the default state here.
-  if (Math.abs(params.face) > 0.001) {
-    const pushFraction = clamp11(params.face) * 0.14 * yawFalloff
-    for (const idx of OVAL_LOOP) {
-      if (landmarks[idx].y <= trueEyeLineY) continue
-      targetPos[idx * 2] = landmarks[idx].x + (faceCenterX - landmarks[idx].x) * pushFraction
-    }
-  }
-
-  // Temple and cheekbone: small additive bumps layered on top of
-  // whatever face/jaw already did to the same oval point (see the arc
-  // weight comment above for why this can't introduce a new seam).
-  if (Math.abs(params.temple) > 0.001) {
-    const pushFraction = clamp11(params.temple) * 0.09 * yawFalloff
-    for (let i = 0; i < OVAL_LOOP.length; i++) {
-      const w = Math.max(ovalArcWeight(i, OVAL_RIGHT_TEMPLE_CENTER), ovalArcWeight(i, OVAL_LEFT_TEMPLE_CENTER))
-      if (w <= 0) continue
-      const idx = OVAL_LOOP[i]
-      targetPos[idx * 2] += (faceCenterX - landmarks[idx].x) * pushFraction * w
-    }
-  }
-  if (Math.abs(params.cheekbone) > 0.001) {
-    const pushFraction = clamp11(params.cheekbone) * 0.09 * yawFalloff
-    for (let i = 0; i < OVAL_LOOP.length; i++) {
-      const w = Math.max(ovalArcWeight(i, OVAL_RIGHT_CHEEKBONE_CENTER), ovalArcWeight(i, OVAL_LEFT_CHEEKBONE_CENTER))
-      if (w <= 0) continue
-      const idx = OVAL_LOOP[i]
-      targetPos[idx * 2] += (faceCenterX - landmarks[idx].x) * pushFraction * w
-    }
-  }
-
-  if (Math.abs(params.eyes) > 0.001) {
-    // Widened more than it's heightened, not scaled uniformly: a glasses
-    // frame's rim sits closest to the eye right at its top and bottom (a
-    // lens is wider than the eye opening it surrounds, so there's more
-    // real clearance at the sides) — moving the eye loop less vertically
-    // there is a direct, low-cost way to leave a frame rim bending less,
-    // not just a cosmetic side effect. It also happens to look more like
-    // real "bigger eyes" filters (which bias toward widening) than a
-    // uniform bulge does.
-    const amount = clamp11(params.eyes)
-    const scaleX = 1 + amount * 0.3
-    const scaleY = 1 + amount * 0.14
-    for (const [loop, center] of [
-      [LEFT_EYE_LOOP, leftEyeCenter],
-      [RIGHT_EYE_LOOP, rightEyeCenter],
-    ] as const) {
-      for (const idx of loop) {
-        targetPos[idx * 2] = center.x + (landmarks[idx].x - center.x) * scaleX
-        targetPos[idx * 2 + 1] = center.y + (landmarks[idx].y - center.y) * scaleY
-      }
-    }
-  }
-
-  if (Math.abs(params.mouth) > 0.001) {
-    const lipsCenter = loopCenterNorm(LIPS_LOOP, landmarks)
-    const scale = 1 + clamp11(params.mouth) * 0.2
-    for (const idx of LIPS_LOOP) {
-      targetPos[idx * 2] = lipsCenter.x + (landmarks[idx].x - lipsCenter.x) * scale
-      targetPos[idx * 2 + 1] = lipsCenter.y + (landmarks[idx].y - lipsCenter.y) * scale
-    }
-  }
-
-  // Finer mouth sub-controls, each layered additively on top of whatever
-  // the overall mouth scale above already did to the same points — same
-  // compositing pattern as temple/cheekbone on top of jaw. Upper/lower
-  // lip split the lips loop by which half of it (above/below the loop's
-  // own vertical center) a point falls in, rather than needing a separate
-  // "which points are upper lip" list.
-  if (Math.abs(params.mouthUpperLip) > 0.001 || Math.abs(params.mouthLowerLip) > 0.001) {
-    const lipsCenter = loopCenterNorm(LIPS_LOOP, landmarks)
-    const upperShift = clamp11(params.mouthUpperLip) * eyeSpan * 0.03
-    const lowerShift = clamp11(params.mouthLowerLip) * eyeSpan * 0.03
-    for (const idx of LIPS_LOOP) {
-      const p = landmarks[idx]
-      if (p.y < lipsCenter.y) {
-        targetPos[idx * 2 + 1] -= upperShift // negative y = up = away from center = thicker
-      } else {
-        targetPos[idx * 2 + 1] += lowerShift // positive y = down = away from center = thicker
-      }
-    }
-  }
-  if (Math.abs(params.mouthCorners) > 0.001) {
-    const shift = -clamp11(params.mouthCorners) * eyeSpan * 0.025 // negative y = up = lifted
-    targetPos[LEFT_MOUTH_CORNER * 2 + 1] += shift
-    targetPos[RIGHT_MOUTH_CORNER * 2 + 1] += shift
-  }
-
-  // Eyebrows: the official loop, shifted vertically. A small, purely
-  // interior movement (no oval/background boundary involved), the same
-  // category of change as the eye-enlarge above, so it needs no extra
-  // anchoring beyond the surrounding mesh already being fixed elsewhere.
-  if (Math.abs(params.eyebrowHeight) > 0.001) {
-    const shift = -clamp11(params.eyebrowHeight) * eyeSpan * 0.1
-    for (const idx of [...LEFT_EYEBROW_LOOP, ...RIGHT_EYEBROW_LOOP]) {
-      targetPos[idx * 2 + 1] = landmarks[idx].y + shift
-    }
-  }
-
-  // Nose bridge (山根): no official landmark loop exists for it, so
-  // instead of moving one bare point (which would crease against its
-  // fixed neighbors), every one of the 468 vertices within a small
-  // radius of the bridge point gets a share of the same vertical shift,
-  // weighted by the same cosine-squared falloff used for temple/
-  // cheekbone — a smooth local bump, not a single displaced pin.
-  if (Math.abs(params.noseBridge) > 0.001) {
-    const center = landmarks[NOSE_BRIDGE_POINT]
-    const radius = eyeSpan * 0.22
-    const shift = -clamp11(params.noseBridge) * eyeSpan * 0.05
-    for (let idx = 0; idx < n; idx++) {
-      const dx = landmarks[idx].x - center.x
-      const dy = landmarks[idx].y - center.y
-      // Same normalized-x-to-y-equivalent scaling as eyeSpan above — without
-      // it, this falloff region is a true circle only on a square frame and
-      // an ellipse (stretched along whichever axis has more pixels per
-      // normalized unit) on any other aspect ratio.
-      const d = Math.hypot(dx * aspect, dy)
-      if (d >= radius) continue
-      const w = Math.cos((d / radius) * (Math.PI / 2)) ** 2
-      targetPos[idx * 2 + 1] += shift * w
-    }
-  }
+  targetPos.set(deformTargets(landmarks, params, aspect), 0)
 
   // The skirt: one new vertex per oval point, pushed further outward
   // along the same direction from the face center — anchored (its
   // texCoord and targetPos are identical, so it shows undisturbed
   // background and never moves). Triangles connecting each oval point to
-  // its skirt counterpart absorb the jaw's inward push into the
-  // background over a short, smooth band instead of leaving a visible
-  // step where the moved jaw boundary meets the static background layer.
-  const faceCenterY = trueEyeLineY
+  // its skirt counterpart absorb any contour change into the background
+  // over a short, smooth band instead of leaving a visible step where the
+  // moved face boundary meets the static background layer.
+  const faceCenterX = (landmarks[234].x + landmarks[454].x) / 2
+  const faceCenterY = (landmarks[33].y + landmarks[263].y) / 2
   for (let i = 0; i < OVAL_LOOP.length; i++) {
-    const idx = OVAL_LOOP[i]
-    const p = landmarks[idx]
-    const dx = p.x - faceCenterX
-    const dy = p.y - faceCenterY
-    const sx = p.x + dx * SKIRT_PAD_FRACTION
-    const sy = p.y + dy * SKIRT_PAD_FRACTION
+    const p = landmarks[OVAL_LOOP[i]]
+    const sx = p.x + (p.x - faceCenterX) * SKIRT_PAD_FRACTION
+    const sy = p.y + (p.y - faceCenterY) * SKIRT_PAD_FRACTION
     const skirtIdx = n + i
     texCoord[skirtIdx * 2] = sx
     texCoord[skirtIdx * 2 + 1] = sy
@@ -459,16 +214,6 @@ function buildVertexBuffers(landmarks: NormalizedLandmark[], params: ReshapePara
   }
 
   return { texCoord, targetPos, vertexCount: n + OVAL_LOOP.length }
-}
-
-function loopCenterNorm(loop: number[], landmarks: NormalizedLandmark[]) {
-  let x = 0
-  let y = 0
-  for (const idx of loop) {
-    x += landmarks[idx].x
-    y += landmarks[idx].y
-  }
-  return { x: x / loop.length, y: y / loop.length }
 }
 
 // Per-vertex surface normals derived from the face mesh's own 3D landmark
@@ -548,6 +293,39 @@ function computeVertexNormals(landmarks: NormalizedLandmark[], aspect: number): 
       normals[i * 3 + 1] = 0
       normals[i * 3 + 2] = 0
     }
+  }
+  // Fade relighting out toward the face contour. Each vertex's normal is
+  // scaled by how far inside the oval it sits (1 in the middle of the face,
+  // easing to 0 at the oval), and the shader reads that length back as a
+  // weight — so the lit area dissolves into the hairline and jaw instead of
+  // stopping at the mesh's edge (which showed as a hard band across the
+  // top of the forehead).
+  const cx = (landmarks[234].x + landmarks[454].x) / 2
+  const cy = (landmarks[10].y + landmarks[152].y) / 2
+  const oval = OVAL_LOOP.map((i) => {
+    const dx = landmarks[i].x * aspect - cx * aspect
+    const dy = landmarks[i].y - cy
+    return { a: Math.atan2(dy, dx), r: Math.hypot(dx, dy) }
+  })
+  for (let i = 0; i < n; i++) {
+    const dx = landmarks[i].x * aspect - cx * aspect
+    const dy = landmarks[i].y - cy
+    const a = Math.atan2(dy, dx)
+    let best = oval[0]
+    let bestD = Infinity
+    for (const o of oval) {
+      const d = Math.abs(Math.atan2(Math.sin(a - o.a), Math.cos(a - o.a)))
+      if (d < bestD) {
+        bestD = d
+        best = o
+      }
+    }
+    const rho = Math.hypot(dx, dy) / Math.max(best.r, 1e-6)
+    const t = Math.min(1, Math.max(0, (0.95 - rho) / 0.4))
+    const w = t * t * (3 - 2 * t)
+    normals[i * 3] *= w
+    normals[i * 3 + 1] *= w
+    normals[i * 3 + 2] *= w
   }
   return normals
 }

@@ -1,6 +1,7 @@
 import { FaceLandmarker, type NormalizedLandmark } from '@mediapipe/tasks-vision'
 import { connectorsToLoop, loopCenterPx, dist, lerp, type Px } from './landmarks'
-import { renderMeshWarp, type ReshapeParams } from './meshWarp'
+import { renderMeshWarp } from './meshWarp'
+import { SHAPE_PARAMS, type ReshapeParams } from './deform'
 
 export type { ReshapeParams }
 
@@ -60,7 +61,7 @@ function radialWarpInPlace(srcData: Uint8ClampedArray, outData: Uint8ClampedArra
   }
 }
 
-const MESH_FIELDS = ['face', 'eyes', 'mouth', 'eyebrowHeight', 'noseBridge', 'temple', 'cheekbone', 'mouthUpperLip', 'mouthLowerLip', 'mouthCorners', 'fillLight'] as const
+const MESH_FIELDS = [...SHAPE_PARAMS.filter((k) => k !== 'nose'), 'fillLight'] as const
 
 export function applyReshape(source: HTMLCanvasElement, landmarks: NormalizedLandmark[], params: ReshapeParams): HTMLCanvasElement {
   // Bidirectional now (negative values are meaningful, e.g. face<0 widens)
@@ -87,7 +88,9 @@ export function applyReshape(source: HTMLCanvasElement, landmarks: NormalizedLan
   const eyeSpan = dist(leftEye, rightEye)
   const nose = lerp(eyesCenter, lips, 0.42)
   const noseRadius = eyeSpan * 0.24
-  const noseStrength = Math.min(Math.abs(params.nose), 1) * 0.4 * Math.sign(params.nose)
+  // 0.26 at the extreme: past ~0.3 the radial zoom starts to read as a
+  // pinched or bulging nose rather than a smaller/larger one.
+  const noseStrength = Math.min(Math.abs(params.nose), 1) * 0.26 * Math.sign(params.nose)
   radialWarpInPlace(srcData.data, outImageData.data, w, h, nose, noseRadius, noseStrength)
 
   outCtx.putImageData(outImageData, 0, 0)

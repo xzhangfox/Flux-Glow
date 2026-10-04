@@ -3,7 +3,9 @@ import { buildSkinMask } from './skinMask'
 import { smoothSkin } from './smoothing'
 import { applyWhitening, applyAcneRemoval, applyWrinkleRemoval, applyMouthCornerSmoothing } from './beauty'
 import { applyLiveTonePass } from './livePass'
-import { applyReshape, type ReshapeParams } from './reshape'
+import { applyReshape } from './reshape'
+import { SHAPE_PARAMS, deformTargets, type ReshapeParams } from './deform'
+import { drawEffect, withEffectBoost } from './effects'
 import { LEFT_MOUTH_CORNER, RIGHT_MOUTH_CORNER } from './meshWarp'
 import { applyFilter, findPreset } from './filters'
 import { connectorsToLoop, loopBoundsPx } from './landmarks'
@@ -17,9 +19,11 @@ export interface EditParams extends ReshapeParams {
   mouthCornerSmooth: number
   filterId: string
   filterStrength: number
+  /** Face-tracked AR effect (see effects.ts), 'none' for off. */
+  effectId: string
 }
 
-export type NumericParam = Exclude<keyof EditParams, 'filterId'>
+export type NumericParam = Exclude<keyof EditParams, 'filterId' | 'effectId'>
 
 /** The untouched starting point — also what each panel's Reset restores
  *  and what "has this control been changed" is measured against. Light
@@ -32,19 +36,18 @@ export const DEFAULT_PARAMS: EditParams = {
   acneRemoval: 0,
   wrinkleRemoval: 0,
   mouthCornerSmooth: 0,
+  ...(Object.fromEntries(SHAPE_PARAMS.map((k) => [k, 0])) as Record<(typeof SHAPE_PARAMS)[number], number>),
   face: 0.25,
-  eyes: 0,
-  nose: 0,
-  mouth: 0,
-  eyebrowHeight: 0,
-  noseBridge: 0,
-  temple: 0,
-  cheekbone: 0,
-  mouthUpperLip: 0,
-  mouthLowerLip: 0,
-  mouthCorners: 0,
   filterId: 'none',
   filterStrength: 0.8,
+  effectId: 'none',
+}
+
+/** Beauty sliders whose raw effect is too strong at the top of the track:
+ *  full fill light blew the face out and full whitening went grey, so the
+ *  slider's 100 maps to the strongest setting that still looks like skin. */
+function calibrate(p: EditParams): EditParams {
+  return { ...p, fillLight: p.fillLight * 0.4, whitening: p.whitening * 0.75 }
 }
 
 /** Square crop around the face oval (padded) in pixel space, for the
@@ -80,7 +83,8 @@ export function faceFocus(landmarks: NormalizedLandmark[] | null, w: number, h: 
  * captured or confirmed. Fill light's GPU relighting is unaffected by
  * this flag — it's equally cheap (a shader, not a CPU blur) either way.
  */
-export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandmark[] | null, params: EditParams, highQuality = true): HTMLCanvasElement {
+export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandmark[] | null, rawParams: EditParams, highQuality = true): HTMLCanvasElement {
+  const params = calibrate(withEffectBoost(rawParams))
   const preset = findPreset(params.filterId)
   if (!landmarks) return applyFilter(base, preset, params.filterStrength)
 
@@ -121,5 +125,11 @@ export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandm
     applyMouthCornerSmoothing(working, corners, radius, params.mouthCornerSmooth)
   }
   const reshaped = applyReshape(working, landmarks, params)
+  if (params.effectId !== 'none') {
+    // Effects track the face as reshaped, so ears sit on the slimmed head.
+    const t = deformTargets(landmarks, params, base.width / base.height)
+    const pts = Array.from({ length: t.length / 2 }, (_, i) => ({ x: t[i * 2] * base.width, y: t[i * 2 + 1] * base.height }))
+    drawEffect(reshaped, pts, params.effectId, highQuality ? 0 : performance.now() / 1000)
+  }
   return applyFilter(reshaped, preset, params.filterStrength)
 }
