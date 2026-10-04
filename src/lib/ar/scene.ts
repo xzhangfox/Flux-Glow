@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { FaceLandmarker } from '@mediapipe/tasks-vision'
 import { FACE_TRIANGULATION } from '../faceTriangulation'
 import { connectorsToLoop } from '../landmarks'
-import { furLighting } from './fur'
+import { compositeAR } from './composite'
 
 // The 3D layer behind every modeled AR effect (fur ears, masks, glasses,
 // crown…). One three.js renderer, reused for every frame and photo.
@@ -127,7 +127,15 @@ function init(): State {
   const head = new THREE.Mesh(headGeo, new THREE.MeshBasicMaterial({ colorWrite: false, side: THREE.DoubleSide }))
   head.renderOrder = -10
   head.frustumCulled = false
-  rig.add(head)
+  // …and catches shadows, so ears and headbands sit on the head rather
+  // than float over it.
+  const headCatch = new THREE.Mesh(
+    headGeo,
+    new THREE.ShadowMaterial({ opacity: 0.34, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -8, side: THREE.DoubleSide }),
+  )
+  headCatch.receiveShadow = true
+  headCatch.frustumCulled = false
+  rig.add(head, headCatch)
 
   const envCanvas = document.createElement('canvas')
   envCanvas.width = 256
@@ -350,7 +358,12 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
   const st = S
   const W = frame.width
   const H = frame.height
-  if (st.renderer.domElement.width !== W || st.renderer.domElement.height !== H) st.renderer.setSize(W, H, false)
+  // Rendered a little under full size and scaled up when composited: a
+  // phone photo never resolves edges as crisply as a clean render does.
+  const RS = 0.8
+  const rw = Math.round(W * RS)
+  const rh = Math.round(H * RS)
+  if (st.renderer.domElement.width !== rw || st.renderer.domElement.height !== rh) st.renderer.setSize(rw, rh, false)
   st.camera.left = 0
   st.camera.right = W
   st.camera.top = 0
@@ -387,7 +400,14 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
 
   estimateLight(st, frame, P, rig)
   updateEnvironment(st, frame, !live)
-  furLighting(st.key, st.hemi)
   st.renderer.render(st.scene, st.camera)
-  frame.getContext('2d')!.drawImage(st.renderer.domElement, 0, 0)
+  // Composite over a box around the head (ears, halo and hood included),
+  // matched to the photo's tones and grain — see composite.ts.
+  const c = new THREE.Vector3(0, 0.4, -0.6).applyMatrix4(rig.matrix)
+  const r = rig.E * 3.4
+  const x0 = Math.max(0, Math.floor(c.x - r))
+  const y0 = Math.max(0, Math.floor(-c.y - r * 1.15))
+  const x1 = Math.min(W, Math.ceil(c.x + r))
+  const y1 = Math.min(H, Math.ceil(-c.y + r))
+  compositeAR(frame, st.renderer.domElement, RS, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, live)
 }

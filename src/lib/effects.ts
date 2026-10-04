@@ -49,10 +49,12 @@ export const EFFECTS: EffectDef[] = [
   { id: 'doll', label: 'Doll', boost: { ...BABY, eyes: 0.45, eyeHeight: 0.3, chin: -0.4, whitening: 0.25 } },
   { id: 'spider', label: 'Spider' },
   { id: 'bat', label: 'Bat' },
-  { id: 'aviator', label: 'Aviator' },
   { id: 'square', label: 'Square' },
   { id: 'oval', label: 'Oval' },
-  { id: 'round', label: 'Round' },
+  { id: 'shield', label: 'Shield' },
+  { id: 'cateye', label: 'Cat-eye' },
+  { id: 'tinted', label: 'Tinted' },
+  { id: 'aviator', label: 'Aviator' },
   { id: 'hearts', label: 'Hearts' },
   { id: 'crown', label: 'Crown' },
   { id: 'devil', label: 'Devil' },
@@ -232,7 +234,7 @@ function sparkle(ctx: CanvasRenderingContext2D, c: Pt, r: number, color: string)
 }
 
 
-const THREE_D = new Set(['kitty', 'fox', 'puppy', 'bunny', 'bear', 'spider', 'bat', 'aviator', 'square', 'oval', 'round', 'hearts', 'crown', 'devil', 'angel', 'stars'])
+const THREE_D = new Set(['kitty', 'fox', 'puppy', 'bunny', 'bear', 'spider', 'bat', 'aviator', 'square', 'oval', 'shield', 'cateye', 'tinted', 'hearts', 'crown', 'devil', 'angel', 'stars'])
 
 /** Draw `effectId` onto `canvas` (in place). `P` are landmark pixel
  *  positions; z is MediaPipe's relative depth in pixels (negative = nearer). */

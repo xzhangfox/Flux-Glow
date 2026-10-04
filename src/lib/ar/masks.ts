@@ -36,6 +36,23 @@ interface MaskShape {
    *  across triangles and cut in the shader, so openings and edges come
    *  out as smooth curves rather than the mesh's triangle staircase. */
   cut?: (p: THREE.Vector3, eyes: EyeHole[]) => number
+  /** Laplacian smoothing passes over the face before lifting: a moulded
+   *  shell shouldn't follow every contour of the face underneath it. */
+  smooth?: number
+}
+
+let neighbours: number[][] | null = null
+function faceNeighbours() {
+  if (neighbours) return neighbours
+  const sets = Array.from({ length: N }, () => new Set<number>())
+  for (let t = 0; t < FACE_TRIANGULATION.length; t += 3) {
+    const [a, b, c] = [FACE_TRIANGULATION[t], FACE_TRIANGULATION[t + 1], FACE_TRIANGULATION[t + 2]]
+    sets[a].add(b).add(c)
+    sets[b].add(a).add(c)
+    sets[c].add(a).add(b)
+  }
+  neighbours = sets.map((s) => [...s])
+  return neighbours
 }
 
 interface EyeHole {
@@ -93,7 +110,17 @@ function withCut<T extends THREE.Material>(m: T): T {
 
 /** Rebuilds the mask surface from this frame's landmarks. */
 function updateMask(g: THREE.BufferGeometry, rig: Rig, shape: MaskShape) {
-  const L: THREE.Vector3[] = Array.from({ length: N }, (_, i) => rig.local(i))
+  const raw: THREE.Vector3[] = Array.from({ length: N }, (_, i) => rig.local(i))
+  let L = raw
+  if (shape.smooth) {
+    const nb = faceNeighbours()
+    for (let it = 0; it < shape.smooth; it++) {
+      L = L.map((p, i) => {
+        const avg = nb[i].reduce((s, j) => s.add(L[j]), new THREE.Vector3()).divideScalar(nb[i].length || 1)
+        return p.clone().lerp(avg, 0.5)
+      })
+    }
+  }
   // Per-vertex normals of the bare face, oriented away from the head.
   const nrm = Array.from({ length: N }, () => new THREE.Vector3())
   const e1 = new THREE.Vector3()
@@ -114,8 +141,30 @@ function updateMask(g: THREE.BufferGeometry, rig: Rig, shape: MaskShape) {
     nrm[i].normalize()
     if (nrm[i].dot(e1.subVectors(L[i], HEAD_CENTER)) < 0) nrm[i].negate()
   }
+  // Smoothing shrinks convex parts (forehead, cheekbones, nose) below the
+  // real skin, which would then poke through the shell. Push the smoothed
+  // surface back out by however far the face sits above it, spread over a
+  // couple of rings so the correction itself stays smooth.
+  let push = new Float32Array(N)
+  if (L !== raw) {
+    for (let i = 0; i < N; i++) push[i] = Math.max(0, e1.subVectors(raw[i], L[i]).dot(nrm[i]))
+    const nb = faceNeighbours()
+    for (let it = 0; it < 3; it++) {
+      const next = new Float32Array(N)
+      for (let i = 0; i < N; i++) {
+        let m = push[i]
+        let s = push[i]
+        for (const j of nb[i]) {
+          m = Math.max(m, push[j])
+          s += push[j]
+        }
+        next[i] = it < 2 ? m : s / (nb[i].length + 1)
+      }
+      push = next
+    }
+  }
   const P: THREE.Vector3[] = []
-  for (let i = 0; i < N; i++) P.push(L[i].clone().addScaledVector(nrm[i], shape.lift(L[i])))
+  for (let i = 0; i < N; i++) P.push(L[i].clone().addScaledVector(nrm[i], shape.lift(L[i]) + push[i]))
 
   // Past the outline the mask continues around the head: each ring point
   // lies on a curve that leaves the face outline along the face's own
@@ -342,7 +391,9 @@ export function batCowl(): Model {
   const geo = maskGeometry()
   // Moulded blue-black plastic: smooth and glossy, so the sculpting reads
   // through sharp highlights rather than texture.
-  const plastic = () => new THREE.MeshPhysicalMaterial({ color: 0x10141c, roughness: 0.42, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.06, envMapIntensity: 0.55, side: THREE.DoubleSide })
+  // Satin-finish moulded plastic: soft, broad highlights rather than a
+  // pin-point CG glint.
+  const plastic = () => new THREE.MeshPhysicalMaterial({ color: 0x11151d, roughness: 0.5, metalness: 0, clearcoat: 0.8, clearcoatRoughness: 0.22, envMapIntensity: 0.7, side: THREE.DoubleSide })
   const mesh = new THREE.Mesh(geo, withCut(plastic()))
   mesh.castShadow = true
   mesh.frustumCulled = false
@@ -381,10 +432,12 @@ export function batCowl(): Model {
       const brow = 0.07 * Math.exp(-(((p.y - (0.16 + 0.32 * ax)) / 0.09) ** 2)) * THREE.MathUtils.smoothstep(ax, 0.04, 0.16) * (1 - THREE.MathUtils.smoothstep(ax, 0.7, 0.95))
       const furrow = 0.035 * Math.exp(-((p.x / 0.05) ** 2)) * Math.exp(-(((p.y - 0.3) / 0.18) ** 2))
       const cheek = 0.035 * Math.exp(-(((ax - 0.58) / 0.16) ** 2) - (((p.y + 0.48) / 0.2) ** 2))
-      const nose = 0.035 * Math.exp(-((p.x / 0.16) ** 2)) * THREE.MathUtils.smoothstep(-p.y, -0.15, 0.05)
-      return 0.05 + brow + furrow + cheek + nose
+      // The smoothing flattens the real nose, so the guard is re-sculpted.
+      const nose = 0.05 * Math.exp(-((p.x / 0.16) ** 2)) * THREE.MathUtils.smoothstep(-p.y, -0.15, 0.1) * (1 - THREE.MathUtils.smoothstep(-p.y, 0.7, 0.95))
+      return 0.085 + brow + furrow + cheek + nose
     },
     hair: 0.4,
+    smooth: 6,
     cut: (p, eyes) => {
       const below = (p.y - lowerEdge(p.x)) * 6
       // Big almond openings, outer corners swept up.
