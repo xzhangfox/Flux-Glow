@@ -128,8 +128,8 @@ export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandm
   if (params.effectId !== 'none') {
     // Effects track the face as reshaped, so ears sit on the slimmed head.
     const t = deformTargets(landmarks, params, base.width / base.height)
-    const pts = Array.from({ length: t.length / 2 }, (_, i) => ({ x: t[i * 2] * base.width, y: t[i * 2 + 1] * base.height }))
-    drawEffect(reshaped, pts, params.effectId, highQuality ? 0 : performance.now() / 1000)
+    const pts = Array.from({ length: t.length / 2 }, (_, i) => ({ x: t[i * 2] * base.width, y: t[i * 2 + 1] * base.height, z: landmarks[i].z * base.width }))
+    drawEffect(reshaped, pts, params.effectId, highQuality ? 0.6 : performance.now() / 1000, !highQuality)
   }
   return applyFilter(reshaped, preset, params.filterStrength)
 }

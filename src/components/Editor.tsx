@@ -12,7 +12,7 @@ import StickerPanel, { type StickerRequest } from './StickerPanel'
 import StickerLayer from './StickerLayer'
 import { SHAPE_PARAMS } from '../lib/deform'
 import { LOOKS, applyLook, findLook } from '../lib/looks'
-import { EFFECTS, findEffect } from '../lib/effects'
+import { EFFECTS, findEffect, preloadAR } from '../lib/effects'
 import { renderFaceThumbs } from '../lib/thumbs'
 import { artImage, drawStickers, emojiCanvas, photoSticker, placeSticker, textCanvas, type Sticker } from '../lib/stickers'
 import ZoomControl from './ZoomControl'
@@ -476,6 +476,19 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
     return () => clearTimeout(t)
   }, [panel, frameVersion, frameReady])
 
+  // The 3D effects engine loads on first use; once it's in, redo the
+  // still so the chosen effect appears (the live loop picks it up itself).
+  useEffect(() => {
+    if (params.effectId === 'none') return
+    let cancelled = false
+    preloadAR().then(() => {
+      if (!cancelled && !live && !staticBusyRef.current) recomputeStatic()
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [params.effectId, live, recomputeStatic])
+
   // Looks and Effects preview on this very face, rendered when their panel
   // opens (and again for each new still), progressively, not per live frame.
   useEffect(() => {
@@ -489,7 +502,9 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
         renderFaceThumbs(base, landmarksRef.current, items, 1, (id, url) => setLookThumbs((m) => ({ ...m, [id]: url })), () => cancelled)
       } else {
         const items = EFFECTS.filter((e) => e.id !== 'none').map((e) => ({ id: e.id, params: { ...paramsRef.current, effectId: e.id } }))
-        renderFaceThumbs(base, landmarksRef.current, items, 1.75, (id, url) => setEffectThumbs((m) => ({ ...m, [id]: url })), () => cancelled)
+        preloadAR().then(() => {
+          if (!cancelled) renderFaceThumbs(base, landmarksRef.current, items, 1.75, (id, url) => setEffectThumbs((m) => ({ ...m, [id]: url })), () => cancelled)
+        })
       }
     }, 40)
     return () => {
