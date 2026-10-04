@@ -1,388 +1,240 @@
-import { useEffect, useRef, useState, useCallback, type ComponentType, type ReactNode, type SVGProps } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ComponentType, type ReactNode, type RefObject, type SVGProps } from 'react'
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
 import { detectFaceLandmarks, detectFaceLandmarksForVideo } from '../lib/faceLandmarker'
-import { processFrame, type EditParams } from '../lib/pipeline'
-import { FILTER_PRESETS } from '../lib/filters'
-import Slider from './Slider'
+import { processFrame, DEFAULT_PARAMS, faceFocus, type EditParams, type NumericParam } from '../lib/pipeline'
+import { renderFilterThumbnails } from '../lib/filters'
+import { ASPECT_MODES, aspectRatioFor, cropRectFor, drawFrame, remapLandmarks, type AspectMode } from '../lib/frame'
+import AdjustPanel, { type AdjustItem } from './AdjustPanel'
+import FilterPanel from './FilterPanel'
+import ZoomControl from './ZoomControl'
+import { DIGITAL_ZOOM_RANGE, type ZoomRange } from '../lib/zoom'
 import {
   IconSpinner,
-  IconEye,
-  IconCamera,
+  IconCompare,
   IconInfo,
   IconError,
   IconClose,
   IconCheck,
-  IconEdit,
   IconDownload,
   IconShare,
-  IconRefresh,
   IconFaceOutline,
   IconPalette,
   IconFlipCamera,
   IconDroplet,
   IconImage,
-  IconBack,
   IconSparkle,
   IconSun,
   IconWhiten,
   IconTarget,
   IconWave,
+  IconTimer,
+  IconGrid,
   RegionIcon,
 } from './icons'
 
-// Downscale before processing — phone photos run 3000px+ on a side, far
-// more detail than this editor displays or than frequency separation
-// needs; working at this size keeps every slider drag responsive.
+// Saved photos and uploads are worked on at up to this size — phone photos
+// run 3000px+ on a side, far beyond what this editor displays or what the
+// retouching passes need, and a smaller working size keeps every slider
+// drag responsive.
 const MAX_DIMENSION = 1600
-// Live mode used to need a smaller working size than a captured photo
-// because every pass — smoothing *and* reshape — was plain JS, not GPU
-// shaders; reshape moved to a WebGL mesh warp (see meshWarp.ts), so the
-// only remaining per-pixel CPU cost is smoothing (bounded to the face's
-// own bounding box) and the small isolated nose warp, both cheap enough
-// to afford matching the camera's own capture resolution instead of
-// downscaling further. This is also the canvas's actual backing-store
-// resolution (see `render()` — it's sized to match the processed frame,
-// then stretched via CSS to fill the screen), so anything lower than
-// what the camera actually delivers is a real, visible loss of sharpness
-// on a high-DPI phone, not a hidden margin of safety.
+// The live viewfinder's working size. It is also the display canvas's real
+// backing-store resolution, so going lower would visibly soften the preview
+// on a high-DPI phone rather than buy hidden headroom.
 const LIVE_MAX_DIMENSION = 1280
-const LIVE_FRAME_INTERVAL_MS = 33 // ~30fps ceiling, not a promise — actual pace is still gated by processingRef below, so a slower device just falls short of it instead of backlogging
+// ~30fps ceiling. Actual pace is still gated by the in-flight guard in the
+// loop, so a slower device just falls short of it instead of backlogging.
+const LIVE_FRAME_INTERVAL_MS = 33
+const TIMER_STEPS = [0, 3, 10] as const
+
+const BEAUTY_KEYS: NumericParam[] = ['smoothness', 'whitening', 'acneRemoval', 'wrinkleRemoval', 'mouthCornerSmooth', 'fillLight']
+const SHAPE_KEYS: NumericParam[] = ['face', 'temple', 'cheekbone', 'eyes', 'eyebrowHeight', 'nose', 'noseBridge', 'mouth', 'mouthUpperLip', 'mouthLowerLip', 'mouthCorners']
 
 export type Source = { kind: 'image'; file: File } | { kind: 'live' }
 
 type Status = 'loading' | 'ready' | 'no-face' | 'error'
-
-type RegionKey = 'face' | 'temple' | 'cheekbone' | 'eyes' | 'eyebrow' | 'nose' | 'noseBridge' | 'mouth'
-type MouthSubKey = 'mouthSize' | 'mouthUpperLip' | 'mouthLowerLip' | 'mouthCorners' | 'mouthCornerSmooth'
-type BeautyKey = 'smooth' | 'fillLight' | 'whitening' | 'acneRemoval' | 'wrinkleRemoval'
+type Panel = 'beauty' | 'shape' | 'filter'
 
 function loadImage(file: File): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
     const img = new Image()
-    img.onload = () => resolve(img)
-    img.onerror = reject
-    img.src = URL.createObjectURL(file)
+    img.onload = () => {
+      URL.revokeObjectURL(url)
+      resolve(img)
+    }
+    img.onerror = (e) => {
+      URL.revokeObjectURL(url)
+      reject(e)
+    }
+    img.src = url
   })
 }
 
-// `zoom` crops a centered region of the source before scaling it up to
-// fill the canvas — a digital stand-in for a focal-length switcher, since
-// getUserMedia doesn't expose a phone's separate physical lenses. `mirror`
-// flips horizontally: the front camera's raw stream reads as a mirror
-// image (text backwards, etc.) unless something corrects it, and nothing
-// upstream does — so the live preview, capture, and anything saved from it
-// all need this to show a true (non-mirrored) orientation.
-// MediaPipe detects landmarks on the raw `video` element directly — never
-// on `base`, so its normalized coordinates are relative to the
-// *unmirrored* frame regardless of what drawDownscaled did. Every reshape
-// pass (and the skin mask, and the smoothing bounds) turns those
-// coordinates straight into pixel positions on `base`, so whenever `base`
-// was mirrored and/or digitally cropped (zoomed) and the landmarks
-// weren't adjusted to match, every one of them pointed at the wrong
-// position relative to the actual feature in `base` — for mirroring, the
-// mirror-reflected x instead of the real one (an eye warp centered on
-// whatever half-eyebrow/half-nose-bridge pixel happened to sit at that
-// reflected spot, which is exactly the "horror movie" look a real,
-// not-quite-symmetric face produces); for digital zoom, a position
-// outside the actual cropped-and-rescaled frame entirely once zoomed in
-// enough. This maps raw detection-space landmarks into `base`'s own
-// coordinate space given the same (zoom, mirror) drawDownscaled used.
-function remapLandmarksToBase(landmarks: NormalizedLandmark[] | null, zoom: number, mirror: boolean): NormalizedLandmark[] | null {
-  if (!landmarks) return landmarks
-  const cropFrac = zoom > 1 ? (1 - 1 / zoom) / 2 : 0
-  return landmarks.map((p) => {
-    let x = zoom > 1 ? (p.x - cropFrac) * zoom : p.x
-    const y = zoom > 1 ? (p.y - cropFrac) * zoom : p.y
-    if (mirror) x = 1 - x
-    return { ...p, x, y }
-  })
+const FULL_FRAME = { x0: 0, y0: 0, fw: 1, fh: 1 }
+
+const nextPaint = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)))
+
+const isIOS = typeof navigator !== 'undefined' && (/iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1))
+
+function timestampedName(): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `FluxGlow_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.jpg`
 }
 
-function drawDownscaled(source: HTMLImageElement | HTMLVideoElement, maxDim: number, zoom = 1, mirror = false): HTMLCanvasElement {
-  const w = source instanceof HTMLVideoElement ? source.videoWidth : source.width
-  const h = source instanceof HTMLVideoElement ? source.videoHeight : source.height
-  const scale = Math.min(1, maxDim / Math.max(w, h))
-  const canvas = document.createElement('canvas')
-  canvas.width = Math.round(w * scale)
-  canvas.height = Math.round(h * scale)
-  const ctx = canvas.getContext('2d')!
-  if (mirror) {
-    ctx.translate(canvas.width, 0)
-    ctx.scale(-1, 1)
-  }
-  if (zoom > 1) {
-    const cropW = w / zoom
-    const cropH = h / zoom
-    ctx.drawImage(source, (w - cropW) / 2, (h - cropH) / 2, cropW, cropH, 0, 0, canvas.width, canvas.height)
-  } else {
-    ctx.drawImage(source, 0, 0, canvas.width, canvas.height)
-  }
-  return canvas
+function downloadBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-interface ZoomRange {
-  min: number
-  max: number
-  mode: 'hardware' | 'digital'
+function useElementSize(ref: RefObject<HTMLElement | null>) {
+  const [size, setSize] = useState({ width: 0, height: 0 })
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const update = () => setSize((s) => (s.width === el.clientWidth && s.height === el.clientHeight ? s : { width: el.clientWidth, height: el.clientHeight }))
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [ref])
+  return size
 }
 
-// Digital zoom beyond ~4x is just cropping an already-modest live frame
-// down to a quarter of its linear size — well past where it still looks
-// like a lens and not a blown-up JPEG, so that's the fallback ceiling when
-// the camera doesn't expose real optical/sensor zoom.
-const DIGITAL_ZOOM_RANGE: ZoomRange = { min: 1, max: 4, mode: 'digital' }
-
-// A handful of tap-to-cycle presets spanning the real available range
-// (hardware min/max when the device exposes `MediaStreamTrack.zoom`
-// capabilities, the digital fallback range otherwise) — rounded to values
-// someone would actually reach for (0.5x ultra-wide, 1x, 2x, 3x…) rather
-// than an arbitrary fixed [1, 2] regardless of what the hardware can do.
-// Holding the button instead of tapping it opens a dial for anything
-// continuous in between.
-function buildZoomPresets({ min, max }: ZoomRange): number[] {
-  const presets = new Set<number>()
-  if (min < 1) presets.add(Math.round(min * 10) / 10)
-  presets.add(1)
-  for (const v of [2, 3, 5]) {
-    if (v > min && v <= max) presets.add(v)
+// Fits a frame of the given aspect ratio inside a box — the canvas is
+// sized to exactly what will be saved, never cropped by `object-cover`,
+// so the preview is what you get.
+function fitContain(box: { width: number; height: number }, aspect: number) {
+  if (!box.width || !box.height || !aspect) return { width: 0, height: 0 }
+  let width = box.width
+  let height = width / aspect
+  if (height > box.height) {
+    height = box.height
+    width = height * aspect
   }
-  if (max > 1) presets.add(Math.round(max * 10) / 10)
-  return Array.from(presets)
-    .filter((v) => v >= min - 0.001 && v <= max + 0.001)
-    .sort((a, b) => a - b)
+  return { width: Math.round(width), height: Math.round(height) }
 }
 
-// A horizontal ruler, shown while the zoom pill is held — the same
-// interaction a phone camera's own long-press zoom scrubber uses: a fixed
-// "droplet" lens stays put at the control's center and the tick-marked
-// ruler slides left/right underneath it as a finger drags, rather than the
-// finger dragging a needle/handle across a fixed track. That inversion is
-// what the physical metaphor asks for (the reading lens doesn't move, the
-// scale does) and it's also what makes a *relative* drag feel right here:
-// unlike the old fan dial's "absolute screen position is the value"
-// mapping, this tracks the drag's own delta from wherever it started, so
-// the ruler never jumps when a drag begins — it starts centered on
-// whatever the value already was and only moves from there.
-const RULER_PX_PER_UNIT = 100 // drag distance for one full 1.0x zoom step — spacious enough for fine control across a phone-width swipe
-const RULER_VIEWPORT_W = 260
-const RULER_VIEWPORT_H = 64
-
-function ZoomRulerDial({ min, max, value, onChange }: { min: number; max: number; value: number; onChange: (v: number) => void }) {
-  // `dragStartXRef` is null between drags (reset on pointerup) so each new
-  // drag establishes its own fresh reference point on its first move,
-  // rather than reusing a stale one from a previous, already-finished
-  // drag — the same "dial persists across multiple separate drags"
-  // behavior the fan dial had, just with a relative instead of absolute
-  // mapping underneath it.
-  const dragStartXRef = useRef<number | null>(null)
-  const dragStartValueRef = useRef(value)
-  const valueRef = useRef(value)
-  useEffect(() => {
-    valueRef.current = value
-  }, [value])
-
-  useEffect(() => {
-    function handleMove(e: PointerEvent) {
-      if (e.buttons === 0) return
-      if (dragStartXRef.current === null) {
-        dragStartXRef.current = e.clientX
-        dragStartValueRef.current = valueRef.current
-        return
-      }
-      const deltaX = e.clientX - dragStartXRef.current
-      const next = dragStartValueRef.current - deltaX / RULER_PX_PER_UNIT
-      onChange(Math.min(max, Math.max(min, Math.round(next * 10) / 10)))
-    }
-    function handleRelease() {
-      dragStartXRef.current = null
-    }
-    window.addEventListener('pointermove', handleMove)
-    window.addEventListener('pointerup', handleRelease)
-    window.addEventListener('pointercancel', handleRelease)
-    return () => {
-      window.removeEventListener('pointermove', handleMove)
-      window.removeEventListener('pointerup', handleRelease)
-      window.removeEventListener('pointercancel', handleRelease)
-    }
-  }, [min, max, onChange])
-
-  // Ticks are laid out in strip-local coordinates (0 at `min`), and the
-  // whole strip is repositioned via `transform` so the tick at `value`
-  // always sits exactly under the fixed droplet — the ruler moves, not a
-  // reader sliding along a fixed scale.
-  const ticks: { v: number; major: boolean }[] = []
-  for (let raw = min; raw <= max + 1e-6; raw += 0.1) {
-    const v = Math.round(raw * 10) / 10
-    ticks.push({ v, major: Math.abs(v - Math.round(v)) < 0.001 })
-  }
-  const stripOffset = RULER_VIEWPORT_W / 2 - (value - min) * RULER_PX_PER_UNIT
-
+function TopButton({ label, active, children, ...rest }: { label: string; active?: boolean; children: ReactNode } & Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'children' | 'className'>) {
   return (
-    <div className="absolute left-1/2 -translate-x-1/2 bottom-44 touch-none select-none" style={{ width: RULER_VIEWPORT_W, height: RULER_VIEWPORT_H }}>
-      <div className="absolute inset-0 overflow-hidden rounded-2xl bg-black/35 backdrop-blur-sm border border-white/10">
-        <div className="absolute top-1/2 -translate-y-1/2 h-9 w-0" style={{ transform: `translateX(${stripOffset}px)` }}>
-          {ticks.map((t) => (
-            <div
-              key={t.v}
-              className="absolute bottom-0 bg-white/50 rounded-full"
-              style={{ left: (t.v - min) * RULER_PX_PER_UNIT, width: t.major ? 2 : 1, height: t.major ? 18 : 10 }}
-            />
-          ))}
-        </div>
-      </div>
-      {/* The droplet: fixed in place while the ruler slides beneath/through
-          it — a frosted glass bubble rather than a plain pointer, so it
-          reads as a lens resting on the scale instead of a cursor on top
-          of it. */}
-      <div className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 pointer-events-none">
-        <div className="relative w-14 h-14 rounded-full bg-white/10 backdrop-blur-md border border-white/40 shadow-lg overflow-hidden">
-          <div className="absolute inset-0 bg-gradient-to-br from-white/35 via-transparent to-transparent" />
-          <div className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 w-[2px] h-7 bg-primary rounded-full" />
-        </div>
-      </div>
-      <div className="absolute left-1/2 -translate-x-1/2 -top-7 text-[11px] font-semibold text-black bg-primary px-2 py-0.5 rounded-full whitespace-nowrap">
-        {value.toFixed(1)}×
-      </div>
-    </div>
-  )
-}
-
-// A round icon-over-label button for the bottom chrome's side clusters —
-// Retouch, Retake, Save, Share.
-function ChromeButton({
-  icon: Icon,
-  label,
-  onClick,
-  active,
-  primary,
-}: {
-  icon: ComponentType<SVGProps<SVGSVGElement>>
-  label: string
-  onClick: () => void
-  active?: boolean
-  primary?: boolean
-}) {
-  return (
-    <button onClick={onClick} aria-label={label} className="flex flex-col items-center gap-1 w-14 text-white/85">
-      <span
-        className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
-          active || primary ? 'bg-primary text-black border-primary' : 'bg-black/40 border-white/15'
-        }`}
-      >
-        <Icon className="w-5 h-5" />
-      </span>
-      <span className="text-[10px] font-medium leading-none">{label}</span>
+    <button
+      aria-label={label}
+      className={`h-10 min-w-10 px-2.5 rounded-full backdrop-blur-md flex items-center justify-center gap-1 text-[11px] font-semibold transition disabled:opacity-40 ${
+        active ? 'bg-primary text-black' : 'bg-black/40 text-white'
+      }`}
+      {...rest}
+    >
+      {children}
     </button>
   )
 }
 
+function TrayButton({ icon: Icon, label, onClick, active, dot, toggle }: { icon: ComponentType<SVGProps<SVGSVGElement>>; label: string; onClick: () => void; active?: boolean; dot?: boolean; toggle?: boolean }) {
+  return (
+    <button onClick={onClick} aria-label={label} aria-pressed={toggle ? !!active : undefined} data-panel-toggle={toggle ? '' : undefined} className="flex flex-col items-center gap-1.5 w-14 text-white/85">
+      <span className={`relative w-11 h-11 rounded-full flex items-center justify-center border transition ${active ? 'bg-primary text-black border-primary' : 'bg-white/[0.06] border-white/15'}`}>
+        <Icon className="w-5 h-5" />
+        {dot && !active && <span className="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-primary ring-2 ring-black/60" />}
+      </span>
+      <span className="text-[10.5px] font-medium leading-none">{label}</span>
+    </button>
+  )
+}
+
+function GridOverlay() {
+  return (
+    <div className="absolute inset-0 pointer-events-none">
+      {[1, 2].map((i) => (
+        <div key={`v${i}`} className="absolute top-0 bottom-0 w-px bg-white/35" style={{ left: `${(i * 100) / 3}%` }} />
+      ))}
+      {[1, 2].map((i) => (
+        <div key={`h${i}`} className="absolute left-0 right-0 h-px bg-white/35" style={{ top: `${(i * 100) / 3}%` }} />
+      ))}
+    </div>
+  )
+}
+
 export default function Editor({ source, onReset, onPickImage }: { source: Source; onReset: () => void; onPickImage?: (file: File) => void }) {
+  const [params, setParams] = useState<EditParams>(DEFAULT_PARAMS)
   const [status, setStatus] = useState<Status>('loading')
-  const [smoothness, setSmoothness] = useState(0.6)
-  const [face, setFace] = useState(0.25)
-  const [eyes, setEyes] = useState(0)
-  const [nose, setNose] = useState(0)
-  const [mouth, setMouth] = useState(0)
-  const [eyebrowHeight, setEyebrowHeight] = useState(0)
-  const [noseBridge, setNoseBridge] = useState(0)
-  const [temple, setTemple] = useState(0)
-  const [cheekbone, setCheekbone] = useState(0)
-  const [mouthUpperLip, setMouthUpperLip] = useState(0)
-  const [mouthLowerLip, setMouthLowerLip] = useState(0)
-  const [mouthCorners, setMouthCorners] = useState(0)
-  const [fillLight, setFillLight] = useState(0)
-  const [whitening, setWhitening] = useState(0)
-  const [acneRemoval, setAcneRemoval] = useState(0)
-  const [wrinkleRemoval, setWrinkleRemoval] = useState(0)
-  const [mouthCornerSmooth, setMouthCornerSmooth] = useState(0)
-  const [filterId, setFilterId] = useState('none')
+  const [live, setLive] = useState(source.kind === 'live')
+  const [processing, setProcessing] = useState(false)
+  const [panel, setPanel] = useState<Panel | null>(null)
   const [showBefore, setShowBefore] = useState(false)
-  const [liveActive, setLiveActive] = useState(source.kind === 'live')
-  const [confirmed, setConfirmed] = useState(false)
-  const [openPanel, setOpenPanel] = useState<'retouch' | 'beauty' | 'filter' | null>(null)
-  const [selectedRegion, setSelectedRegion] = useState<RegionKey | null>(null)
-  const [selectedMouthSub, setSelectedMouthSub] = useState<MouthSubKey | null>(null)
-  const [selectedBeauty, setSelectedBeauty] = useState<BeautyKey | null>(null)
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user')
   const [zoom, setZoom] = useState(1)
   const [zoomRange, setZoomRange] = useState<ZoomRange>(DIGITAL_ZOOM_RANGE)
-  const [zoomDialOpen, setZoomDialOpen] = useState(false)
+  const [aspect, setAspect] = useState<AspectMode>('3:4')
+  const [timer, setTimer] = useState<(typeof TIMER_STEPS)[number]>(0)
+  const [grid, setGrid] = useState(false)
+  const [countdown, setCountdown] = useState<number | null>(null)
+  const [flashKey, setFlashKey] = useState(0)
+  const [toast, setToast] = useState<{ key: number; text: string } | null>(null)
+  const [frameAspect, setFrameAspect] = useState(3 / 4)
+  const [frameVersion, setFrameVersion] = useState(0)
+  const [thumbs, setThumbs] = useState<Map<string, string> | null>(null)
 
   const displayRef = useRef<HTMLCanvasElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
+  const previewRef = useRef<HTMLDivElement>(null)
+  const trayRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
+  const zoomTrackRef = useRef<MediaStreamTrack | null>(null)
   const baseRef = useRef<HTMLCanvasElement | null>(null)
   const landmarksRef = useRef<NormalizedLandmark[] | null>(null)
   const resultRef = useRef<HTMLCanvasElement | null>(null)
   const rafRef = useRef(0)
-  const lastProcessRef = useRef(0)
-  const processingRef = useRef(false)
-  const liveActiveRef = useRef(liveActive)
-  const paramsRef = useRef<EditParams>({ smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, mouthUpperLip, mouthLowerLip, mouthCorners, fillLight, whitening, acneRemoval, wrinkleRemoval, mouthCornerSmooth, filterId })
+  const lastFrameRef = useRef(0)
+  const frameInFlightRef = useRef(false)
+  // Bumped on every stop/start of the camera. A live frame whose detection
+  // is still in flight when the shutter fires (or the camera flips) must
+  // not land afterwards and overwrite the captured photo with a stale,
+  // preview-quality frame — each async step checks it still owns the loop.
+  const liveGenRef = useRef(0)
+  const staticBusyRef = useRef(false)
+  const paramsRef = useRef(params)
+  const showBeforeRef = useRef(showBefore)
   const facingModeRef = useRef(facingMode)
   const zoomRef = useRef(zoom)
   const zoomRangeRef = useRef(zoomRange)
-  const zoomTrackRef = useRef<MediaStreamTrack | null>(null)
-  const zoomPressTimerRef = useRef<number | null>(null)
-  const zoomPressMovedRef = useRef(false)
-  const panelRef = useRef<HTMLDivElement>(null)
-  const retouchButtonRef = useRef<HTMLButtonElement>(null)
-  const beautyButtonRef = useRef<HTMLButtonElement>(null)
-  const filterButtonRef = useRef<HTMLButtonElement>(null)
-  const fileInputRef = useRef<HTMLInputElement>(null)
+  const aspectRef = useRef(aspect)
+  const frameAspectRef = useRef(frameAspect)
+  const countdownTimerRef = useRef<number | null>(null)
+
+  paramsRef.current = params
+  showBeforeRef.current = showBefore
+
+  const previewBox = useElementSize(previewRef)
+  const trayBox = useElementSize(trayRef)
+  const fit = fitContain(previewBox, frameAspect)
+
+  const set = (key: NumericParam) => (v: number) => setParams((p) => ({ ...p, [key]: v }))
+  const showToast = (text: string) => setToast({ key: Date.now(), text })
 
   useEffect(() => {
-    paramsRef.current = { smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, mouthUpperLip, mouthLowerLip, mouthCorners, fillLight, whitening, acneRemoval, wrinkleRemoval, mouthCornerSmooth, filterId }
-  }, [smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, mouthUpperLip, mouthLowerLip, mouthCorners, fillLight, whitening, acneRemoval, wrinkleRemoval, mouthCornerSmooth, filterId])
-  useEffect(() => {
-    liveActiveRef.current = liveActive
-  }, [liveActive])
-  useEffect(() => {
-    zoomRef.current = zoom
-  }, [zoom])
-  useEffect(() => {
-    zoomRangeRef.current = zoomRange
-  }, [zoomRange])
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 1800)
+    return () => clearTimeout(t)
+  }, [toast])
 
-
-  // Leaving a panel always resets it back to its own top-level grid, so
-  // reopening it never silently drops the visitor into whichever
-  // slider/sub-grid they happened to be adjusting last time.
-  useEffect(() => {
-    if (openPanel !== 'retouch') {
-      setSelectedRegion(null)
-      setSelectedMouthSub(null)
-    }
-  }, [openPanel])
-  useEffect(() => {
-    if (selectedRegion !== 'mouth') setSelectedMouthSub(null)
-  }, [selectedRegion])
-  useEffect(() => {
-    if (openPanel !== 'beauty') setSelectedBeauty(null)
-  }, [openPanel])
-
-  // Tapping anywhere outside the open panel (or the Retouch/Filter buttons
-  // that toggle it, which handle themselves) collapses it — same pattern
-  // as a tap-away menu.
+  // Tapping anywhere outside the open panel (or the tray buttons that
+  // toggle it, which handle themselves) collapses it. Capture phase: a
+  // click inside the panel can synchronously swap the clicked node out of
+  // the DOM (grid -> slider) before a bubble-phase listener runs, and a
+  // detached node always reads as "outside".
   useEffect(() => {
     function onClick(e: MouseEvent) {
-      const target = e.target as Node
+      const target = e.target as Element
       if (panelRef.current?.contains(target)) return
-      if (retouchButtonRef.current?.contains(target)) return
-      if (beautyButtonRef.current?.contains(target)) return
-      if (filterButtonRef.current?.contains(target)) return
-      setOpenPanel(null)
+      if (target.closest?.('[data-panel-toggle]')) return
+      setPanel(null)
     }
-    // Capture phase, not bubble: a click inside the panel (e.g. picking a
-    // region) can make React synchronously swap that exact element out of
-    // the DOM (region grid -> slider) as part of handling the very same
-    // click. By the time a bubble-phase listener on `document` ran, the
-    // clicked node was already detached, and a detached node's
-    // `.contains()` check always reads as "outside" no matter where it
-    // used to be — closing the whole panel the moment anyone picked a
-    // region. Capture fires before the target's own handlers (and any
-    // resulting DOM mutation), while the node is still exactly where this
-    // check needs it to be.
     document.addEventListener('click', onClick, true)
     return () => document.removeEventListener('click', onClick, true)
   }, [])
@@ -390,12 +242,23 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
   const render = useCallback(() => {
     const canvas = displayRef.current
     const base = baseRef.current
-    const result = resultRef.current
     if (!canvas || !base) return
-    canvas.width = base.width
-    canvas.height = base.height
-    canvas.getContext('2d')!.drawImage(showBefore || !result ? base : result, 0, 0)
-  }, [showBefore])
+    const src = showBeforeRef.current || !resultRef.current ? base : resultRef.current
+    if (canvas.width !== src.width || canvas.height !== src.height) {
+      canvas.width = src.width
+      canvas.height = src.height
+    }
+    canvas.getContext('2d')!.drawImage(src, 0, 0)
+    const a = base.width / base.height
+    if (Math.abs(a - frameAspectRef.current) > 0.002) {
+      frameAspectRef.current = a
+      setFrameAspect(a)
+    }
+  }, [])
+
+  useEffect(() => {
+    render()
+  }, [showBefore, render])
 
   const recomputeStatic = useCallback(() => {
     const base = baseRef.current
@@ -404,135 +267,152 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
     render()
   }, [render])
 
+  const cancelCountdown = useCallback(() => {
+    if (countdownTimerRef.current !== null) clearTimeout(countdownTimerRef.current)
+    countdownTimerRef.current = null
+    setCountdown(null)
+  }, [])
+
   const stopLive = useCallback(() => {
+    liveGenRef.current++
     cancelAnimationFrame(rafRef.current)
     streamRef.current?.getTracks().forEach((t) => t.stop())
     streamRef.current = null
     zoomTrackRef.current = null
-    // In case a detect+process cycle was still in flight (e.g. stopped
-    // mid-capture) — don't leave a future startLive() permanently stuck
-    // behind a guard that'll never clear on its own.
-    processingRef.current = false
-    if (zoomPressTimerRef.current !== null) {
-      clearTimeout(zoomPressTimerRef.current)
-      zoomPressTimerRef.current = null
-    }
-    setZoomDialOpen(false)
+    frameInFlightRef.current = false
   }, [])
 
   const startLive = useCallback(async () => {
+    stopLive()
+    const gen = liveGenRef.current
+    setLive(true)
     setStatus('loading')
     try {
-      // No `height` constraint: most phone camera sensors are natively
-      // wider than square (4:3 or similar), and asking for an exact 1280x1280
-      // square forces the browser/driver to center-crop that native field of
-      // view down to a square *before* our own digital zoom ever runs —
-      // discarding real field of view the lens actually captured. Letting
-      // height float lets the device hand back its natural aspect ratio at
-      // roughly this width instead. The rest of the pipeline (drawDownscaled,
-      // the mesh warp, the skin mask) already works in terms of whatever
-      // width/height the frame actually has rather than assuming square.
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facingModeRef.current, width: { ideal: 1280 } },
-      })
+      // No `height` constraint: most phone sensors are natively wider than
+      // square, and pinning both dimensions makes the browser center-crop
+      // the lens's real field of view before our own framing ever runs.
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facingModeRef.current, width: { ideal: 1280 } } })
+      if (gen !== liveGenRef.current) {
+        stream.getTracks().forEach((t) => t.stop())
+        return
+      }
       streamRef.current = stream
       const video = videoRef.current!
       video.srcObject = stream
       await video.play()
-      setStatus('ready')
-      setLiveActive(true)
+      if (gen !== liveGenRef.current) return
 
-      // Real optical/sensor zoom when the browser exposes it (mainly the
-      // rear camera on Android Chrome today) beats a digital crop — no
-      // resolution lost to cropping a frame that was never much bigger
-      // than what we display. Each camera (front vs back) can have a
-      // different range, so this re-detects on every startLive(), which
-      // handleFlipCamera already calls via stop+start.
+      // Real optical/sensor zoom when the browser exposes it beats a
+      // digital crop. Front and back cameras differ, so this re-detects on
+      // every start (flipping goes through here too).
       const track = stream.getVideoTracks()[0]
       zoomTrackRef.current = track
-      const caps = track.getCapabilities?.() as (MediaTrackCapabilities & { zoom?: { min: number; max: number; step: number } }) | undefined
-      if (caps?.zoom && caps.zoom.max > caps.zoom.min) {
-        const range: ZoomRange = { min: caps.zoom.min, max: caps.zoom.max, mode: 'hardware' }
-        zoomRangeRef.current = range
-        setZoomRange(range)
-        const initial = Math.min(range.max, Math.max(range.min, 1))
-        zoomRef.current = initial
-        setZoom(initial)
-        track.applyConstraints({ advanced: [{ zoom: initial } as unknown as MediaTrackConstraintSet] }).catch(() => {})
-      } else {
-        zoomRangeRef.current = DIGITAL_ZOOM_RANGE
-        setZoomRange(DIGITAL_ZOOM_RANGE)
-        zoomRef.current = 1
-        setZoom(1)
-      }
+      const caps = track.getCapabilities?.() as (MediaTrackCapabilities & { zoom?: { min: number; max: number } }) | undefined
+      const range: ZoomRange = caps?.zoom && caps.zoom.max > caps.zoom.min ? { min: caps.zoom.min, max: caps.zoom.max, mode: 'hardware' } : DIGITAL_ZOOM_RANGE
+      const initial = Math.min(range.max, Math.max(range.min, 1))
+      zoomRangeRef.current = range
+      zoomRef.current = initial
+      setZoomRange(range)
+      setZoom(initial)
+      if (range.mode === 'hardware') track.applyConstraints({ advanced: [{ zoom: initial } as unknown as MediaTrackConstraintSet] }).catch(() => {})
 
       const loop = () => {
+        if (gen !== liveGenRef.current) return
         rafRef.current = requestAnimationFrame(loop)
-        if (!liveActiveRef.current) return
-        // Without this guard, a frame that takes longer than the interval
-        // to process (landmark detection + skin mask + frequency-separation
-        // smoothing + reshape warps is real work, easily >60ms) doesn't
-        // skip a beat — the next rAF tick only checks elapsed time, so it
-        // fires another overlapping detect+process cycle anyway. Those pile
-        // up faster than they resolve, and the preview falls further and
-        // further behind "live" the longer it runs. Only ever start a new
-        // cycle once the previous one has actually finished.
-        if (processingRef.current) return
+        // Only start a new detect+process cycle once the previous one has
+        // finished — otherwise slow frames overlap, pile up, and the
+        // preview drifts further and further behind real time.
+        if (frameInFlightRef.current || video.readyState < 2) return
         const now = performance.now()
-        if (now - lastProcessRef.current < LIVE_FRAME_INTERVAL_MS) return
-        lastProcessRef.current = now
-        if (video.readyState < 2) return
-        processingRef.current = true
-        // Hardware zoom already zoomed the sensor output itself — cropping
-        // again on top of that would double-zoom.
-        const cropZoom = zoomRangeRef.current.mode === 'hardware' ? 1 : zoomRef.current
-        const base = drawDownscaled(video, LIVE_MAX_DIMENSION, cropZoom, facingModeRef.current === 'user')
-        baseRef.current = base
+        if (now - lastFrameRef.current < LIVE_FRAME_INTERVAL_MS) return
+        lastFrameRef.current = now
+        frameInFlightRef.current = true
+        const mirror = facingModeRef.current === 'user'
+        // Hardware zoom already zoomed the sensor output — cropping again
+        // on top of it would double-zoom.
+        const crop = cropRectFor(video.videoWidth, video.videoHeight, aspectRatioFor(aspectRef.current), zoomRangeRef.current.mode === 'hardware' ? 1 : zoomRef.current)
+        const base = drawFrame(video, LIVE_MAX_DIMENSION, crop, mirror)
         detectFaceLandmarksForVideo(video, now)
-          .then((rawLandmarks) => {
-            const landmarks = remapLandmarksToBase(rawLandmarks, cropZoom, facingModeRef.current === 'user')
+          .then((raw) => {
+            if (gen !== liveGenRef.current) return
+            const landmarks = remapLandmarks(raw, crop, mirror)
+            baseRef.current = base
             landmarksRef.current = landmarks
-            setStatus(landmarks ? 'ready' : 'no-face')
             resultRef.current = processFrame(base, landmarks, paramsRef.current, false)
+            setStatus(landmarks ? 'ready' : 'no-face')
             render()
           })
+          .catch(() => {})
           .finally(() => {
-            processingRef.current = false
+            if (gen === liveGenRef.current) frameInFlightRef.current = false
           })
       }
       loop()
     } catch {
-      setStatus('error')
+      if (gen === liveGenRef.current) setStatus('error')
     }
-  }, [render])
+  }, [render, stopLive])
 
-  // Load an uploaded photo once.
+  // Turns a still frame into the editable photo: full-quality landmark
+  // detection on that exact frame (IMAGE mode, not the live tracker's
+  // estimate), then the high-quality retouching pass.
+  const loadStill = useCallback(
+    async (base: HTMLCanvasElement) => {
+      staticBusyRef.current = true
+      setProcessing(true)
+      baseRef.current = base
+      render()
+      await nextPaint()
+      try {
+        landmarksRef.current = await detectFaceLandmarks(base)
+      } catch {
+        landmarksRef.current = null
+      }
+      setStatus(landmarksRef.current ? 'ready' : 'no-face')
+      await nextPaint()
+      recomputeStatic()
+      staticBusyRef.current = false
+      setProcessing(false)
+      setFrameVersion((v) => v + 1)
+    },
+    [render, recomputeStatic],
+  )
+
+  const capture = useCallback(() => {
+    const video = videoRef.current
+    if (!video || video.readyState < 2) return
+    setFlashKey((k) => k + 1)
+    navigator.vibrate?.(15)
+    const mirror = facingModeRef.current === 'user'
+    const crop = cropRectFor(video.videoWidth, video.videoHeight, aspectRatioFor(aspectRef.current), zoomRangeRef.current.mode === 'hardware' ? 1 : zoomRef.current)
+    const base = drawFrame(video, MAX_DIMENSION, crop, mirror)
+    staticBusyRef.current = true
+    stopLive()
+    setLive(false)
+    // The last live frame (already retouched at preview quality) stays on
+    // screen while the full-quality pass runs, so there's no flash of the
+    // untouched photo in between.
+    loadStill(base)
+  }, [stopLive, loadStill])
+
+  // Uploaded photo.
   useEffect(() => {
     if (source.kind !== 'image') return
     let cancelled = false
+    staticBusyRef.current = true
+    setLive(false)
     setStatus('loading')
-    // Switching source from live to an uploaded photo (the new toolbar
-    // upload icon) is a mid-session transition the live/capture flow
-    // never used to need — picking a photo always used to mean Editor
-    // itself was just being mounted fresh with an image source, so
-    // nothing previously had to reset `liveActive` on an existing
-    // instance. Without this, the LIVE badge and flip-camera button kept
-    // showing over a now-static photo.
-    setLiveActive(false)
-    setConfirmed(false)
+    resultRef.current = null
     ;(async () => {
       try {
         const img = await loadImage(source.file)
-        const base = drawDownscaled(img, MAX_DIMENSION)
         if (cancelled) return
-        baseRef.current = base
-        const landmarks = await detectFaceLandmarks(base)
-        if (cancelled) return
-        landmarksRef.current = landmarks
-        setStatus(landmarks ? 'ready' : 'no-face')
-        recomputeStatic()
+        await loadStill(drawFrame(img, MAX_DIMENSION, FULL_FRAME, false))
       } catch {
-        if (!cancelled) setStatus('error')
+        if (!cancelled) {
+          staticBusyRef.current = false
+          setStatus('error')
+        }
       }
     })()
     return () => {
@@ -541,66 +421,78 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [source])
 
-  // Start the camera once for a live source.
+  // Live camera.
   useEffect(() => {
     if (source.kind !== 'live') return
     startLive()
-    return () => stopLive()
+    return () => {
+      stopLive()
+      cancelCountdown()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [source])
 
-  // Re-render when the before/after toggle flips.
+  // Re-run the full-quality pass on any control change while editing a
+  // still (the live loop picks up paramsRef on its own every frame).
   useEffect(() => {
-    render()
-  }, [render])
-
-  // Recompute on control changes — only while not actively streaming live
-  // (the live loop already re-applies the latest params every frame on
-  // its own, using paramsRef).
-  useEffect(() => {
-    if (liveActive) return
-    if (!baseRef.current) return
+    if (live || staticBusyRef.current || !baseRef.current) return
     const t = setTimeout(recomputeStatic, 60)
     return () => clearTimeout(t)
-  }, [smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, mouthUpperLip, mouthLowerLip, mouthCorners, fillLight, whitening, acneRemoval, wrinkleRemoval, mouthCornerSmooth, filterId, liveActive, recomputeStatic])
+  }, [params, live, recomputeStatic])
 
-  // Any further adjustment after confirming means the exported image would
-  // no longer match what's on screen — fall back to Confirm again rather
-  // than silently leaving a stale Save/Share up.
+  // Filter thumbnails are rendered from the current frame whenever the
+  // strip opens (and again for each new still), not every live frame.
+  const frameReady = status !== 'loading'
   useEffect(() => {
-    setConfirmed(false)
-  }, [smoothness, face, eyes, nose, mouth, eyebrowHeight, noseBridge, temple, cheekbone, mouthUpperLip, mouthLowerLip, mouthCorners, fillLight, whitening, acneRemoval, wrinkleRemoval, mouthCornerSmooth, filterId])
+    if (panel !== 'filter') return
+    const base = baseRef.current
+    if (!base) return
+    const t = setTimeout(() => setThumbs(renderFilterThumbnails(base, faceFocus(landmarksRef.current, base.width, base.height))), 30)
+    return () => clearTimeout(t)
+  }, [panel, frameVersion, frameReady])
 
-  const handleCapture = () => {
-    stopLive()
-    setLiveActive(false)
-    setConfirmed(false)
+  const handleShutter = () => {
+    if (countdown !== null) {
+      cancelCountdown()
+      return
+    }
+    setPanel(null)
+    if (timer === 0) {
+      capture()
+      return
+    }
+    let remaining: number = timer
+    setCountdown(remaining)
+    const tick = () => {
+      remaining -= 1
+      if (remaining <= 0) {
+        countdownTimerRef.current = null
+        setCountdown(null)
+        capture()
+      } else {
+        setCountdown(remaining)
+        countdownTimerRef.current = window.setTimeout(tick, 1000)
+      }
+    }
+    countdownTimerRef.current = window.setTimeout(tick, 1000)
   }
 
-  const handleRetake = () => {
-    setConfirmed(false)
-    setOpenPanel(null)
-    startLive()
+  // ✕ in review: discard and go back to the camera.
+  const handleClose = () => {
+    setPanel(null)
+    if (source.kind === 'live') startLive()
+    else onReset()
   }
 
-  const handleConfirm = () => {
-    setConfirmed(true)
-    setOpenPanel(null)
-  }
-
-  const handleFlipCamera = () => {
+  const handleFlip = () => {
+    cancelCountdown()
     const next = facingMode === 'user' ? 'environment' : 'user'
     facingModeRef.current = next
     setFacingMode(next)
-    stopLive()
     startLive()
   }
 
-  // Shared by the tap-to-cycle presets and the long-press dial — keeps the
-  // actual hardware track (when we have real optical/sensor zoom) in sync
-  // with whatever value the UI just settled on, instead of only updating
-  // the digital crop factor and silently ignoring the lens.
-  const applyZoom = (value: number) => {
+  const applyZoom = useCallback((value: number) => {
     const { min, max, mode } = zoomRangeRef.current
     const clamped = Math.min(max, Math.max(min, value))
     zoomRef.current = clamped
@@ -608,481 +500,261 @@ export default function Editor({ source, onReset, onPickImage }: { source: Sourc
     if (mode === 'hardware' && zoomTrackRef.current) {
       zoomTrackRef.current.applyConstraints({ advanced: [{ zoom: clamped } as unknown as MediaTrackConstraintSet] }).catch(() => {})
     }
+  }, [])
+
+  const cycleAspect = () => {
+    const next = ASPECT_MODES[(ASPECT_MODES.indexOf(aspect) + 1) % ASPECT_MODES.length]
+    aspectRef.current = next
+    setAspect(next)
   }
 
-  const handleToggleZoom = () => {
-    const presets = buildZoomPresets(zoomRange)
-    const i = presets.findIndex((p) => Math.abs(p - zoom) < 0.05)
-    const next = presets[(i + 1 + presets.length) % presets.length] ?? presets[0]
-    applyZoom(next)
-  }
-
-  // Tap the zoom pill to cycle presets; press and hold it to open a dial
-  // for anything continuous in between — the same two-tier interaction
-  // most phone camera apps use, since a tap-only cycle can't reach, say,
-  // 2.4x, and a drag-only dial is overkill for the common "just go to 2x"
-  // case. The fan stays open across multiple separate drags once a
-  // long-press opens it — releasing mid-adjustment doesn't close it, only
-  // a direct tap on the pill while it's already open does — since needing
-  // to hold the whole time to keep fine-tuning open defeats the point of
-  // "fine" adjustment.
-  const ZOOM_LONG_PRESS_MS = 350
-  const handleZoomPressStart = () => {
-    if (zoomDialOpen) return // this press's matching release is the close-tap, not a new long-press
-    zoomPressMovedRef.current = false
-    zoomPressTimerRef.current = window.setTimeout(() => {
-      zoomPressTimerRef.current = null
-      setZoomDialOpen(true)
-    }, ZOOM_LONG_PRESS_MS)
-  }
-  // A genuine release on the pill itself: closes the fan if it's already
-  // open (the only way to close it now that it persists across drags),
-  // otherwise this was a quick tap — cycle presets.
-  const handleZoomPointerUp = () => {
-    if (zoomDialOpen) {
-      setZoomDialOpen(false)
-      return
-    }
-    if (zoomPressTimerRef.current !== null) {
-      clearTimeout(zoomPressTimerRef.current)
-      zoomPressTimerRef.current = null
-      if (!zoomPressMovedRef.current) handleToggleZoom()
-    }
-  }
-  // Only ever cancels a *pending* long-press timer — never closes an
-  // already-open fan. The finger leaving the pill's small bounds is
-  // exactly what happens the instant someone slides up onto the fan
-  // itself to start dragging it; that's not a release.
-  const handleZoomPointerLeave = () => {
-    if (zoomDialOpen) return
-    if (zoomPressTimerRef.current !== null) {
-      clearTimeout(zoomPressTimerRef.current)
-      zoomPressTimerRef.current = null
-    }
-  }
-
-  const disabled = status === 'no-face'
-
-  const resultBlob = (): Promise<Blob | null> => {
+  const exportBlob = (): Promise<Blob | null> => {
     const canvas = resultRef.current ?? baseRef.current
     if (!canvas) return Promise.resolve(null)
     return new Promise((resolve) => canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.95))
   }
 
-  const handleDownload = async () => {
-    const blob = await resultBlob()
+  // iOS has no "download a file to Photos" — the share sheet's Save Image
+  // is the only way a web app's photo reaches the camera roll, so Save goes
+  // through it there and through a plain download everywhere else.
+  const handleSave = async () => {
+    const blob = await exportBlob()
     if (!blob) return
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'flux-glow.jpg'
-    a.click()
-    URL.revokeObjectURL(url)
+    const name = timestampedName()
+    const file = new File([blob], name, { type: 'image/jpeg' })
+    if (isIOS && navigator.canShare?.({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file] })
+      } catch {
+        // dismissed
+      }
+      return
+    }
+    downloadBlob(blob, name)
+    showToast('Saved')
   }
 
   const handleShare = async () => {
-    const blob = await resultBlob()
+    const blob = await exportBlob()
     if (!blob) return
-    const file = new File([blob], 'flux-glow.jpg', { type: 'image/jpeg' })
+    const name = timestampedName()
+    const file = new File([blob], name, { type: 'image/jpeg' })
     if (navigator.canShare?.({ files: [file] })) {
       try {
         await navigator.share({ files: [file], title: 'Flux Glow' })
-        return
       } catch {
-        // user cancelled or share failed — fall through to download
+        // dismissed
       }
+      return
     }
-    handleDownload()
+    downloadBlob(blob, name)
+    showToast('Sharing unavailable — saved instead')
   }
 
-  // The retouch drill-down's region list — tapping one in the grid morphs
-  // the same row into this region's own slider (see the panel JSX below).
-  // `active` drives the highlighted-icon state in the grid, so someone can
-  // see at a glance which regions they've already touched without having
-  // to open each one.
-  const regions: { key: RegionKey; label: string; icon: ReactNode; value: number; onChange: (v: number) => void; bidirectional: boolean; active: boolean }[] = [
-    { key: 'face', label: 'Jaw', icon: <RegionIcon dot={[12, 16.8]} className="w-5 h-5" />, value: face, onChange: setFace, bidirectional: true, active: face !== 0.25 },
-    { key: 'temple', label: 'Temple', icon: <RegionIcon dot={[7.2, 7.6]} pair className="w-5 h-5" />, value: temple, onChange: setTemple, bidirectional: true, active: temple !== 0 },
-    { key: 'cheekbone', label: 'Cheekbone', icon: <RegionIcon dot={[6.8, 11.5]} pair className="w-5 h-5" />, value: cheekbone, onChange: setCheekbone, bidirectional: true, active: cheekbone !== 0 },
-    { key: 'eyes', label: 'Eyes', icon: <RegionIcon dot={[9, 10.2]} pair className="w-5 h-5" />, value: eyes, onChange: setEyes, bidirectional: true, active: eyes !== 0 },
-    { key: 'eyebrow', label: 'Eyebrow', icon: <RegionIcon dot={[9, 8]} pair className="w-5 h-5" />, value: eyebrowHeight, onChange: setEyebrowHeight, bidirectional: true, active: eyebrowHeight !== 0 },
-    { key: 'nose', label: 'Nose', icon: <RegionIcon dot={[12, 12.5]} className="w-5 h-5" />, value: nose, onChange: setNose, bidirectional: true, active: nose !== 0 },
-    { key: 'noseBridge', label: 'Bridge', icon: <RegionIcon dot={[12, 9.3]} className="w-5 h-5" />, value: noseBridge, onChange: setNoseBridge, bidirectional: true, active: noseBridge !== 0 },
+  const item = (key: NumericParam, label: string, icon: ReactNode, bidirectional = false): AdjustItem => ({
+    key,
+    label,
+    icon,
+    value: params[key],
+    defaultValue: DEFAULT_PARAMS[key],
+    onChange: set(key),
+    bidirectional,
+  })
+
+  const beautyItems: AdjustItem[] = [
+    item('smoothness', 'Smooth', <IconDroplet className="w-5 h-5" />),
+    item('whitening', 'Whiten', <IconWhiten className="w-5 h-5" />),
+    item('acneRemoval', 'Blemish', <IconTarget className="w-5 h-5" />),
+    item('wrinkleRemoval', 'Wrinkle', <IconWave className="w-5 h-5" />),
+    item('mouthCornerSmooth', 'Folds', <RegionIcon dot={[9, 15.6]} pair className="w-5 h-5" />),
+    item('fillLight', 'Light', <IconSun className="w-5 h-5" />),
+  ]
+  const shapeItems: AdjustItem[] = [
+    item('face', 'Jaw', <RegionIcon dot={[12, 16.8]} className="w-5 h-5" />, true),
+    item('temple', 'Temple', <RegionIcon dot={[7.2, 7.6]} pair className="w-5 h-5" />, true),
+    item('cheekbone', 'Cheekbone', <RegionIcon dot={[6.8, 11.5]} pair className="w-5 h-5" />, true),
+    item('eyes', 'Eyes', <RegionIcon dot={[9, 10.2]} pair className="w-5 h-5" />, true),
+    item('eyebrowHeight', 'Brow', <RegionIcon dot={[9, 8]} pair className="w-5 h-5" />, true),
+    item('nose', 'Nose', <RegionIcon dot={[12, 12.5]} className="w-5 h-5" />, true),
+    item('noseBridge', 'Bridge', <RegionIcon dot={[12, 9.3]} className="w-5 h-5" />, true),
     {
-      key: 'mouth',
+      key: 'mouthGroup',
       label: 'Mouth',
       icon: <RegionIcon dot={[12, 14.3]} className="w-5 h-5" />,
-      value: mouth,
-      onChange: setMouth,
-      bidirectional: true,
-      active: mouth !== 0 || mouthUpperLip !== 0 || mouthLowerLip !== 0 || mouthCorners !== 0 || mouthCornerSmooth !== 0,
+      children: [
+        item('mouth', 'Size', <RegionIcon dot={[12, 14.3]} className="w-5 h-5" />, true),
+        item('mouthUpperLip', 'Upper Lip', <RegionIcon dot={[12, 13.4]} className="w-5 h-5" />, true),
+        item('mouthLowerLip', 'Lower Lip', <RegionIcon dot={[12, 15.3]} className="w-5 h-5" />, true),
+        item('mouthCorners', 'Corners', <RegionIcon dot={[9.3, 14.3]} pair className="w-5 h-5" />, true),
+      ],
     },
   ]
-  // Mouth drills one level deeper than every other region: tapping it opens
-  // its own sub-grid (size/upper lip/lower lip/corners/fold) instead of
-  // going straight to a slider, since "mouth" bundles several independently
-  // adjustable things rather than being one knob the way jaw/nose are.
-  const mouthSubRegions: { key: MouthSubKey; label: string; icon: ReactNode; value: number; onChange: (v: number) => void; bidirectional: boolean; active: boolean }[] = [
-    { key: 'mouthSize', label: 'Size', icon: <RegionIcon dot={[12, 14.3]} className="w-5 h-5" />, value: mouth, onChange: setMouth, bidirectional: true, active: mouth !== 0 },
-    { key: 'mouthUpperLip', label: 'Upper Lip', icon: <RegionIcon dot={[12, 13.4]} className="w-5 h-5" />, value: mouthUpperLip, onChange: setMouthUpperLip, bidirectional: true, active: mouthUpperLip !== 0 },
-    { key: 'mouthLowerLip', label: 'Lower Lip', icon: <RegionIcon dot={[12, 15.3]} className="w-5 h-5" />, value: mouthLowerLip, onChange: setMouthLowerLip, bidirectional: true, active: mouthLowerLip !== 0 },
-    { key: 'mouthCorners', label: 'Corners', icon: <RegionIcon dot={[9.3, 14.3]} pair className="w-5 h-5" />, value: mouthCorners, onChange: setMouthCorners, bidirectional: true, active: mouthCorners !== 0 },
-    { key: 'mouthCornerSmooth', label: 'Fold', icon: <RegionIcon dot={[9, 15.6]} pair className="w-5 h-5" />, value: mouthCornerSmooth, onChange: setMouthCornerSmooth, bidirectional: false, active: mouthCornerSmooth !== 0 },
-  ]
-  const beautyRegions: { key: BeautyKey; label: string; icon: ReactNode; value: number; onChange: (v: number) => void; bidirectional: boolean; active: boolean }[] = [
-    { key: 'smooth', label: 'Smooth', icon: <IconDroplet className="w-5 h-5" />, value: smoothness, onChange: setSmoothness, bidirectional: false, active: smoothness !== 0.6 },
-    { key: 'fillLight', label: 'Fill Light', icon: <IconSun className="w-5 h-5" />, value: fillLight, onChange: setFillLight, bidirectional: false, active: fillLight !== 0 },
-    { key: 'whitening', label: 'Whiten', icon: <IconWhiten className="w-5 h-5" />, value: whitening, onChange: setWhitening, bidirectional: false, active: whitening !== 0 },
-    { key: 'acneRemoval', label: 'Acne', icon: <IconTarget className="w-5 h-5" />, value: acneRemoval, onChange: setAcneRemoval, bidirectional: false, active: acneRemoval !== 0 },
-    { key: 'wrinkleRemoval', label: 'Wrinkle', icon: <IconWave className="w-5 h-5" />, value: wrinkleRemoval, onChange: setWrinkleRemoval, bidirectional: false, active: wrinkleRemoval !== 0 },
-  ]
-  const activeRegion = regions.find((r) => r.key === selectedRegion) ?? null
-  const activeMouthSub = mouthSubRegions.find((r) => r.key === selectedMouthSub) ?? null
-  const activeBeauty = beautyRegions.find((r) => r.key === selectedBeauty) ?? null
+  const changedFrom = (keys: NumericParam[]) => keys.some((k) => Math.abs(params[k] - DEFAULT_PARAMS[k]) > 0.005)
 
-  let centerButton: React.ReactNode
-  if (liveActive) {
-    centerButton = (
-      <button
-        onClick={handleCapture}
-        disabled={status !== 'ready'}
-        aria-label="Capture"
-        className="w-16 h-16 rounded-full bg-primary border-4 border-white/80 shadow-glow-strong flex items-center justify-center hover:brightness-110 transition disabled:opacity-50"
-      >
-        <IconCamera className="w-7 h-7 text-black" />
-      </button>
-    )
-  } else if (!confirmed) {
-    centerButton = (
-      <button
-        onClick={handleConfirm}
-        disabled={status === 'loading'}
-        aria-label="Confirm"
-        className="w-16 h-16 rounded-full bg-primary border-4 border-white/20 shadow-glow-strong flex items-center justify-center hover:brightness-110 transition disabled:opacity-40"
-      >
-        <IconCheck className="w-7 h-7 text-black" />
-      </button>
-    )
-  } else {
-    centerButton = (
-      <button
-        onClick={() => setConfirmed(false)}
-        aria-label="Edit"
-        className="w-16 h-16 rounded-full bg-black/50 border-4 border-white/20 backdrop-blur-sm flex items-center justify-center text-white hover:bg-black/60 transition"
-      >
-        <IconEdit className="w-6 h-6" />
-      </button>
-    )
-  }
+  const togglePanel = (p: Panel) => setPanel((v) => (v === p ? null : p))
+  const noFace = status === 'no-face'
+  const fullBleed = live && aspect === 'full'
+  const topInset = 'max(0.75rem, env(safe-area-inset-top))'
+  // The viewfinder sits below the top controls and clears the shutter that
+  // straddles the tray's top edge — except in Full, which fills the screen.
+  const previewStyle = fullBleed ? { top: 0, bottom: 0 } : { top: `calc(${topInset} + 3.25rem)`, bottom: trayBox.height + 44 }
 
   return (
     <div className="fixed inset-0 bg-black overflow-hidden select-none">
-      <canvas ref={displayRef} className="absolute inset-0 w-full h-full object-cover" />
       <video ref={videoRef} autoPlay playsInline muted className="hidden" />
 
-      <div className="absolute top-0 inset-x-0 h-28 bg-gradient-to-b from-black/70 to-transparent pointer-events-none" />
-
-      {status === 'loading' && (
-        <div className="absolute inset-0 flex items-center justify-center">
-          <IconSpinner className="w-9 h-9 text-primary animate-spin" />
-        </div>
-      )}
-
-      <div className="absolute inset-x-0 flex items-center justify-between px-4" style={{ top: 'max(1rem, env(safe-area-inset-top))' }}>
-        <button
-          onClick={onReset}
-          aria-label="Close"
-          className="w-10 h-10 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center text-white"
-        >
-          <IconClose className="w-5 h-5" />
-        </button>
-        <div className="flex items-center gap-2.5">
-          {liveActive && (
-            <button
-              onClick={handleFlipCamera}
-              disabled={status === 'loading'}
-              aria-label="Flip camera"
-              className="w-10 h-10 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center text-white disabled:opacity-40"
-            >
-              <IconFlipCamera className="w-5 h-5" />
-            </button>
+      <div ref={previewRef} className={`absolute inset-x-0 flex justify-center ${live && !fullBleed ? 'items-start' : 'items-center'}`} style={previewStyle}>
+        <div className="relative" style={{ width: fit.width, height: fit.height }}>
+          <canvas ref={displayRef} className="block w-full h-full" />
+          {grid && live && <GridOverlay />}
+          {countdown !== null && (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <span key={countdown} className="fg-count w-36 h-36 rounded-full bg-black/35 backdrop-blur-sm flex items-center justify-center text-8xl font-light text-white tabular-nums">
+                {countdown}
+              </span>
+            </div>
           )}
-          <button
-            onMouseDown={() => setShowBefore(true)}
-            onMouseUp={() => setShowBefore(false)}
-            onMouseLeave={() => setShowBefore(false)}
-            onTouchStart={() => setShowBefore(true)}
-            onTouchEnd={() => setShowBefore(false)}
-            disabled={status === 'loading'}
-            aria-label="Hold to compare with the original"
-            className={`w-10 h-10 rounded-full backdrop-blur-sm flex items-center justify-center transition ${
-              showBefore ? 'bg-primary text-black' : 'bg-black/40 text-white'
-            }`}
-          >
-            <IconEye className="w-5 h-5" />
-          </button>
+          {status === 'loading' && (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <IconSpinner className="w-9 h-9 text-primary animate-spin" />
+            </div>
+          )}
         </div>
       </div>
 
-      {liveActive && status !== 'loading' && (
-        <>
-          {zoomDialOpen && (
-            <ZoomRulerDial
-              min={zoomRange.min}
-              max={zoomRange.max}
-              value={zoom}
-              onChange={(v) => {
-                zoomPressMovedRef.current = true
-                applyZoom(v)
-              }}
-            />
-          )}
-          <button
-            onPointerDown={handleZoomPressStart}
-            onPointerUp={handleZoomPointerUp}
-            onPointerLeave={handleZoomPointerLeave}
-            aria-label="Zoom level — tap to cycle, hold for fine control"
-            className={`absolute left-1/2 -translate-x-1/2 bottom-44 w-9 h-9 rounded-full backdrop-blur-sm border text-white text-[11px] font-semibold flex items-center justify-center select-none touch-none transition ${
-              zoomDialOpen ? 'bg-primary text-black border-primary scale-110' : 'bg-black/50 border-white/20'
-            }`}
-          >
-            {zoom < 10 ? zoom.toFixed(1).replace(/\.0$/, '') : Math.round(zoom)}×
-          </button>
-        </>
-      )}
+      {flashKey > 0 && <div key={flashKey} className="fg-flash absolute inset-0 bg-white pointer-events-none z-40 opacity-0" />}
 
-      {liveActive && status !== 'loading' && (
-        <div
-          className="absolute left-4 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 backdrop-blur-sm border border-white/10"
-          style={{ top: 'calc(max(1rem, env(safe-area-inset-top)) + 3.25rem)' }}
-        >
-          <span className="w-1.5 h-1.5 rounded-full bg-danger animate-pulse" />
-          <span className="text-[10px] font-semibold tracking-wide text-white/90">LIVE</span>
+      <div className="absolute top-0 inset-x-0 h-24 bg-gradient-to-b from-black/60 to-transparent pointer-events-none" />
+
+      <div className="absolute inset-x-0 flex items-center justify-between px-3 z-10" style={{ top: topInset }}>
+        <div className="flex items-center gap-2">
+          {live ? (
+            <>
+              <TopButton label={`Self-timer: ${timer ? `${timer} seconds` : 'off'}`} active={timer > 0} onClick={() => setTimer((t) => TIMER_STEPS[(TIMER_STEPS.indexOf(t) + 1) % TIMER_STEPS.length])}>
+                <IconTimer className="w-[18px] h-[18px]" />
+                {timer > 0 && <span>{timer}s</span>}
+              </TopButton>
+              <TopButton label={`Aspect ratio ${aspect}`} onClick={cycleAspect}>
+                <span className="px-0.5">{aspect === 'full' ? 'Full' : aspect}</span>
+              </TopButton>
+              <TopButton label="Grid" active={grid} onClick={() => setGrid((g) => !g)}>
+                <IconGrid className="w-[18px] h-[18px]" />
+              </TopButton>
+            </>
+          ) : (
+            <TopButton label="Discard and return to camera" onClick={handleClose}>
+              <IconClose className="w-5 h-5" />
+            </TopButton>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <TopButton
+            label="Hold to compare with the original"
+            active={showBefore}
+            disabled={status === 'loading'}
+            onPointerDown={() => setShowBefore(true)}
+            onPointerUp={() => setShowBefore(false)}
+            onPointerLeave={() => setShowBefore(false)}
+            onPointerCancel={() => setShowBefore(false)}
+            onContextMenu={(e) => e.preventDefault()}
+            style={{ touchAction: 'none' }}
+          >
+            <IconCompare className="w-5 h-5" />
+          </TopButton>
+          {live && (
+            <TopButton label="Flip camera" onClick={handleFlip} disabled={status === 'loading'}>
+              <IconFlipCamera className="w-5 h-5" />
+            </TopButton>
+          )}
+        </div>
+      </div>
+
+      {(showBefore || processing) && (
+        <div className="absolute left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/60 backdrop-blur-md text-[11px] font-semibold text-white" style={{ top: `calc(${topInset} + 3.25rem)` }}>
+          {processing && !showBefore && <IconSpinner className="w-3 h-3 animate-spin text-primary" />}
+          {showBefore ? 'Original' : 'Retouching…'}
         </div>
       )}
 
-      <div className="absolute inset-x-0 bottom-0 flex flex-col">
-        {(status === 'no-face' || status === 'error') && (
-          <p
-            className={`self-center mb-3 text-xs text-center flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-sm ${
-              status === 'error' ? 'text-danger' : 'text-white/80'
-            }`}
-          >
+      {toast && (
+        <div key={toast.key} className="fg-toast absolute left-1/2 z-30 flex items-center gap-1.5 px-3.5 py-2 rounded-full bg-black/75 backdrop-blur-md text-xs font-medium text-white" style={{ top: '42%' }}>
+          <IconCheck className="w-3.5 h-3.5 text-primary" />
+          {toast.text}
+        </div>
+      )}
+
+      <div className="absolute inset-x-0 bottom-0 flex flex-col items-stretch">
+        {(noFace || status === 'error') && !panel && (
+          <p className={`self-center mb-3 text-xs flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-md ${status === 'error' ? 'text-danger' : 'text-white/85'}`}>
             {status === 'error' ? <IconError className="w-3.5 h-3.5 flex-shrink-0" /> : <IconInfo className="w-3.5 h-3.5 flex-shrink-0" />}
             {status === 'error'
               ? source.kind === 'live'
-                ? "Couldn't access the camera — check your browser permissions."
-                : "Couldn't load that photo."
-              : 'No face detected — smooth and contour need one, filters still work.'}
+                ? 'Camera unavailable — allow camera access in your browser settings.'
+                : "Couldn't open that photo."
+              : 'No face found — Beauty and Shape need one. Filters still apply.'}
           </p>
         )}
 
-        <div
-          ref={panelRef}
-          className={`grid transition-all duration-250 ease-out px-4 ${openPanel ? 'grid-rows-[1fr] opacity-100 mb-3' : 'grid-rows-[0fr] opacity-0'}`}
-          style={{ transitionProperty: 'grid-template-rows, opacity, margin' }}
-        >
-          <div className="overflow-hidden">
-            <div className="bg-black/55 backdrop-blur-2xl rounded-2xl p-4 border border-white/10">
-              {openPanel === 'retouch' ? (
-                selectedRegion === 'mouth' ? (
-                  activeMouthSub ? (
-                    <div className="flex items-center gap-3">
-                      <button
-                        onClick={() => setSelectedMouthSub(null)}
-                        aria-label="Back to mouth"
-                        className="w-8 h-8 rounded-full bg-white/10 border border-white/15 flex items-center justify-center text-white flex-shrink-0"
-                      >
-                        <IconBack className="w-4 h-4" />
-                      </button>
-                      <div className="flex-1">
-                        <Slider label={activeMouthSub.label} value={activeMouthSub.value} onChange={activeMouthSub.onChange} bidirectional={activeMouthSub.bidirectional} disabled={disabled} />
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-3">
-                      <button
-                        onClick={() => setSelectedRegion(null)}
-                        aria-label="Back to regions"
-                        className="w-8 h-8 rounded-full bg-white/10 border border-white/15 flex items-center justify-center text-white flex-shrink-0"
-                      >
-                        <IconBack className="w-4 h-4" />
-                      </button>
-                      <div className="flex items-center gap-4 overflow-x-auto pb-0.5 -mx-1 px-1">
-                        {mouthSubRegions.map((r) => (
-                          <button key={r.key} onClick={() => setSelectedMouthSub(r.key)} aria-label={`Adjust ${r.label}`} className="flex flex-col items-center gap-1 flex-shrink-0 w-14">
-                            <span
-                              className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
-                                r.active ? 'bg-primary/20 border-primary text-primary' : 'bg-white/5 border-white/15 text-white/85'
-                              }`}
-                            >
-                              {r.icon}
-                            </span>
-                            <span className="text-[10px] font-medium leading-none text-white/85 whitespace-nowrap">{r.label}</span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )
-                ) : activeRegion ? (
-                  <div className="flex items-center gap-3">
-                    <button
-                      onClick={() => setSelectedRegion(null)}
-                      aria-label="Back to regions"
-                      className="w-8 h-8 rounded-full bg-white/10 border border-white/15 flex items-center justify-center text-white flex-shrink-0"
-                    >
-                      <IconBack className="w-4 h-4" />
-                    </button>
-                    <div className="flex-1">
-                      <Slider label={activeRegion.label} value={activeRegion.value} onChange={activeRegion.onChange} bidirectional={activeRegion.bidirectional} disabled={disabled} />
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-4 overflow-x-auto pb-0.5 -mx-1 px-1">
-                    {regions.map((r) => (
-                      <button key={r.key} onClick={() => setSelectedRegion(r.key)} aria-label={`Adjust ${r.label}`} className="flex flex-col items-center gap-1 flex-shrink-0 w-14">
-                        <span
-                          className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
-                            r.active ? 'bg-primary/20 border-primary text-primary' : 'bg-white/5 border-white/15 text-white/85'
-                          }`}
-                        >
-                          {r.icon}
-                        </span>
-                        <span className="text-[10px] font-medium leading-none text-white/85 whitespace-nowrap">{r.label}</span>
-                      </button>
-                    ))}
-                  </div>
-                )
-              ) : openPanel === 'beauty' ? (
-                activeBeauty ? (
-                  <div className="flex items-center gap-3">
-                    <button
-                      onClick={() => setSelectedBeauty(null)}
-                      aria-label="Back to beauty"
-                      className="w-8 h-8 rounded-full bg-white/10 border border-white/15 flex items-center justify-center text-white flex-shrink-0"
-                    >
-                      <IconBack className="w-4 h-4" />
-                    </button>
-                    <div className="flex-1">
-                      <Slider label={activeBeauty.label} value={activeBeauty.value} onChange={activeBeauty.onChange} bidirectional={activeBeauty.bidirectional} disabled={disabled} />
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-4 overflow-x-auto pb-0.5 -mx-1 px-1">
-                    {beautyRegions.map((r) => (
-                      <button key={r.key} onClick={() => setSelectedBeauty(r.key)} aria-label={`Adjust ${r.label}`} className="flex flex-col items-center gap-1 flex-shrink-0 w-14">
-                        <span
-                          className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
-                            r.active ? 'bg-primary/20 border-primary text-primary' : 'bg-white/5 border-white/15 text-white/85'
-                          }`}
-                        >
-                          {r.icon}
-                        </span>
-                        <span className="text-[10px] font-medium leading-none text-white/85 whitespace-nowrap">{r.label}</span>
-                      </button>
-                    ))}
-                  </div>
-                )
-              ) : (
-                <div className="grid grid-cols-3 gap-2">
-                  {FILTER_PRESETS.map((p) => (
-                    <button
-                      key={p.id}
-                      onClick={() => setFilterId(p.id)}
-                      className={`py-2 rounded-lg text-xs font-medium transition border ${
-                        filterId === p.id ? 'bg-primary text-black border-primary' : 'bg-secondary text-white/70 border-transparent hover:bg-white/10'
-                      }`}
-                    >
-                      {p.label}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+        {live && !panel && status !== 'loading' && status !== 'error' && countdown === null && (
+          <div className="self-center mb-12">
+            <ZoomControl range={zoomRange} value={zoom} onChange={applyZoom} />
           </div>
-        </div>
+        )}
 
-        {/* The frosted toolbar tray — a native-camera-style shutter button
-            straddles its top edge (half inside the tray, half protruding
-            into the preview above it), rather than sitting in the row with
-            everything else. */}
-        <div
-          className="relative bg-black/55 backdrop-blur-2xl border-t border-white/10 rounded-t-[28px] px-4 pt-11"
-          style={{ paddingBottom: 'max(1.1rem, env(safe-area-inset-bottom))' }}
-        >
-          {/* Centered independently of the upload icon beside it — sharing
-              one centered flex group (as this used to) centers the *pair*,
-              which pulls the shutter itself off-center to the left. The
-              upload icon is instead positioned at a fixed offset to the
-              shutter's right (half the shutter's own width, plus a gap). */}
-          <div className="absolute left-1/2 -translate-x-1/2 -top-8">{centerButton}</div>
-          {liveActive && !confirmed && (
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              aria-label="Upload a photo instead"
-              className="absolute -top-2 w-9 h-9 rounded-full bg-white/15 backdrop-blur-sm border border-white/25 flex items-center justify-center text-white"
-              style={{ left: 'calc(50% + 44px)' }}
-            >
-              <IconImage className="w-4 h-4" />
-            </button>
-          )}
+        {panel && (
+          <div ref={panelRef} key={panel} className="fg-panel mx-3 mb-12 rounded-2xl bg-black/60 backdrop-blur-2xl border border-white/10 p-4">
+            {panel === 'beauty' && <AdjustPanel title="Beauty" items={beautyItems} disabled={noFace} />}
+            {panel === 'shape' && <AdjustPanel title="Shape" items={shapeItems} disabled={noFace} />}
+            {panel === 'filter' && (
+              <FilterPanel
+                thumbs={thumbs}
+                filterId={params.filterId}
+                strength={params.filterStrength}
+                defaultStrength={DEFAULT_PARAMS.filterStrength}
+                onSelect={(id) => setParams((p) => ({ ...p, filterId: id }))}
+                onStrength={set('filterStrength')}
+              />
+            )}
+          </div>
+        )}
 
-          <div className="grid grid-cols-2 items-center gap-2">
-            <div className="flex items-center gap-3 justify-self-start">
+        {/* Frosted tray with a native-camera-style shutter straddling its
+            top edge, centered on its own rather than as part of the icon
+            row (sharing a centered group would pull it off-center). */}
+        <div ref={trayRef} className="relative bg-black/55 backdrop-blur-2xl border-t border-white/10 rounded-t-[28px] px-5 pt-12" style={{ paddingBottom: 'max(1.1rem, env(safe-area-inset-bottom))' }}>
+          <div className="absolute left-1/2 -translate-x-1/2 -top-9">
+            {live ? (
               <button
-                ref={retouchButtonRef}
-                onClick={() => setOpenPanel((v) => (v === 'retouch' ? null : 'retouch'))}
-                aria-label="Retouch"
-                className="flex flex-col items-center gap-1 w-14 text-white/85"
+                onClick={handleShutter}
+                disabled={status === 'loading' || status === 'error'}
+                aria-label={countdown !== null ? 'Cancel timer' : timer ? `Take photo in ${timer} seconds` : 'Take photo'}
+                className="w-[76px] h-[76px] rounded-full border-[4px] border-white/95 bg-black/20 flex items-center justify-center shadow-glow-strong transition active:scale-95 disabled:opacity-50"
               >
-                <span
-                  className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
-                    openPanel === 'retouch' ? 'bg-primary text-black border-primary' : 'bg-white/5 border-white/15'
-                  }`}
-                >
-                  <IconFaceOutline className="w-5 h-5" />
-                </span>
-                <span className="text-[10px] font-medium leading-none">Retouch</span>
+                <span className={`rounded-full transition-all ${countdown !== null ? 'w-7 h-7 rounded-md bg-danger' : 'w-[60px] h-[60px] bg-primary'}`} />
               </button>
+            ) : (
               <button
-                ref={beautyButtonRef}
-                onClick={() => setOpenPanel((v) => (v === 'beauty' ? null : 'beauty'))}
-                aria-label="Beauty"
-                className="flex flex-col items-center gap-1 w-14 text-white/85"
+                onClick={handleSave}
+                disabled={status === 'loading' || status === 'error' || processing}
+                aria-label="Save photo"
+                className="w-[76px] h-[76px] rounded-full bg-primary border-[4px] border-white/20 shadow-glow-strong flex items-center justify-center text-black transition active:scale-95 disabled:opacity-50"
               >
-                <span
-                  className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
-                    openPanel === 'beauty' ? 'bg-primary text-black border-primary' : 'bg-white/5 border-white/15'
-                  }`}
-                >
-                  <IconSparkle className="w-5 h-5" />
-                </span>
-                <span className="text-[10px] font-medium leading-none">Beauty</span>
+                <IconDownload className="w-7 h-7" />
               </button>
-              <button
-                ref={filterButtonRef}
-                onClick={() => setOpenPanel((v) => (v === 'filter' ? null : 'filter'))}
-                aria-label="Filter"
-                className="flex flex-col items-center gap-1 w-14 text-white/85"
-              >
-                <span
-                  className={`w-11 h-11 rounded-full flex items-center justify-center backdrop-blur-sm border transition ${
-                    openPanel === 'filter' ? 'bg-primary text-black border-primary' : 'bg-white/5 border-white/15'
-                  }`}
-                >
-                  <IconPalette className="w-5 h-5" />
-                </span>
-                <span className="text-[10px] font-medium leading-none">Filter</span>
-              </button>
-              {source.kind === 'live' && !liveActive && <ChromeButton icon={IconRefresh} label="Retake" onClick={handleRetake} />}
+            )}
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <TrayButton icon={IconSparkle} label="Beauty" toggle active={panel === 'beauty'} dot={changedFrom(BEAUTY_KEYS)} onClick={() => togglePanel('beauty')} />
+              <TrayButton icon={IconFaceOutline} label="Shape" toggle active={panel === 'shape'} dot={changedFrom(SHAPE_KEYS)} onClick={() => togglePanel('shape')} />
             </div>
-
-            <div className="flex items-center gap-3 justify-self-end">
-              {confirmed && (
-                <>
-                  <ChromeButton icon={IconDownload} label="Save" primary onClick={handleDownload} />
-                  <ChromeButton icon={IconShare} label="Share" onClick={handleShare} />
-                </>
+            <div className="flex items-center gap-2">
+              <TrayButton icon={IconPalette} label="Filter" toggle active={panel === 'filter'} dot={params.filterId !== 'none'} onClick={() => togglePanel('filter')} />
+              {live ? (
+                <TrayButton icon={IconImage} label="Album" onClick={() => fileInputRef.current?.click()} />
+              ) : (
+                <TrayButton icon={IconShare} label="Share" onClick={handleShare} />
               )}
             </div>
           </div>

@@ -24,36 +24,12 @@ export function IconSparkle(props: IconProps) {
   )
 }
 
-// The brand mark: a face, since that's what the app is about — plus a
-// small sparkle over the cheek standing in for the retouch/glow itself
-// (what distinguishes it from a plain face icon like IconFaceOutline).
-export function IconFaceGlow(props: IconProps) {
-  return (
-    <svg {...base} {...props}>
-      <path d="M12 3.5c-3.6 0-5.8 2.6-5.8 6.3 0 2 .5 4 1.5 5.7.9 1.5 2.4 2.5 4.3 2.5s3.4-1 4.3-2.5c1-1.7 1.5-3.7 1.5-5.7 0-3.7-2.2-6.3-5.8-6.3z" />
-      <path d="M9 10.2h.01" strokeWidth={2.4} />
-      <path d="M13.6 9.8c.5-.4 1.3-.4 1.8 0" />
-      <path d="M9.5 14c.7.6 1.6.9 2.5.9s1.8-.3 2.5-.9" />
-      <path d="M18.4 4.2l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9z" strokeLinejoin="round" />
-    </svg>
-  )
-}
-
 export function IconImage(props: IconProps) {
   return (
     <svg {...base} {...props}>
       <rect x="3" y="4" width="18" height="16" rx="2.5" />
       <circle cx="9" cy="10" r="1.6" />
       <path d="M3 17l5.5-5.5a2 2 0 0 1 2.8 0L15 15l1.2-1.2a2 2 0 0 1 2.8 0L21 16" />
-    </svg>
-  )
-}
-
-export function IconCamera(props: IconProps) {
-  return (
-    <svg {...base} {...props}>
-      <path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2l1-2h7l1 2h2A1.5 1.5 0 0 1 20 8.5v9A1.5 1.5 0 0 1 18.5 19h-13A1.5 1.5 0 0 1 4 17.5v-9z" />
-      <circle cx="12" cy="12.5" r="3.3" />
     </svg>
   )
 }
@@ -163,24 +139,6 @@ export function IconError(props: IconProps) {
   )
 }
 
-export function IconEdit(props: IconProps) {
-  return (
-    <svg {...base} {...props}>
-      <path d="M15.2 4.8l4 4L7.5 20.5l-4.8.8.8-4.8L15.2 4.8z" />
-      <path d="M13.4 6.6l4 4" />
-    </svg>
-  )
-}
-
-export function IconEye(props: IconProps) {
-  return (
-    <svg {...base} {...props}>
-      <path d="M3 12c1.9-4 5.2-6.3 9-6.3s7.1 2.3 9 6.3c-1.9 4-5.2 6.3-9 6.3S4.9 16 3 12z" />
-      <circle cx="12" cy="12" r="2.6" />
-    </svg>
-  )
-}
-
 export function IconFlipCamera(props: IconProps) {
   return (
     <svg {...base} {...props}>
@@ -258,6 +216,25 @@ export function IconSpinner(props: IconProps) {
   return (
     <svg {...base} viewBox="0 0 24 24" fill="none" {...props}>
       <path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5" stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
+    </svg>
+  )
+}
+
+export function IconTimer(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <circle cx="12" cy="13.5" r="7" />
+      <path d="M12 9.8v3.9l2.4 1.5" />
+      <path d="M9.5 3.5h5" />
+    </svg>
+  )
+}
+
+export function IconGrid(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <rect x="3.5" y="3.5" width="17" height="17" rx="2.5" />
+      <path d="M9.2 3.5v17M14.8 3.5v17M3.5 9.2h17M3.5 14.8h17" />
     </svg>
   )
 }

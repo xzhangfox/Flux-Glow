@@ -5,7 +5,7 @@ import { applyWhitening, applyAcneRemoval, applyWrinkleRemoval, applyMouthCorner
 import { applyLiveTonePass } from './livePass'
 import { applyReshape, type ReshapeParams } from './reshape'
 import { LEFT_MOUTH_CORNER, RIGHT_MOUTH_CORNER } from './meshWarp'
-import { applyFilter, FILTER_PRESETS, type FilterPreset } from './filters'
+import { applyFilter, findPreset } from './filters'
 import { connectorsToLoop, loopBoundsPx } from './landmarks'
 
 export interface EditParams extends ReshapeParams {
@@ -16,6 +16,43 @@ export interface EditParams extends ReshapeParams {
   wrinkleRemoval: number
   mouthCornerSmooth: number
   filterId: string
+  filterStrength: number
+}
+
+export type NumericParam = Exclude<keyof EditParams, 'filterId'>
+
+/** The untouched starting point — also what each panel's Reset restores
+ *  and what "has this control been changed" is measured against. Light
+ *  smoothing and a slight jaw slim are on by default, the same "natural"
+ *  baseline commercial beauty cameras open with. */
+export const DEFAULT_PARAMS: EditParams = {
+  smoothness: 0.6,
+  fillLight: 0,
+  whitening: 0,
+  acneRemoval: 0,
+  wrinkleRemoval: 0,
+  mouthCornerSmooth: 0,
+  face: 0.25,
+  eyes: 0,
+  nose: 0,
+  mouth: 0,
+  eyebrowHeight: 0,
+  noseBridge: 0,
+  temple: 0,
+  cheekbone: 0,
+  mouthUpperLip: 0,
+  mouthLowerLip: 0,
+  mouthCorners: 0,
+  filterId: 'none',
+  filterStrength: 0.8,
+}
+
+/** Square crop around the face oval (padded) in pixel space, for the
+ *  filter strip's thumbnails. */
+export function faceFocus(landmarks: NormalizedLandmark[] | null, w: number, h: number): { x: number; y: number; size: number } | null {
+  if (!landmarks) return null
+  const b = loopBoundsPx(connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_FACE_OVAL), landmarks, w, h, 0)
+  return { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2, size: Math.max(b.maxX - b.minX, b.maxY - b.minY) * 1.35 }
 }
 
 /** The full edit pipeline, shared by the static photo editor and the live
@@ -44,8 +81,8 @@ export interface EditParams extends ReshapeParams {
  * this flag — it's equally cheap (a shader, not a CPU blur) either way.
  */
 export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandmark[] | null, params: EditParams, highQuality = true): HTMLCanvasElement {
-  const preset: FilterPreset = FILTER_PRESETS.find((p) => p.id === params.filterId) ?? FILTER_PRESETS[0]
-  if (!landmarks) return applyFilter(base, preset)
+  const preset = findPreset(params.filterId)
+  if (!landmarks) return applyFilter(base, preset, params.filterStrength)
 
   const mask = buildSkinMask(landmarks, base.width, base.height)
   const ovalLoop = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_FACE_OVAL)
@@ -84,5 +121,5 @@ export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandm
     applyMouthCornerSmoothing(working, corners, radius, params.mouthCornerSmooth)
   }
   const reshaped = applyReshape(working, landmarks, params)
-  return applyFilter(reshaped, preset)
+  return applyFilter(reshaped, preset, params.filterStrength)
 }

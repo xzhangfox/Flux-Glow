@@ -24,6 +24,111 @@ body {
   overscroll-behavior: none;
 }
 
+/* Range input whose track is drawn by Slider.tsx itself (filled from the
+   neutral point to the thumb) — the native track stays transparent and only
+   the thumb is styled, large enough to grab without precision. */
+.fg-range {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  height: 28px;
+  margin: 0;
+  cursor: pointer;
+  touch-action: pan-y;
+}
+.fg-range:disabled {
+  cursor: not-allowed;
+}
+.fg-range::-webkit-slider-runnable-track {
+  background: transparent;
+  height: 28px;
+}
+.fg-range::-moz-range-track {
+  background: transparent;
+  height: 28px;
+}
+.fg-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 22px;
+  height: 22px;
+  margin-top: 3px;
+  border-radius: 9999px;
+  background: #fff;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.45), 0 0 0 3px rgba(212, 175, 55, 0.35);
+}
+.fg-range::-moz-range-thumb {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 9999px;
+  background: #fff;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.45), 0 0 0 3px rgba(212, 175, 55, 0.35);
+}
+
+@keyframes fg-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.fg-panel {
+  animation: fg-panel-in 200ms ease-out;
+}
+
+@keyframes fg-flash {
+  from {
+    opacity: 0.85;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.fg-flash {
+  animation: fg-flash 280ms ease-out forwards;
+}
+
+@keyframes fg-pop {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 6px) scale(0.96);
+  }
+  12%,
+  80% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -4px) scale(1);
+  }
+}
+.fg-toast {
+  animation: fg-pop 1800ms ease-out forwards;
+}
+
+@keyframes fg-count {
+  from {
+    opacity: 0;
+    transform: scale(1.35);
+  }
+  12%,
+  75% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0.6;
+    transform: scale(0.94);
+  }
+}
+.fg-count {
+  animation: fg-count 1000ms ease-out forwards;
+}
+
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
