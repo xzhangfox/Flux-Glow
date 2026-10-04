@@ -50,27 +50,44 @@ function maskGeometry() {
   g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(VERTS * 3), 3))
   g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(VERTS * 2), 2))
   g.setAttribute('aCut', new THREE.BufferAttribute(new Float32Array(VERTS).fill(1), 1))
-  const idx: number[] = Array.from(FACE_TRIANGULATION)
+  const face: number[] = Array.from(FACE_TRIANGULATION)
+  const ringIdx: number[] = []
   const ring = (k: number, o: number) => (k === 0 ? OVAL[o] : N + (k - 1) * OVAL.length + o)
   for (let k = 0; k < RINGS; k++)
     for (let o = 0; o < OVAL.length; o++) {
       const o2 = (o + 1) % OVAL.length
-      idx.push(ring(k, o), ring(k + 1, o), ring(k, o2), ring(k, o2), ring(k + 1, o), ring(k + 1, o2))
+      ringIdx.push(ring(k, o), ring(k + 1, o), ring(k, o2), ring(k, o2), ring(k + 1, o), ring(k + 1, o2))
     }
-  // Both windings, chosen per frame (see updateMask).
-  const flipped = idx.slice()
-  for (let t = 0; t < flipped.length; t += 3) [flipped[t + 1], flipped[t + 2]] = [flipped[t + 2], flipped[t + 1]]
-  g.userData.windings = [new THREE.Uint16BufferAttribute(idx, 1), new THREE.Uint16BufferAttribute(flipped, 1)]
-  g.setIndex(g.userData.windings[0])
+  const flip = (a: number[]) => {
+    const f = a.slice()
+    for (let t = 0; t < f.length; t += 3) [f[t + 1], f[t + 2]] = [f[t + 2], f[t + 1]]
+    return f
+  }
+  // The face mesh and the hood rings can each come out wound either way
+  // (mirroring flips the face; the rings' order depends on the outline's
+  // direction), so all four combinations are prepared and picked per frame.
+  g.userData.ringIdx = ringIdx
+  g.userData.windings = new Map<string, THREE.BufferAttribute>()
+  for (const [fk, fa] of [['f', face], ['F', flip(face)]] as const)
+    for (const [rk, ra] of [['r', ringIdx], ['R', flip(ringIdx)]] as const) g.userData.windings.set(fk + rk, new THREE.Uint16BufferAttribute([...fa, ...ra], 1))
+  g.setIndex(g.userData.windings.get('fr'))
   return g
 }
 
 /** Adds the per-vertex cut to a standard material. */
 function withCut<T extends THREE.Material>(m: T): T {
+  // Antialiased: coverage ramps over one pixel of the cut function, resolved
+  // smooth by alpha-to-coverage instead of a hard, stair-stepped discard.
+  m.alphaToCoverage = true
   m.onBeforeCompile = (shader) => {
     shader.vertexShader = 'attribute float aCut;\nvarying float vCut;\n' + shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n  vCut = aCut;')
-    shader.fragmentShader = 'varying float vCut;\n' + shader.fragmentShader.replace('void main() {', 'void main() {\n  if (vCut < 0.0) discard;')
+    shader.fragmentShader =
+      'varying float vCut;\n' +
+      shader.fragmentShader
+        .replace('void main() {', 'void main() {\n  float cutA = clamp(vCut / max(fwidth(vCut), 1e-4) + 0.5, 0.0, 1.0);\n  if (cutA <= 0.0) discard;')
+        .replace('#include <dithering_fragment>', '#include <dithering_fragment>\n  gl_FragColor.a *= cutA;')
   }
+  m.customProgramCacheKey = () => 'mask-cut'
   return m
 }
 
@@ -138,14 +155,18 @@ function updateMask(g: THREE.BufferGeometry, rig: Rig, shape: MaskShape) {
   // A mirrored selfie reverses the face mesh's triangle winding, which makes
   // the renderer treat the outer surface as a back face and light it inside-
   // out. Pick whichever winding faces outward this frame.
-  let facing = 0
-  for (let t = 0; t < FACE_TRIANGULATION.length; t += 3) {
-    const a = P[FACE_TRIANGULATION[t]]
-    e1.subVectors(P[FACE_TRIANGULATION[t + 1]], a)
-    e2.subVectors(P[FACE_TRIANGULATION[t + 2]], a)
-    facing += fn.crossVectors(e1, e2).dot(e1.subVectors(a, HEAD_CENTER))
+  const facing = (idx: ArrayLike<number>) => {
+    let sum = 0
+    for (let t = 0; t < idx.length; t += 3) {
+      const a = P[idx[t]]
+      e1.subVectors(P[idx[t + 1]], a)
+      e2.subVectors(P[idx[t + 2]], a)
+      sum += fn.crossVectors(e1, e2).dot(e1.subVectors(a, HEAD_CENTER))
+    }
+    return sum
   }
-  const winding = g.userData.windings[facing >= 0 ? 0 : 1]
+  const key = (facing(FACE_TRIANGULATION) >= 0 ? 'f' : 'F') + (facing(g.userData.ringIdx) >= 0 ? 'r' : 'R')
+  const winding = g.userData.windings.get(key)
   if (g.index !== winding) g.setIndex(winding)
   g.computeVertexNormals()
   // Belt and braces: keep normals pointing outward.
@@ -261,25 +282,6 @@ function spiderTextures() {
   return { map, normal: normalMapFrom(hc, 2.2) }
 }
 
-function pebbleNormal() {
-  const size = 512
-  const [hc, h] = canvas(size)
-  h.fillStyle = '#808080'
-  h.fillRect(0, 0, size, size)
-  for (let i = 0; i < 9000; i++) {
-    const x = Math.random() * size
-    const y = Math.random() * size
-    const r = 1.5 + Math.random() * 3
-    const g = h.createRadialGradient(x, y, 0, x, y, r)
-    g.addColorStop(0, 'rgba(255,255,255,0.5)')
-    g.addColorStop(1, 'rgba(255,255,255,0)')
-    h.fillStyle = g
-    h.fillRect(x - r, y - r, r * 2, r * 2)
-  }
-  const t = normalMapFrom(hc, 1.4)
-  t.repeat.set(3, 3)
-  return t
-}
 
 // ---- Spider ------------------------------------------------------------------
 
@@ -338,14 +340,22 @@ export function spiderMask(): Model {
 
 export function batCowl(): Model {
   const geo = maskGeometry()
-  const mat = withCut(new THREE.MeshPhysicalMaterial({ color: 0x1a1b20, roughness: 0.42, metalness: 0.15, clearcoat: 0.55, clearcoatRoughness: 0.35, normalMap: pebbleNormal(), normalScale: new THREE.Vector2(0.5, 0.5), side: THREE.DoubleSide }))
-  const earMat = new THREE.MeshPhysicalMaterial({ color: 0x1a1b20, roughness: 0.42, metalness: 0.15, clearcoat: 0.55, clearcoatRoughness: 0.35 })
-  const mesh = new THREE.Mesh(geo, mat)
+  // Moulded blue-black plastic: smooth and glossy, so the sculpting reads
+  // through sharp highlights rather than texture.
+  const plastic = () => new THREE.MeshPhysicalMaterial({ color: 0x10141c, roughness: 0.42, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.06, envMapIntensity: 0.55, side: THREE.DoubleSide })
+  const mesh = new THREE.Mesh(geo, withCut(plastic()))
   mesh.castShadow = true
   mesh.frustumCulled = false
-  // Ears: tall faceted spikes rising from the crown.
-  const earGeo = new THREE.ConeGeometry(0.17, 0.85, 4, 1)
-  earGeo.translate(0, 0.42, 0)
+  // Ears: tall, thin fins with slightly concave sides, bevelled edges.
+  const earShape = new THREE.Shape()
+  earShape.moveTo(-0.3, 0)
+  earShape.quadraticCurveTo(-0.1, 0.5, -0.03, 1.2)
+  earShape.lineTo(0.03, 1.2)
+  earShape.quadraticCurveTo(0.14, 0.55, 0.34, 0)
+  earShape.lineTo(-0.3, 0)
+  const earGeo = new THREE.ExtrudeGeometry(earShape, { depth: 0.07, bevelEnabled: true, bevelThickness: 0.035, bevelSize: 0.03, bevelSegments: 5, curveSegments: 24 })
+  earGeo.translate(0, -0.12, -0.035)
+  const earMat = plastic()
   const ears = [-1, 1].map((s) => {
     const m = new THREE.Mesh(earGeo, earMat)
     m.castShadow = true
@@ -355,19 +365,40 @@ export function batCowl(): Model {
   const root = new THREE.Group()
   root.add(mesh, ...ears)
   let cutY = -0.9
-  const lowerEdge = (x: number) => cutY - 0.55 * Math.max(0, Math.abs(x) - 0.22)
+  let jawY = -1.6
+  // Straight across under the nose, then down the cheek flaps to the jaw.
+  const lowerEdge = (x: number) => {
+    const ax = Math.abs(x)
+    const drop = THREE.MathUtils.smoothstep(ax, 0.5, 0.78)
+    return THREE.MathUtils.lerp(cutY, jawY, drop)
+  }
   const shape: MaskShape = {
-    // Sculpted: thicker over the brow ridge and down the nose for the
-    // cowl's heroic brow and moulded nose guard (all smooth functions, so
+    // Sculpted: an angled V brow ridge with a furrow at its centre,
+    // cheekbone ridges and a moulded nose guard (all smooth functions, so
     // the surface stays continuous).
-    lift: (p) =>
-      0.045 +
-      0.06 * Math.exp(-(((p.y - 0.12) / 0.16) ** 2)) * Math.max(0, 1 - Math.abs(p.x) / 0.9) +
-      0.03 * Math.exp(-((p.x / 0.18) ** 2)) * THREE.MathUtils.smoothstep(-p.y, -0.15, 0.05),
-    hair: 0.35,
+    lift: (p) => {
+      const ax = Math.abs(p.x)
+      const brow = 0.07 * Math.exp(-(((p.y - (0.16 + 0.32 * ax)) / 0.09) ** 2)) * THREE.MathUtils.smoothstep(ax, 0.04, 0.16) * (1 - THREE.MathUtils.smoothstep(ax, 0.7, 0.95))
+      const furrow = 0.035 * Math.exp(-((p.x / 0.05) ** 2)) * Math.exp(-(((p.y - 0.3) / 0.18) ** 2))
+      const cheek = 0.035 * Math.exp(-(((ax - 0.58) / 0.16) ** 2) - (((p.y + 0.48) / 0.2) ** 2))
+      const nose = 0.035 * Math.exp(-((p.x / 0.16) ** 2)) * THREE.MathUtils.smoothstep(-p.y, -0.15, 0.05)
+      return 0.05 + brow + furrow + cheek + nose
+    },
+    hair: 0.4,
     cut: (p, eyes) => {
       const below = (p.y - lowerEdge(p.x)) * 6
-      const hole = Math.min(...eyes.map((e) => Math.hypot((p.x - e.c.x) / e.rx, (p.y - e.c.y) / e.ry) - 1))
+      // Big almond openings, outer corners swept up.
+      const hole = Math.min(
+        ...eyes.map((e) => {
+          const side = Math.sign(e.c.x) || 1
+          const dx = p.x - e.c.x
+          const dy = p.y - e.c.y
+          const a = -side * 0.22
+          const u = (dx * Math.cos(a) - dy * Math.sin(a)) / (e.rx * 1.18)
+          const v = (dx * Math.sin(a) + dy * Math.cos(a)) / (e.ry * 1.25)
+          return Math.pow(Math.abs(u), 1.7) + Math.pow(Math.abs(v), 2.2) - 1
+        }),
+      )
       return Math.min(below, hole)
     },
   }
@@ -375,14 +406,16 @@ export function batCowl(): Model {
     root,
     update(rig) {
       cutY = rig.local(2).y - 0.04
+      jawY = rig.local(152).y + 0.45
       updateMask(geo, rig, shape)
       const top = rig.local(10)
       const tl = rig.local(21)
       const tr = rig.local(251)
       for (const e of ears) {
         const temple = e.userData.s < 0 ? (tl.x < tr.x ? tl : tr) : tl.x < tr.x ? tr : tl
-        e.position.copy(top).lerp(temple, 0.58).add(new THREE.Vector3(0, 0.62, -0.42))
-        e.rotation.set(-0.12, Math.PI / 4, e.userData.s * -0.12)
+        e.position.copy(top).lerp(temple, 0.66).add(new THREE.Vector3(e.userData.s * 0.08, 0.62, -0.36))
+        // Broad side to the front, as on the real cowl; a slight outward lean.
+        e.rotation.set(-0.12, e.userData.s * 0.12, e.userData.s * -0.12)
       }
     },
   }

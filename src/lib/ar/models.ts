@@ -53,7 +53,6 @@ function anchors(rig: Rig): Anchors {
 
 const physical = (o: THREE.MeshPhysicalMaterialParameters) => new THREE.MeshPhysicalMaterial(o)
 const gold = () => new THREE.MeshStandardMaterial({ color: 0xe0b04a, metalness: 1, roughness: 0.22 })
-const gloss = (color: THREE.ColorRepresentation, roughness = 0.3) => physical({ color, roughness, clearcoat: 1, clearcoatRoughness: 0.12 })
 const shadowed = <T extends THREE.Object3D>(o: T) => {
   o.traverse((c) => {
     if ((c as THREE.Mesh).isMesh) (c as THREE.Mesh).castShadow = true
@@ -166,12 +165,20 @@ function animalModel(spec: EarSpec, extras: (root: THREE.Group) => (a: Anchors, 
 }
 
 const catEar = earGeometry(
-  0.9,
-  // Rounded triangle: full at the base, softly domed tip.
-  (v) => 0.45 * Math.pow(1 - v, 0.72) * (1 - 0.15 * v),
-  (v) => 0.26 * Math.pow(1 - v, 0.75) + 0.02,
-  (v) => [0, -0.16 * v * v],
-  0.6,
+  0.92,
+  // A broad plush triangle: wide base, gently convex sides, a tip that
+  // leans slightly outward like a cosplay ear.
+  (v) => 0.5 * Math.pow(1 - v, 0.68),
+  (v) => 0.24 * Math.pow(1 - v, 0.7) + 0.025,
+  (v) => [0.08 * v * v, -0.14 * v * v],
+  0.62,
+)
+const foxEar = earGeometry(
+  1.15,
+  (v) => 0.46 * Math.pow(1 - v, 0.8),
+  (v) => 0.22 * Math.pow(1 - v, 0.75) + 0.02,
+  (v) => [0.06 * v * v, -0.18 * v * v],
+  0.62,
 )
 const bunnyEar = earGeometry(
   1.75,
@@ -205,8 +212,10 @@ function nose(mat: THREE.Material, sx: number, sy: number, sz: number, tri = 0.5
 }
 
 function kitty(): Model {
-  const look: FurLook = { root: '#d8c6b4', tip: '#fffaf3', skin: '#ffbccb', length: 0.12, density: 38, comb: [0, 0.6, 0], innerBare: 0.55 }
-  return animalModel({ look, geo: catEar, t: 0.6, lift: V(0.05, 0.42, -0.3), rot: new THREE.Euler(-0.18, -0.35, -0.38), scale: 0.95 }, (root) => {
+  // Plush black cosplay ears: long black fur spilling over the edges, a pink
+  // inner ear with long white tufts fanning out of it.
+  const look: FurLook = { root: '#0c0c10', tip: '#34343c', skin: '#f6b2c2', tuft: '#fffbfd', tuftLength: 1.5, length: 0.21, density: 34, comb: [0, 0.5, 0], innerBare: 0.72 }
+  return animalModel({ look, geo: catEar, t: 0.7, lift: V(0.08, 0.36, -0.3), rot: new THREE.Euler(-0.15, -0.3, -0.48), scale: 1.12 }, (root) => {
     const n = shadowed(nose(physical({ color: 0xf28aa6, roughness: 0.32, clearcoat: 0.7, sheen: 0.3 }), 0.085, 0.06, 0.055))
     root.add(n)
     // Whiskers: thin translucent-white tapered tubes fanning from the muzzle.
@@ -230,8 +239,18 @@ function kitty(): Model {
   })
 }
 
+function fox(): Model {
+  // Same plush style, fox colouring: russet fur, black tips, white tufts.
+  const look: FurLook = { root: '#a8441a', tip: '#f2964a', skin: '#f1b6a6', tuft: '#ffffff', tuftLength: 1.6, length: 0.17, density: 32, comb: [0, 0.6, 0], innerBare: 0.72, earTip: '#141010' }
+  return animalModel({ look, geo: foxEar, t: 0.66, lift: V(0.06, 0.36, -0.3), rot: new THREE.Euler(-0.15, -0.3, -0.42), scale: 0.95 }, (root) => {
+    const n = shadowed(nose(physical({ color: 0x1a1414, roughness: 0.3, clearcoat: 1 }), 0.08, 0.055, 0.05))
+    root.add(n)
+    return (a) => n.position.copy(a.noseTip).add(V(0, 0.03, 0.04))
+  })
+}
+
 function puppy(): Model {
-  const look: FurLook = { root: '#6a4126', tip: '#c08a5a', skin: '#5b3a2a', length: 0.13, density: 32, comb: [0, 0.9, 0.05], innerBare: 0.2 }
+  const look: FurLook = { root: '#5e3a22', tip: '#c9955e', skin: '#e2ab92', tuft: '#f7ead8', tuftLength: 1.2, length: 0.17, density: 30, comb: [0, 0.9, 0.05], innerBare: 0.7 }
   return animalModel({ look, geo: dogEar, t: 0.95, lift: V(0.18, 0.28, -0.42), rot: new THREE.Euler(0.15, -0.5, -(Math.PI - 0.5)), scale: 1 }, (root) => {
     const black = physical({ color: 0x141416, roughness: 0.28, clearcoat: 1, clearcoatRoughness: 0.15 })
     const n = shadowed(nose(black, 0.2, 0.13, 0.13, 0.35))
@@ -266,7 +285,7 @@ function puppy(): Model {
 }
 
 function bunny(): Model {
-  const look: FurLook = { root: '#e4dfe6', tip: '#ffffff', skin: '#ffc2d2', length: 0.09, density: 46, comb: [0, 0.5, 0], innerBare: 0.75 }
+  const look: FurLook = { root: '#e2dde6', tip: '#ffffff', skin: '#ffb9cb', tuft: '#ffffff', tuftLength: 1.4, length: 0.13, density: 38, comb: [0, 0.5, 0], innerBare: 0.74 }
   return animalModel({ look, geo: bunnyEar, t: 0.38, lift: V(0.02, 0.5, -0.25), rot: new THREE.Euler(-0.22, -0.2, -0.14), scale: 0.95 }, (root) => {
     const n = shadowed(nose(physical({ color: 0xff8fab, roughness: 0.35, clearcoat: 0.6 }), 0.055, 0.04, 0.035))
     root.add(n)
@@ -289,7 +308,7 @@ function bunny(): Model {
 }
 
 function bear(): Model {
-  const look: FurLook = { root: '#4a2c19', tip: '#8f6141', skin: '#d2a882', length: 0.13, density: 34, comb: [0, 0.3, 0.1], innerBare: 0.4 }
+  const look: FurLook = { root: '#3f2516', tip: '#9a6a45', skin: '#e0b18e', tuft: '#f5e4cc', tuftLength: 1.3, length: 0.17, density: 30, comb: [0, 0.3, 0.1], innerBare: 0.72 }
   return animalModel({ look, geo: bearEar, t: 0.78, lift: V(0.08, 0.36, -0.35), rot: new THREE.Euler(-0.1, -0.25, -0.32), scale: 1 }, (root) => {
     const n = shadowed(nose(physical({ color: 0x2a1a10, roughness: 0.3, clearcoat: 1 }), 0.12, 0.08, 0.08, 0.4))
     root.add(n)
@@ -299,11 +318,31 @@ function bear(): Model {
 
 // ---- Eyewear ------------------------------------------------------------------
 
-type LensStyle = 'aviator' | 'wayfarer' | 'round' | 'hearts'
+type LensStyle = 'square' | 'oval' | 'aviator' | 'round' | 'hearts'
 
 function lensShape(style: LensStyle): THREE.Shape {
   const s = new THREE.Shape()
   switch (style) {
+    case 'square':
+      // Flat-topped square with softly rounded lower corners.
+      s.moveTo(-0.28, 0.17)
+      s.lineTo(0.27, 0.185)
+      s.quadraticCurveTo(0.32, 0.19, 0.315, 0.13)
+      s.lineTo(0.29, -0.11)
+      s.quadraticCurveTo(0.27, -0.2, 0.17, -0.205)
+      s.lineTo(-0.15, -0.2)
+      s.quadraticCurveTo(-0.26, -0.195, -0.275, -0.1)
+      s.lineTo(-0.3, 0.12)
+      s.quadraticCurveTo(-0.305, 0.17, -0.28, 0.17)
+      break
+    case 'oval':
+      // Slim and long, swept up a little toward the outer edge.
+      s.moveTo(-0.29, 0.0)
+      s.bezierCurveTo(-0.29, 0.1, -0.1, 0.115, 0.12, 0.11)
+      s.bezierCurveTo(0.29, 0.105, 0.33, 0.07, 0.33, 0.02)
+      s.bezierCurveTo(0.33, -0.07, 0.17, -0.105, 0.0, -0.105)
+      s.bezierCurveTo(-0.2, -0.105, -0.29, -0.07, -0.29, 0.0)
+      break
     case 'aviator':
       // Teardrop: flat-ish top, deep drop toward the outer-lower corner.
       s.moveTo(-0.27, 0.13)
@@ -311,15 +350,6 @@ function lensShape(style: LensStyle): THREE.Shape {
       s.bezierCurveTo(0.36, 0.0, 0.3, -0.24, 0.08, -0.27)
       s.bezierCurveTo(-0.14, -0.29, -0.3, -0.12, -0.3, 0.02)
       s.bezierCurveTo(-0.3, 0.08, -0.29, 0.11, -0.27, 0.13)
-      break
-    case 'wayfarer':
-      s.moveTo(-0.29, 0.15)
-      s.lineTo(0.31, 0.17)
-      s.quadraticCurveTo(0.33, 0.17, 0.32, 0.12)
-      s.quadraticCurveTo(0.29, -0.15, 0.12, -0.19)
-      s.lineTo(-0.16, -0.18)
-      s.quadraticCurveTo(-0.29, -0.14, -0.31, 0.1)
-      s.quadraticCurveTo(-0.31, 0.15, -0.29, 0.15)
       break
     case 'round':
       s.absarc(0, 0, 0.25, 0, Math.PI * 2, false)
@@ -335,29 +365,87 @@ function lensShape(style: LensStyle): THREE.Shape {
   return s
 }
 
+/** The lens outline pushed outward by a thickness that can vary around it
+ *  (a real acetate rim is thicker along the top), as an even offset rather
+ *  than a scale, so the rim width is what it says everywhere. */
+function offsetOutline(pts: THREE.Vector2[], th: (p: THREE.Vector2) => number) {
+  const n = pts.length
+  let area = 0
+  for (let i = 0; i < n; i++) area += pts[i].x * pts[(i + 1) % n].y - pts[(i + 1) % n].x * pts[i].y
+  const sign = area > 0 ? 1 : -1
+  return pts.map((p, i) => {
+    const a = pts[(i - 1 + n) % n]
+    const b = pts[(i + 1) % n]
+    const t = new THREE.Vector2(b.x - a.x, b.y - a.y).normalize()
+    const out = new THREE.Vector2(t.y * sign, -t.x * sign)
+    return p.clone().addScaledVector(out, th(p))
+  })
+}
+
 /** Lens surfaces bow slightly outward, like real ground lenses. */
 function curvedLens(shape: THREE.Shape) {
   const g = new THREE.ShapeGeometry(shape, 32)
   const p = g.getAttribute('position') as THREE.BufferAttribute
-  for (let i = 0; i < p.count; i++) p.setZ(i, -0.35 * (p.getX(i) ** 2 + p.getY(i) ** 2))
+  for (let i = 0; i < p.count; i++) p.setZ(i, 0.012 - 0.3 * (p.getX(i) ** 2 + p.getY(i) ** 2))
   g.computeVertexNormals()
   return g
 }
 
+/** A thick acetate temple: a side profile (deep at the hinge, tapering,
+ *  hooked down behind the ear), extruded to its thickness. */
+function acetateTemple(depthFront: number, thickness: number) {
+  const s = new THREE.Shape()
+  const d = depthFront
+  s.moveTo(0, d / 2)
+  s.bezierCurveTo(0.4, d / 2, 0.7, d * 0.32, 0.98, d * 0.26)
+  s.quadraticCurveTo(1.1, d * 0.2, 1.18, -0.07)
+  s.quadraticCurveTo(1.19, -0.11, 1.15, -0.1)
+  s.quadraticCurveTo(1.1, -0.02, 0.97, -d * 0.22)
+  s.bezierCurveTo(0.7, -d * 0.28, 0.4, -d / 2, 0, -d / 2)
+  s.lineTo(0, d / 2)
+  const g = new THREE.ExtrudeGeometry(s, { depth: thickness, bevelEnabled: true, bevelThickness: thickness * 0.3, bevelSize: thickness * 0.3, bevelSegments: 3, curveSegments: 24 })
+  // Profile x runs back along −z; the extrusion becomes the temple's width.
+  g.rotateY(Math.PI / 2)
+  g.translate(-thickness / 2, 0, 0)
+  return g
+}
+
 function eyewear(style: LensStyle): Model {
-  const shape = lensShape(style)
-  const pts = shape.getPoints(96)
+  const base = lensShape(style)
+  // Gentle Monster-style squares run large.
+  const k = style === 'square' ? 1.1 : 1
+  const pts = base.getPoints(120).map((p) => p.multiplyScalar(k))
+  const shape = new THREE.Shape(pts)
   const wire = style === 'aviator' || style === 'round'
+  const acetate = (color: number) => physical({ color, roughness: 0.16, clearcoat: 1, clearcoatRoughness: 0.05, envMapIntensity: 0.9 })
   const frameMat =
-    style === 'aviator' ? gold() : style === 'round' ? new THREE.MeshStandardMaterial({ color: 0xc9a25b, metalness: 1, roughness: 0.18 }) : style === 'hearts' ? gloss(0xff3d85, 0.22) : gloss(0x101012, 0.18)
+    style === 'aviator' ? gold() : style === 'round' ? new THREE.MeshStandardMaterial({ color: 0xc9a25b, metalness: 1, roughness: 0.18 }) : style === 'hearts' ? acetate(0xff3d85) : acetate(0x0b0b0d)
+  const silver = new THREE.MeshStandardMaterial({ color: 0xe8e8ec, metalness: 1, roughness: 0.15 })
   const lensMat =
     style === 'aviator'
       ? physical({ color: 0x3c4a52, roughness: 0.04, metalness: 0.2, transparent: true, opacity: 0.86, clearcoat: 1, envMapIntensity: 1.8, side: THREE.DoubleSide, depthWrite: false, vertexColors: true })
-      : style === 'wayfarer'
-        ? physical({ color: 0x1c2a22, roughness: 0.03, transparent: true, opacity: 0.9, clearcoat: 1, envMapIntensity: 1.6, side: THREE.DoubleSide, depthWrite: false })
-        : style === 'round'
-          ? physical({ color: 0xffffff, roughness: 0.02, transparent: true, opacity: 0.14, clearcoat: 1, envMapIntensity: 2.2, side: THREE.DoubleSide, depthWrite: false })
-          : physical({ color: 0xff5c9e, roughness: 0.04, transparent: true, opacity: 0.55, clearcoat: 1, envMapIntensity: 1.6, side: THREE.DoubleSide, depthWrite: false })
+      : style === 'round'
+        ? physical({ color: 0xffffff, roughness: 0.02, transparent: true, opacity: 0.14, clearcoat: 1, envMapIntensity: 2.2, side: THREE.DoubleSide, depthWrite: false })
+        : style === 'hearts'
+          ? physical({ color: 0xff5c9e, roughness: 0.04, transparent: true, opacity: 0.55, clearcoat: 1, envMapIntensity: 1.6, side: THREE.DoubleSide, depthWrite: false })
+          : // Smoky grey, as on the reference shades.
+            physical({ color: 0x2a2c2f, roughness: 0.03, transparent: true, opacity: 0.93, clearcoat: 1, envMapIntensity: 1.3, side: THREE.DoubleSide, depthWrite: false })
+
+  // Rim thickness around each lens (lens-local, outer edge = +x).
+  const rim = (p: THREE.Vector2) => {
+    switch (style) {
+      case 'square':
+        return 0.06 + 0.035 * THREE.MathUtils.smoothstep(p.y, 0.0, 0.18) + 0.014 * THREE.MathUtils.smoothstep(p.x, 0.15, 0.32)
+      case 'oval':
+        return 0.04 + 0.035 * THREE.MathUtils.smoothstep(p.x, 0.12, 0.33)
+      default:
+        return 0.055
+    }
+  }
+  const frontDepth = style === 'square' ? 0.065 : 0.05
+  // An even offset suits convex rims; the heart's inward cusp would fold, so
+  // its rim is a scaled outline instead.
+  const outerPts = style === 'hearts' ? pts.map((p) => new THREE.Vector2(p.x * 1.22, p.y * 1.3)) : offsetOutline(pts, rim)
 
   const lensFor = (side: -1 | 1) => {
     const grp = new THREE.Group()
@@ -376,14 +464,24 @@ function eyewear(style: LensStyle): Model {
     lens.renderOrder = 5
     grp.add(lens)
     if (wire) {
-      const curve = new THREE.CatmullRomCurve3(pts.map((p) => V(p.x, p.y, -0.35 * (p.x * p.x + p.y * p.y))), true)
+      const curve = new THREE.CatmullRomCurve3(pts.map((p) => V(p.x, p.y, 0.012 - 0.3 * (p.x * p.x + p.y * p.y))), true)
       grp.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 160, style === 'round' ? 0.013 : 0.016, 12, true), frameMat))
     } else {
-      const outer = new THREE.Shape(pts.map((p) => new THREE.Vector2(p.x * 1.22, p.y * 1.3 + (style === 'wayfarer' ? 0.02 : 0))))
+      const outer = new THREE.Shape(outerPts)
       outer.holes.push(new THREE.Path(pts.slice().reverse()))
-      const g = new THREE.ExtrudeGeometry(outer, { depth: 0.05, bevelEnabled: true, bevelThickness: 0.018, bevelSize: 0.014, bevelSegments: 4, curveSegments: 48 })
-      g.translate(0, 0, -0.04)
+      const g = new THREE.ExtrudeGeometry(outer, { depth: frontDepth, bevelEnabled: true, bevelThickness: 0.02, bevelSize: 0.016, bevelSegments: 5, curveSegments: 64 })
+      g.translate(0, 0, -frontDepth + 0.01)
       grp.add(new THREE.Mesh(g, frameMat))
+      if (style === 'square') {
+        // The signature pair of silver pins at the outer top corner.
+        const top = outerPts.reduce((a, b) => (b.x > 0.18 && b.y > a.y ? b : a), outerPts[0])
+        for (const dy of [0, -0.045]) {
+          const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.011, 0.011, 0.01, 16), silver)
+          pin.rotation.x = Math.PI / 2
+          pin.position.set(top.x - 0.045, top.y - 0.05 + dy, 0.033)
+          grp.add(pin)
+        }
+      }
     }
     grp.scale.x = side
     return grp
@@ -394,19 +492,48 @@ function eyewear(style: LensStyle): Model {
   const R = lensFor(1)
   glasses.add(L, R)
   const halfW = Math.max(...pts.map((p) => Math.abs(p.x)))
-  const cx = 0.52
+  const outerW = Math.max(...outerPts.map((p) => p.x))
+  const innerW = Math.max(...outerPts.map((p) => -p.x))
+  const cx = style === 'oval' ? 0.49 : style === 'square' ? 0.55 : 0.52
   L.position.x = -cx
   R.position.x = cx
   const armR = wire ? 0.014 : 0.026
-  // Bridge(s) and temple arms.
-  const bridgeY = style === 'round' ? 0.05 : 0.1
-  const inner = cx - halfW * (wire ? 1 : 1.18)
-  glasses.add(new THREE.Mesh(taperTube([V(-inner, bridgeY, 0), V(0, bridgeY + 0.06, 0.03), V(inner, bridgeY, 0)], armR, armR, 10, 24), frameMat))
-  if (style === 'aviator') glasses.add(new THREE.Mesh(taperTube([V(-inner - 0.03, 0.17, 0), V(0, 0.19, 0.01), V(inner + 0.03, 0.17, 0)], 0.012, 0.012, 10, 24), frameMat))
-  const ear = cx + halfW * (wire ? 1 : 1.22)
+  if (wire) {
+    const bridgeY = style === 'round' ? 0.05 : 0.1
+    const inner = cx - halfW
+    glasses.add(new THREE.Mesh(taperTube([V(-inner, bridgeY, 0), V(0, bridgeY + 0.06, 0.03), V(inner, bridgeY, 0)], armR, armR, 10, 24), frameMat))
+    if (style === 'aviator') glasses.add(new THREE.Mesh(taperTube([V(-inner - 0.03, 0.17, 0), V(0, 0.19, 0.01), V(inner + 0.03, 0.17, 0)], 0.012, 0.012, 10, 24), frameMat))
+  } else {
+    // Keyhole bridge: a moulded bar joining the two rims, arched underneath.
+    const gap = cx - innerW + 0.03
+    const b = new THREE.Shape()
+    const by = style === 'oval' ? 0.03 : 0.1
+    b.moveTo(-gap, by + 0.05)
+    b.lineTo(gap, by + 0.05)
+    b.lineTo(gap, by - 0.035)
+    b.quadraticCurveTo(0, by + 0.0, -gap, by - 0.035)
+    b.lineTo(-gap, by + 0.05)
+    const bg = new THREE.ExtrudeGeometry(b, { depth: frontDepth, bevelEnabled: true, bevelThickness: 0.02, bevelSize: 0.012, bevelSegments: 4 })
+    bg.translate(0, 0, -frontDepth + 0.01)
+    glasses.add(new THREE.Mesh(bg, frameMat))
+  }
+  const hinge = cx + (wire ? halfW : outerW - 0.02)
   for (const side of [-1, 1]) {
-    const arm = taperTube([V(side * ear, 0.1, -0.02), V(side * (ear + 0.06), 0.1, -0.25), V(side * 1.02, 0.11, -0.95), V(side * 1.0, -0.02, -1.3)], armR, armR * 0.8, 10, 48)
-    glasses.add(new THREE.Mesh(arm, frameMat))
+    if (wire || style === 'hearts') {
+      const arm = taperTube([V(side * hinge, 0.1, -0.02), V(side * (hinge + 0.06), 0.1, -0.25), V(side * 1.02, 0.11, -0.95), V(side * 1.0, -0.02, -1.3)], armR, armR * 0.8, 10, 48)
+      glasses.add(new THREE.Mesh(arm, frameMat))
+    } else {
+      const temple = new THREE.Mesh(acetateTemple(style === 'square' ? 0.085 : 0.055, style === 'square' ? 0.035 : 0.028), frameMat)
+      temple.position.set(side * hinge, style === 'square' ? 0.1 : 0.03, -0.03)
+      temple.rotation.y = side * -0.06
+      glasses.add(temple)
+      if (style === 'square') {
+        // Small silver logo plate on the outside of each temple.
+        const plate = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.035, 0.07), silver)
+        plate.position.set(side * (hinge + 0.03), 0.1, -0.16)
+        glasses.add(plate)
+      }
+    }
   }
   shadowed(glasses)
   // Lenses don't cast hard shadows (they're glass) — just the frame does.
@@ -419,7 +546,7 @@ function eyewear(style: LensStyle): Model {
     root,
     update(rig) {
       const a = anchors(rig)
-      const y = (a.eyeL.y + a.eyeR.y) / 2 + 0.01
+      const y = (a.eyeL.y + a.eyeR.y) / 2 + (style === 'oval' ? 0.0 : 0.01)
       glasses.position.set(0, y, a.bridge.z + 0.1)
       glasses.rotation.set(-0.08, 0, 0)
       const s = 1.12 * Math.max(0.9, Math.min(1.15, (a.eyeR.x - a.eyeL.x) / 1.0))
@@ -566,11 +693,13 @@ function stars(): Model {
 export function buildModel(id: string): Model {
   switch (id) {
     case 'kitty': return kitty()
+    case 'fox': return fox()
     case 'puppy': return puppy()
     case 'bunny': return bunny()
     case 'bear': return bear()
     case 'aviator': return eyewear('aviator')
-    case 'wayfarer': return eyewear('wayfarer')
+    case 'square': return eyewear('square')
+    case 'oval': return eyewear('oval')
     case 'round': return eyewear('round')
     case 'hearts': return eyewear('hearts')
     case 'crown': return crown()

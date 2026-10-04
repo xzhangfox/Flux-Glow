@@ -65,7 +65,6 @@ interface State {
   env: THREE.WebGLRenderTarget | null
   envTex: THREE.CanvasTexture
   envCanvas: HTMLCanvasElement
-  envTiny?: HTMLCanvasElement
   envFrame: number
   sample: CanvasRenderingContext2D
   models: Map<string, Model>
@@ -297,31 +296,45 @@ function updateEnvironment(st: State, frame: HTMLCanvasElement, force: boolean) 
   if (!force && st.envFrame++ % 45 !== 0 && st.env) return
   const ctx = st.envCanvas.getContext('2d')!
   // Mirror the frame side-by-side so the wrap-around seam isn't a hard edge.
-  // Only the room's colours should reflect, never a recognisable image
-  // (a glossy cowl mirroring the wearer's own face reads as see-through):
-  // shrink the frame to a few pixels, then let smoothing spread it back out.
-  st.envTiny ??= Object.assign(document.createElement('canvas'), { width: 16, height: 8 })
-  const tiny = st.envTiny.getContext('2d')!
-  tiny.drawImage(frame, 0, 0, 8, 8)
-  tiny.save()
-  tiny.translate(16, 0)
-  tiny.scale(-1, 1)
-  tiny.drawImage(frame, 0, 0, 8, 8)
-  tiny.restore()
-  ctx.imageSmoothingEnabled = true
-  ctx.imageSmoothingQuality = 'high'
-  ctx.drawImage(st.envTiny, 0, 0, 256, 128)
-  // Lift the room a little and add a soft overhead "softbox", so metal and
-  // gloss always catch a highlight even in a dim photo.
+  // Only the room's colours should reflect, never an image of it — even a
+  // tiny copy of the frame keeps its dark/bright layout, which on a glossy
+  // dark surface reads as see-through. So the environment is a smooth
+  // vertical gradient of the frame's top, middle and bottom colours, plus a
+  // soft overhead softbox and two dim side fills for highlights.
+  const s2 = st.sample
+  s2.drawImage(frame, 0, 0, 64, 64)
+  const px = s2.getImageData(0, 0, 64, 64).data
+  const band = (y0: number, y1: number) => {
+    let r = 0, g = 0, b = 0, n = 0
+    for (let y = y0; y < y1; y++)
+      for (let x = 0; x < 64; x++) {
+        const k = (y * 64 + x) * 4
+        r += px[k]
+        g += px[k + 1]
+        b += px[k + 2]
+        n++
+      }
+    return `rgb(${Math.round(r / n)},${Math.round(g / n)},${Math.round(b / n)})`
+  }
+  const grad = ctx.createLinearGradient(0, 0, 0, 128)
+  grad.addColorStop(0, band(0, 16))
+  grad.addColorStop(0.5, band(24, 40))
+  grad.addColorStop(1, band(48, 64))
+  ctx.globalCompositeOperation = 'source-over'
+  ctx.fillStyle = grad
+  ctx.fillRect(0, 0, 256, 128)
   ctx.save()
   ctx.globalCompositeOperation = 'screen'
-  ctx.fillStyle = 'rgba(255,255,255,0.14)'
-  ctx.fillRect(0, 0, 256, 128)
-  const g = ctx.createRadialGradient(128, 22, 0, 128, 22, 70)
-  g.addColorStop(0, 'rgba(255,250,240,0.95)')
-  g.addColorStop(1, 'rgba(255,250,240,0)')
-  ctx.fillStyle = g
-  ctx.fillRect(0, 0, 256, 128)
+  const soft = (x: number, y: number, r: number, a: number) => {
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r)
+    g.addColorStop(0, `rgba(255,250,240,${a})`)
+    g.addColorStop(1, 'rgba(255,250,240,0)')
+    ctx.fillStyle = g
+    ctx.fillRect(0, 0, 256, 128)
+  }
+  soft(128, 26, 34, 0.75)
+  soft(40, 60, 26, 0.25)
+  soft(216, 60, 26, 0.25)
   ctx.restore()
   st.envTex.needsUpdate = true
   st.env?.dispose()

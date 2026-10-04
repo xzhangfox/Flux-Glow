@@ -42,6 +42,7 @@ const BABY = { eyes: 0.3, eyeHeight: 0.2, noseTip: 0.25, chin: -0.3, face: 0.15,
 export const EFFECTS: EffectDef[] = [
   { id: 'none', label: 'None' },
   { id: 'kitty', label: 'Kitty', boost: BABY },
+  { id: 'fox', label: 'Fox', boost: BABY },
   { id: 'puppy', label: 'Puppy', boost: BABY },
   { id: 'bunny', label: 'Bunny', boost: BABY },
   { id: 'bear', label: 'Bear', boost: BABY },
@@ -49,7 +50,8 @@ export const EFFECTS: EffectDef[] = [
   { id: 'spider', label: 'Spider' },
   { id: 'bat', label: 'Bat' },
   { id: 'aviator', label: 'Aviator' },
-  { id: 'wayfarer', label: 'Shades' },
+  { id: 'square', label: 'Square' },
+  { id: 'oval', label: 'Oval' },
   { id: 'round', label: 'Round' },
   { id: 'hearts', label: 'Hearts' },
   { id: 'crown', label: 'Crown' },
@@ -230,18 +232,7 @@ function sparkle(ctx: CanvasRenderingContext2D, c: Pt, r: number, color: string)
 }
 
 
-/** Eye black around the cowl's eye openings — painted on the skin. */
-function eyeBlack(ctx: CanvasRenderingContext2D, f: Face) {
-  for (const [eye, loop] of [[f.eyeL, f.eyeLoopL], [f.eyeR, f.eyeLoopR]] as const) {
-    const w = Math.max(...loop.map((i) => dist(f.P[i], eye)))
-    frame(ctx, eye, f.roll, w, () => {
-      ctx.scale(1.25, 0.95)
-      radial(ctx, { x: 0, y: -0.1 }, 1.25, 'rgba(10,8,10,0.85)', 'rgba(10,8,10,0)')
-    })
-  }
-}
-
-const THREE_D = new Set(['kitty', 'puppy', 'bunny', 'bear', 'spider', 'bat', 'aviator', 'wayfarer', 'round', 'hearts', 'crown', 'devil', 'angel', 'stars'])
+const THREE_D = new Set(['kitty', 'fox', 'puppy', 'bunny', 'bear', 'spider', 'bat', 'aviator', 'square', 'oval', 'round', 'hearts', 'crown', 'devil', 'angel', 'stars'])
 
 /** Draw `effectId` onto `canvas` (in place). `P` are landmark pixel
  *  positions; z is MediaPipe's relative depth in pixels (negative = nearer). */
@@ -251,10 +242,9 @@ export function drawEffect(canvas: HTMLCanvasElement, P: P3[], effectId: string,
   const f = faceGeometry(P)
   ctx.save()
   // Paint under the 3D layer.
-  if (effectId === 'kitty' || effectId === 'bear') blush(ctx, f)
+  if (effectId === 'kitty' || effectId === 'bear' || effectId === 'fox') blush(ctx, f)
   if (effectId === 'bunny') blush(ctx, f, 'rgba(255,130,160,0.3)')
   if (effectId === 'doll') doll(ctx, f)
-  if (effectId === 'bat') eyeBlack(ctx, f)
   ctx.restore()
 
   if (THREE_D.has(effectId)) {

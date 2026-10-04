@@ -24,25 +24,37 @@ export interface FurLook {
   comb: [number, number, number]
   /** Fraction of the inner ear left bare (0 = fully furred). */
   innerBare: number
+  /** Colour of the long tufts fanning out of the inner ear. */
+  tuft: string
+  /** Inner tuft length relative to `length`. */
+  tuftLength: number
+  /** Optional colour for the top of the ear (fox-style dark tips). */
+  earTip?: string
 }
 
 const VERT = /* glsl */ `
   attribute float aInner;
   uniform float uShell;
   uniform float uLen;
+  uniform float uTuftLen;
   uniform vec3 uComb;
   varying vec2 vUv;
   varying vec3 vN;
+  varying vec3 vT;
   varying float vInner;
   void main() {
-    float len = uLen * mix(1.0, 0.5, aInner);
+    float len = uLen * mix(1.0, uTuftLen, aInner);
     // Shells rise off the skin and lean along the comb, so the outer layers
     // of each hair drift toward the ear tip — visible as strands even when
-    // the ear faces the camera.
-    vec3 p = position + normal * len * uShell + uComb * len * uShell * 1.6;
+    // the ear faces the camera. Inner-ear tufts fan up and out of the cup,
+    // like the long pale tufts on a plush cat ear.
+    vec3 fan = normalize(vec3(position.x * 1.8, 0.9, 0.45));
+    vec3 comb = mix(uComb * 1.6, fan * 1.9, aInner);
+    vec3 p = position + normal * len * uShell + comb * len * uShell;
     vUv = uv;
     vInner = aInner;
     vN = normalize(mat3(modelMatrix) * normal);
+    vT = normalize(mat3(modelMatrix) * mix(vec3(0.0, 1.0, 0.0), fan, aInner));
     gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(p, 1.0);
   }
 `
@@ -55,12 +67,16 @@ const FRAG = /* glsl */ `
   uniform vec3 uRoot;
   uniform vec3 uTip;
   uniform vec3 uSkin;
+  uniform vec3 uTuft;
+  uniform vec3 uEarTip;
+  uniform float uHasEarTip;
   uniform vec3 uLightDir;
   uniform vec3 uLightColor;
   uniform vec3 uSky;
   uniform vec3 uGround;
   varying vec2 vUv;
   varying vec3 vN;
+  varying vec3 vT;
   varying float vInner;
 
   void main() {
@@ -73,13 +89,20 @@ const FRAG = /* glsl */ `
     // hair edges resolve smooth and wispy rather than stair-stepped.
     float alpha = 1.0;
     if (t > 0.0) {
-      float c = vInner > 0.5 ? max(cut, uInnerBare) : cut;
+      // Inner tufts: sparse, and thinning out toward the top of the ear, so
+      // pink skin shows between them and they read as tufts, not a sheet.
+      float bare = uInnerBare + (1.0 - uInnerBare) * smoothstep(0.2, 0.75, vUv.y);
+      float c = vInner > 0.5 ? max(cut, bare) : cut;
       alpha = smoothstep(c - 0.06, c + 0.06, h) * (1.0 - 0.35 * t);
+      // Tufts are soft and wispy: lower coverage, so they layer into fluff.
+      alpha *= mix(1.0, 0.55, vInner);
       if (alpha < 0.02) discard;
     }
     vec3 hair = mix(uRoot, uTip, clamp(h * 0.75 + t * 0.45, 0.0, 1.0)) * mix(0.88, 1.08, fur.g);
-    // Inner ear: bare skin at the base with pale tufts over it.
-    vec3 albedo = mix(hair, mix(uSkin, uTip, smoothstep(0.55, 0.95, h) * 0.6), vInner * (t <= 0.0 ? 1.0 : 0.35));
+    hair = mix(hair, uEarTip, uHasEarTip * smoothstep(0.7, 0.86, vUv.y));
+    // Inner ear: pink skin at the base, long pale tufts above it.
+    vec3 tuft = mix(uSkin, uTuft, smoothstep(0.0, 0.35, t)) * mix(0.9, 1.05, fur.g);
+    vec3 albedo = mix(hair, t <= 0.0 ? uSkin : tuft, vInner);
 
     vec3 N = normalize(vN) * (gl_FrontFacing ? 1.0 : -1.0);
     float ndl = dot(N, uLightDir);
@@ -91,6 +114,11 @@ const FRAG = /* glsl */ `
     // Soft sheen on hair tips catching the light, and a grazing-angle rim.
     float rim = pow(1.0 - abs(N.z), 2.0);
     col += uLightColor * albedo * (rim * 0.4 + 0.12 * h * t);
+    // Strand highlight (Kajiya-Kay): hair reflects in a band across its
+    // length — what gives dark fur its glossy, combed sheen.
+    vec3 H = normalize(uLightDir + vec3(0.0, 0.0, 1.0));
+    float th = dot(normalize(vT), H);
+    col += uLightColor * pow(sqrt(max(0.0, 1.0 - th * th)), 60.0) * 0.35 * t * (0.6 + 0.4 * fur.g);
     // Thin ear skin is translucent: light passing through tints it warm pink.
     col += uSkin * uLightColor * vInner * 0.22 * (1.0 - t);
     gl_FragColor = vec4(col, alpha);
@@ -163,7 +191,7 @@ export function earGeometry(height: number, width: (v: number) => number, depth:
       const z = c >= 0 ? -cup * d * c : d * c
       pos.push(w * s + bx, v * height, z + bz)
       uv.push(i / segU, v)
-      inner.push(c > 0 ? THREE.MathUtils.smoothstep(c, 0.15, 0.55) * (1 - THREE.MathUtils.smoothstep(v, 0.82, 0.97)) : 0)
+      inner.push(c > 0 ? THREE.MathUtils.smoothstep(c, 0.62, 0.86) * (1 - THREE.MathUtils.smoothstep(v, 0.62, 0.82)) : 0)
     }
   }
   const idx: number[] = []
@@ -229,6 +257,10 @@ export function furMesh(geo: THREE.BufferGeometry, look: FurLook, shells: number
         uRoot: { value: new THREE.Color(look.root) },
         uTip: { value: new THREE.Color(look.tip) },
         uSkin: { value: new THREE.Color(look.skin) },
+        uTuft: { value: new THREE.Color(look.tuft) },
+        uTuftLen: { value: look.tuftLength },
+        uEarTip: { value: new THREE.Color(look.earTip ?? '#000000') },
+        uHasEarTip: { value: look.earTip ? 1 : 0 },
       },
     })
     const m = new THREE.Mesh(geo, mat)
