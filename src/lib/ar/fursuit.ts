@@ -43,27 +43,37 @@ function ellipsoid(p: V3, cx: number, cy: number, cz: number, rx: number, ry: nu
   const x = p.x - cx
   const y = p.y - cy
   const z = p.z - cz
-  const k0 = Math.hypot(x / rx, y / ry, z / rz)
-  const k1 = Math.hypot(x / (rx * rx), y / (ry * ry), z / (rz * rz))
+  const k0 = Math.sqrt((x / rx) ** 2 + (y / ry) ** 2 + (z / rz) ** 2)
+  const k1 = Math.sqrt((x / (rx * rx)) ** 2 + (y / (ry * ry)) ** 2 + (z / (rz * rz)) ** 2)
   return k1 > 0 ? (k0 * (k0 - 1)) / k1 : -Math.min(rx, ry, rz)
 }
 
 /** A cone with rounded ends between a and b, squashed vertically by
  *  `flat` (< 1 = flatter on top and underneath). */
 function cone(p: V3, a: V3, b: V3, ra: number, rb: number, flat: number) {
-  const ab = b.clone().sub(a)
-  const t = THREE.MathUtils.clamp(p.clone().sub(a).dot(ab) / ab.lengthSq(), 0, 1)
-  const c = a.clone().addScaledVector(ab, t)
-  const dx = p.x - c.x
-  const dy = (p.y - c.y) / flat
-  const dz = p.z - c.z
-  return Math.hypot(dx, dy, dz) - THREE.MathUtils.lerp(ra, rb, t)
+  // (Allocation-free: this runs millions of times while the head is built.)
+  const abx = b.x - a.x
+  const aby = b.y - a.y
+  const abz = b.z - a.z
+  const t = Math.min(1, Math.max(0, ((p.x - a.x) * abx + (p.y - a.y) * aby + (p.z - a.z) * abz) / (abx * abx + aby * aby + abz * abz)))
+  const dx = p.x - (a.x + abx * t)
+  const dy = (p.y - (a.y + aby * t)) / flat
+  const dz = p.z - (a.z + abz * t)
+  return Math.sqrt(dx * dx + dy * dy + dz * dz) - (ra + (rb - ra) * t)
 }
 
-const MUZZLE_A = V(0, -0.34, 0.35)
-const MUZZLE_B = V(0, -0.56, 1.12)
-const EYE_X = 0.76
-const EYE_Y = -0.1
+// The snout runs from between the eyes, forward and gently down, to a
+// broad nose; the lower jaw sits under it with a mouth line between them.
+const MUZZLE_A = V(0, -0.5, 0.3)
+const MUZZLE_B = V(0, -0.56, 2.1)
+const BRIDGE_A = V(0, 0.02, 0.55)
+const BRIDGE_B = V(0, -0.36, 2.02)
+const JAW_A = V(0, -1.0, 0.3)
+const JAW_B = V(0, -0.98, 1.8)
+const EYE_X = 0.92
+const EYE_Y = -0.06
+const EYE_W = 1.24
+const EYE_H = 1.06
 
 /** A box with rounded edges: half-size (bx, by, bz) to the start of the
  *  rounding, radius r on top. */
@@ -71,11 +81,15 @@ function roundBox(p: V3, cx: number, cy: number, cz: number, bx: number, by: num
   const qx = Math.abs(p.x - cx) - bx
   const qy = Math.abs(p.y - cy) - by
   const qz = Math.abs(p.z - cz) - bz
-  const out = Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0))
+  const ox = Math.max(qx, 0)
+  const oy = Math.max(qy, 0)
+  const oz = Math.max(qz, 0)
+  const out = Math.sqrt(ox * ox + oy * oy + oz * oz)
   return out + Math.min(Math.max(qx, qy, qz), 0) - r
 }
 
-function sdf(p: V3) {
+/** The head without its snout and jaw: the face the eyes sit on. */
+function sdfFace(p: V3) {
   // A head, not a ball: a rounded-box skull (flatter crown and sides,
   // rounded back), cut in front by a face plane that leans back a little
   // toward the forehead.
@@ -87,11 +101,23 @@ function sdf(p: V3) {
   // A broad lower face trimmed by two side planes that run straight from
   // the cheekbones to a small chin.
   const lower = smax(ellipsoid(p, 0, -0.7, -0.45, 1.85, 1.25, 1.2), (Math.abs(p.x) - (0.42 + (p.y + 1.75) * 1.0)) * 0.7, 0.3)
-  d = smin(d, lower, 0.45)
-  // A short muzzle block with a little chin pad under it.
-  d = smin(d, cone(p, MUZZLE_A, MUZZLE_B, 0.48, 0.27, 0.78), 0.32)
-  d = smin(d, ellipsoid(p, 0, -0.93, 0.7, 0.3, 0.17, 0.26), 0.16)
-  return d
+  return smin(d, lower, 0.45)
+}
+
+function sdf(p: V3) {
+  // The lower jaw grows out of the lower face…
+  const face = smin(sdfFace(p), cone(p, JAW_A, JAW_B, 0.58, 0.22, 0.66), 0.45)
+  // …and the snout out of the whole middle of the face: broad at its root
+  // (the cheeks flow into it), tapering along a flat-topped bridge to the
+  // muzzle pad under the nose.
+  // A narrow bridge on top carries the line from the forehead, between the
+  // eyes, straight to the nose; the broad muzzle sits under it.
+  const muzzle = smin(cone(p, MUZZLE_A, MUZZLE_B, 0.86, 0.3, 0.82), ellipsoid(p, 0, -0.6, 1.86, 0.42, 0.28, 0.38), 0.22)
+  const snout = smin(muzzle, cone(p, BRIDGE_A, BRIDGE_B, 0.32, 0.2, 1), 0.3)
+  // Broadly blended at the root, crisply toward the front — where the snout
+  // meets the jaw, that crisp seam is the mouth line.
+  const k = 0.55 - 0.47 * ss(p.z, 0.9, 1.65)
+  return smin(face, snout, k)
 }
 
 function normalAt(p: V3) {
@@ -117,7 +143,7 @@ function occlusion(p: V3, n: V3) {
 
 // Rays start inside the head, behind the face, so the snout (the part
 // furthest out) still gets plenty of the sphere's directions.
-const ORIGIN = V(0, -0.25, -0.55)
+const ORIGIN = V(0, -0.3, -0.2)
 
 /** Canvas pixel ↔ ray direction (front at the canvas centre, seam behind). */
 function dirAt(u: number, v: number) {
@@ -132,16 +158,27 @@ function uvOf(s: V3): [number, number] {
   return [phi / (Math.PI * 2), th / Math.PI]
 }
 
+/** The outermost surface point along a ray from ORIGIN: sphere-traced in
+ *  from outside, then bisected to precision. */
 function surfaceAlong(d: V3) {
-  let lo = 0
-  let hi = 0.08
-  while (hi < 6 && sdf(ORIGIN.clone().addScaledVector(d, hi)) < 0) {
-    lo = hi
-    hi += 0.08
+  const q = V(0, 0, 0)
+  const at = (t: number) => sdf(q.copy(ORIGIN).addScaledVector(d, t))
+  let hi = 5.5
+  let lo = hi
+  for (let i = 0; i < 80; i++) {
+    const dist = at(lo)
+    if (dist < 0) break
+    if (dist < 2e-4) return q.clone()
+    hi = lo
+    lo -= Math.max(dist * 0.9, 2e-3)
+    if (lo <= 0) {
+      lo = 0
+      break
+    }
   }
-  for (let i = 0; i < 14; i++) {
+  for (let i = 0; i < 12; i++) {
     const m = (lo + hi) / 2
-    if (sdf(ORIGIN.clone().addScaledVector(d, m)) < 0) lo = m
+    if (at(m) < 0) lo = m
     else hi = m
   }
   return ORIGIN.clone().addScaledVector(d, (lo + hi) / 2)
@@ -433,9 +470,9 @@ function furCoat(head: THREE.Mesh, fur: (p: V3) => THREE.Color, nose: V3, lock: 
     const p = a.clone().addScaledVector(b.clone().sub(a), u).addScaledVector(c.clone().sub(a), v)
     const ax = Math.abs(p.x)
     // Keep the eyes, nose and mouth clear.
-    if (p.z > 0 && ((ax - EYE_X) / 0.74) ** 2 + ((p.y - EYE_Y) / 0.62) ** 2 < 1) continue
-    if (p.distanceTo(nose) < 0.24) continue
-    if (p.z > 0.3 && ax < 0.3 && p.y < -0.58 && p.y > -0.95) continue
+    if (p.z > 0 && ((ax - EYE_X) / (EYE_W * 0.54)) ** 2 + ((p.y - EYE_Y) / (EYE_H * 0.54)) ** 2 < 1 && p.z < 1) continue
+    if (p.distanceTo(nose) < 0.36) continue
+    if (p.distanceTo(V(0, nose.y - 0.27, nose.z - 0.08)) < 0.2) continue
     const n = normalAt(p)
     // Grooming direction.
     const front = ss(p.z, -0.7, 0.2)
@@ -510,12 +547,13 @@ function fursuit(spec: SuitSpec): Model {
   const root = new THREE.Group()
 
   // ---- Head mesh from the field ----
-  const g = new THREE.SphereGeometry(1, 220, 160)
+  const g = new THREE.SphereGeometry(1, 240, 180)
   g.rotateY(-Math.PI / 2)
   const pos = g.getAttribute('position') as THREE.BufferAttribute
   const uv = g.getAttribute('uv') as THREE.BufferAttribute
   const col = new THREE.BufferAttribute(new Float32Array(pos.count * 3), 3)
   g.setAttribute('color', col)
+  const nrm = g.getAttribute('normal') as THREE.BufferAttribute
   const d = V(0, 0, 0)
   for (let i = 0; i < pos.count; i++) {
     d.fromBufferAttribute(pos, i).normalize()
@@ -524,10 +562,13 @@ function fursuit(spec: SuitSpec): Model {
     const [u, w] = uvOf(d)
     // The seam sits at the back, out of sight; keep the UV's own u there.
     uv.setXY(i, Math.abs(u - uv.getX(i)) > 0.5 ? uv.getX(i) : u, 1 - w)
-    const c = spec.fur(p).multiplyScalar(occlusion(p, normalAt(p)) / FUR_GREY)
+    // Normals from the sculpt itself, not the mesh's facets: smooth shading
+    // and a smooth outline however the samples fall.
+    const n = normalAt(p)
+    nrm.setXYZ(i, n.x, n.y, n.z)
+    const c = spec.fur(p).multiplyScalar(occlusion(p, n) / FUR_GREY)
     col.setXYZ(i, c.r, c.g, c.b)
   }
-  g.computeVertexNormals()
   const furTex = furTexture(1024, 512, 120000)
   const furMat = new THREE.MeshPhysicalMaterial({ vertexColors: true, map: furTex, bumpMap: furTex, bumpScale: 0.2, roughness: 1, sheen: 0.3, sheenRoughness: 0.8, sheenColor: new THREE.Color(0x6a5a4a) })
   const head = new THREE.Mesh(g, furMat)
@@ -543,9 +584,21 @@ function fursuit(spec: SuitSpec): Model {
     return ray.intersectObject(head)[0]?.point ?? V(x, y, 1)
   }
 
+  // The face under the snout, found by marching in from the front.
+  const onFace = (x: number, y: number) => {
+    const q = V(x, y, 3)
+    for (let k = 0; k < 200; k++) {
+      const dist = sdfFace(q)
+      if (dist < 1e-3) break
+      q.z -= Math.max(dist, 2e-3)
+    }
+    return q
+  }
+
   // A decal conformed to the head: a grid laid over (x, y) on the face,
-  // each vertex dropped onto the surface just in front of it.
-  const decal = (cx: number, cy: number, w: number, h: number, rot: number, mirror: boolean, mat: THREE.Material, lift: number) => {
+  // each vertex dropped onto the surface just in front of it (`face`: the
+  // face under the snout, so eyes sit beside the bridge, not on it).
+  const decal = (cx: number, cy: number, w: number, h: number, rot: number, mirror: boolean, mat: THREE.Material, lift: number, face = false) => {
     const N = 20
     const pts: number[] = []
     const uvs: number[] = []
@@ -556,7 +609,7 @@ function fursuit(spec: SuitSpec): Model {
         const v = j / N - 0.5
         const x = cx + Math.cos(rot) * u * w - Math.sin(rot) * v * h
         const y = cy + Math.sin(rot) * u * w + Math.cos(rot) * v * h
-        const q = hitFront(x, y)
+        const q = face ? onFace(x, y) : hitFront(x, y)
         pts.push(q.x, q.y, q.z + lift)
         uvs.push(mirror ? 0.5 - u : u + 0.5, v + 0.5)
         if (i < N && j < N) {
@@ -576,7 +629,7 @@ function fursuit(spec: SuitSpec): Model {
 
   // ---- Eyes: big glossy anime eyes, outer corners lifted ----
   const eyeMat = new THREE.MeshPhysicalMaterial({ map: eyeTexture(spec.iris), transparent: true, alphaTest: 0.3, roughness: 0.15, clearcoat: 1, clearcoatRoughness: 0.03, side: THREE.DoubleSide })
-  for (const side of [-1, 1]) decal(side * EYE_X, EYE_Y, 1.42, 1.2, side * 0.1, side < 0, eyeMat, 0.07)
+  for (const side of [-1, 1]) decal(side * EYE_X, EYE_Y, EYE_W, EYE_H, side * 0.1, side < 0, eyeMat, 0.07, true)
 
   // ---- Button nose and a tiny smile ----
   const nose = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 24), new THREE.MeshPhysicalMaterial({ color: 0x141011, roughness: 0.32, clearcoat: 1, clearcoatRoughness: 0.12 }))
@@ -585,11 +638,14 @@ function fursuit(spec: SuitSpec): Model {
     for (let i = 0; i < np.count; i++) np.setX(i, np.getX(i) * (1 + 0.3 * np.getY(i)))
     nose.geometry.computeVertexNormals()
   }
-  nose.scale.set(0.15, 0.1, 0.1)
-  nose.position.copy(hitFront(0, -0.5)).add(V(0, 0, 0.02))
+  // A big, broad nose capping the snout.
+  nose.scale.set(0.36, 0.23, 0.22)
+  const tip = hitFront(0, -0.34)
+  nose.position.copy(tip).add(V(0, 0.02, -0.07))
+  nose.rotation.x = 0.3
   nose.castShadow = true
   root.add(nose)
-  decal(0, -0.72, 0.46, 0.29, 0, false, new THREE.MeshStandardMaterial({ map: mouthTexture(), transparent: true, alphaTest: 0.25, roughness: 0.7, side: THREE.DoubleSide }), 0.05)
+  decal(0, tip.y - 0.27, 0.4, 0.25, 0, false, new THREE.MeshStandardMaterial({ map: mouthTexture(), transparent: true, alphaTest: 0.25, roughness: 0.7, side: THREE.DoubleSide }), 0.05)
 
   // ---- Ears: huge, long-furred, set high on the head ----
   const earCard = plushCard(spec.ear)
@@ -674,7 +730,8 @@ const near = (p: V3, x: number, y: number, rx: number, ry: number) => Math.exp(-
 function whiteFace(p: V3) {
   const ax = Math.abs(p.x)
   const front = ss(p.z, -1.0, -0.3)
-  const cheeks = ss(0.12 - p.y, -0.06, 0.06) * ss(ax, 0.22, 0.4)
+  // (Not on the snout: its top and sides stay coloured down to the mouth.)
+  const cheeks = ss(0.12 - p.y, -0.06, 0.06) * ss(ax, 0.22, 0.4) * (1 - ss(p.z, 0.8, 1.05))
   const lower = ss(-0.6 - p.y, -0.05, 0.05)
   let w = Math.max(cheeks, lower) * front
   w = Math.max(w, ss(-p.y, 1.55, 1.8))
