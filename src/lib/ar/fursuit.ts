@@ -3,9 +3,9 @@ import { plushCard, smooth, type PlushSpec } from './plush'
 import type { Model, Rig } from './scene'
 
 // Full fursuit heads that replace the wearer's head entirely: an oversized
-// plush head shell (bigger than head + hair, so nothing of the real head
-// shows), painted fur, glossy resin anime eyes, a short muzzle, big plush
-// ears, and — what makes it read as faux fur rather than a smooth ball —
+// plush head (bigger than head + hair, so nothing of the real head shows)
+// sculpted into a canine face — snout, nose bridge, eye sockets, brow,
+// cheeks — with painted fur, glossy resin anime eyes, big plush ears, and — what makes it read as faux fur rather than a smooth ball —
 // fluffy tufts all round the silhouette, re-aimed at the camera every frame
 // so the outline is always soft, with long cheek ruffs at the sides.
 
@@ -16,7 +16,6 @@ interface SuitSpec {
   fur: (s: Dir) => THREE.Color
   ear: PlushSpec
   iris: [string, string, string]
-  muzzle: string
   outline: string
 }
 
@@ -30,9 +29,38 @@ const RZ = 1.7
 const ry = (y: number) => (y > 0 ? 2.25 : 2.15)
 const cheekBulge = (y: number) => 1 + 0.1 * Math.exp(-(((y + 0.35) / 0.35) ** 2))
 
+// The face is a flatter plane than the back of the head, so the snout
+// stands out from it.
+const rz = (z: number) => (z > 0 ? RZ * 0.86 : RZ)
 function shellPoint(s: Dir) {
-  return new THREE.Vector3(s.x * RX * cheekBulge(s.y), s.y * ry(s.y), s.z * RZ).add(CENTER)
+  return new THREE.Vector3(s.x * RX * cheekBulge(s.y), s.y * ry(s.y), s.z * rz(s.z)).add(CENTER)
 }
+
+// Sculpting on top of the base volume, in rig units on the face (x across,
+// y up, origin between the wearer's eyes): a canine face rather than a
+// ball — a snout that rises from the stop between the eyes to a blunt nose
+// and curls back under into the mouth and chin, eye sockets under a brow
+// ridge, puffed cheeks. Faded out toward the sides of the head.
+const EYE_X = 0.56
+const EYE_Y = 0.14
+const gauss = (dx: number, dy: number, rx: number, ry: number) => Math.exp(-((dx / rx) ** 2) - (dy / ry) ** 2)
+function sculpt(x: number, y: number) {
+  const ax = Math.abs(x)
+  // Snout: length along the face, rising from the stop to the nose tip,
+  // then curling back under into the chin. Narrow on the bridge, broad at
+  // the mouth, flat-topped across.
+  const len = 1.25 * ss(-y, -0.05, 0.62) * (1 - ss(-y, 0.76, 1.3))
+  const halfW = 0.26 + 0.26 * ss(-y, 0.0, 0.85)
+  const snout = len * Math.exp(-Math.pow(ax / halfW, 3.2))
+  // Stop: a slight dip at the root of the nose, between the eyes.
+  const stop = -0.06 * gauss(x, y - 0.0, 0.16, 0.14)
+  const sockets = -0.07 * gauss(ax - EYE_X, y - EYE_Y, 0.36, 0.3)
+  const brow = 0.09 * gauss(ax - 0.42, y - 0.5, 0.3, 0.1)
+  const cheeks = 0.22 * gauss(ax - 0.8, y + 0.6, 0.34, 0.34)
+  const forehead = 0.06 * gauss(x, y - 0.75, 0.6, 0.35)
+  return snout + stop + sockets + brow + cheeks + forehead
+}
+
 function shellNormal(s: Dir) {
   return new THREE.Vector3(s.x / RX, s.y / ry(s.y), s.z / RZ).normalize()
 }
@@ -268,13 +296,6 @@ function mouthTexture(color: string) {
   return tex
 }
 
-/** Places `o` on the head surface at direction `s`, facing out. */
-function onSurface(o: THREE.Object3D, s: Dir, out: number) {
-  const n = shellNormal(s)
-  o.position.copy(shellPoint(s)).addScaledVector(n, out)
-  o.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n)
-}
-
 function curvedPlane(w: number, h: number, bulge: number) {
   const g = new THREE.PlaneGeometry(w, h, 16, 16)
   const p = g.getAttribute('position') as THREE.BufferAttribute
@@ -288,48 +309,83 @@ function fursuit(spec: SuitSpec): Model {
   const root = new THREE.Group()
 
   // Shell.
-  const g = new THREE.SphereGeometry(1, 96, 64)
+  const g = new THREE.SphereGeometry(1, 180, 120)
   g.rotateY(-Math.PI / 2)
   const pos = g.getAttribute('position') as THREE.BufferAttribute
   const uv = g.getAttribute('uv') as THREE.BufferAttribute
+  const col = new THREE.BufferAttribute(new Float32Array(pos.count * 3), 3)
+  g.setAttribute('color', col)
   const v = new THREE.Vector3()
   for (let i = 0; i < pos.count; i++) {
     v.fromBufferAttribute(pos, i).normalize()
     const q = shellPoint(v)
+    const front = ss(v.z, 0.25, 0.65)
+    q.z += sculpt(q.x, q.y) * front
     pos.setXYZ(i, q.x, q.y, q.z)
+    // Baked occlusion: darker where the surface sits below its
+    // surroundings — beside and under the snout, in the eye sockets.
+    let around = 0
+    for (let k = 0; k < 8; k++) {
+      const a = (k / 8) * Math.PI * 2
+      around += sculpt(q.x + Math.cos(a) * 0.3, q.y + Math.sin(a) * 0.3)
+    }
+    const occ = Math.max(0, around / 8 - sculpt(q.x, q.y)) * front
+    const shade = 1 - Math.min(0.45, occ * 1.6)
+    col.setXYZ(i, shade, shade, shade)
     // The seam sits at the back, out of sight; keep the UV's own u there.
     const [u, w] = uvOf(v)
     uv.setXY(i, Math.abs(u - uv.getX(i)) > 0.5 ? uv.getX(i) : u, 1 - w)
   }
   g.computeVertexNormals()
   const furTex = paintFur(1024, 512, spec.fur, 110000)
-  const furMat = new THREE.MeshPhysicalMaterial({ map: furTex, bumpMap: furTex, bumpScale: 0.35, roughness: 0.95, sheen: 0.8, sheenRoughness: 0.6, sheenColor: new THREE.Color(0x8a7a6a) })
+  const furMat = new THREE.MeshPhysicalMaterial({ vertexColors: true, map: furTex, bumpMap: furTex, bumpScale: 0.35, roughness: 0.95, sheen: 0.8, sheenRoughness: 0.6, sheenColor: new THREE.Color(0x8a7a6a) })
   const shell = new THREE.Mesh(g, furMat)
   shell.castShadow = true
+  shell.receiveShadow = true
   root.add(shell)
 
-  // Muzzle: a soft white bump with the nose at its tip.
-  const muzzleS = new THREE.Vector3(0, -0.36, 0.93).normalize()
-  const muzzleTex = paintFur(512, 256, () => C(spec.muzzle), 14000)
-  const muzzle = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 32), new THREE.MeshPhysicalMaterial({ map: muzzleTex, bumpMap: muzzleTex, bumpScale: 0.3, roughness: 0.95, sheen: 0.8, sheenRoughness: 0.6, sheenColor: new THREE.Color(0x8a8a8a) }))
-  muzzle.geometry.rotateY(-Math.PI / 2)
-  muzzle.scale.set(0.62, 0.44, 0.42)
-  muzzle.position.copy(shellPoint(muzzleS)).add(new THREE.Vector3(0, -0.05, -0.18))
-  const nose = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 24), new THREE.MeshPhysicalMaterial({ color: 0x141012, roughness: 0.28, clearcoat: 1, clearcoatRoughness: 0.1 }))
-  nose.scale.set(0.13, 0.09, 0.08)
-  nose.position.copy(muzzle.position).add(new THREE.Vector3(0, 0.16, 0.4))
-  const mouth = new THREE.Mesh(curvedPlane(0.44, 0.22, 0.03), new THREE.MeshStandardMaterial({ map: mouthTexture('#1a1212'), transparent: true, alphaTest: 0.2, roughness: 0.6 }))
-  mouth.position.copy(muzzle.position).add(new THREE.Vector3(0, -0.06, 0.4))
-  mouth.rotation.x = -0.35
-  root.add(muzzle, nose, mouth)
+  // Features sit on the sculpted surface: found by casting rays at it.
+  shell.updateMatrixWorld()
+  const ray = new THREE.Raycaster()
+  const surface = (x: number, y: number) => {
+    ray.set(new THREE.Vector3(x, y, 10), new THREE.Vector3(0, 0, -1))
+    const hit = ray.intersectObject(shell)[0]
+    const n = hit?.face?.normal.clone() ?? new THREE.Vector3(0, 0, 1)
+    if (n.z < 0) n.negate()
+    return { p: hit?.point ?? new THREE.Vector3(x, y, 1), n }
+  }
+  const place = (o: THREE.Object3D, x: number, y: number, out: number, tiltTo = 0) => {
+    const { p, n } = surface(x, y)
+    n.lerp(new THREE.Vector3(0, 0, 1), tiltTo).normalize()
+    o.position.copy(p).addScaledVector(n, out)
+    o.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n)
+  }
 
-  // Eyes.
+  // Nose: a broad, glossy leather nose capping the snout.
+  const noseGeo = new THREE.SphereGeometry(1, 40, 28)
+  {
+    const np = noseGeo.getAttribute('position') as THREE.BufferAttribute
+    for (let i = 0; i < np.count; i++) {
+      const y = np.getY(i)
+      // Wider on top, tapering underneath into the philtrum.
+      np.setX(i, np.getX(i) * (1 + 0.25 * y))
+    }
+    noseGeo.computeVertexNormals()
+  }
+  const nose = new THREE.Mesh(noseGeo, new THREE.MeshPhysicalMaterial({ color: 0x131012, roughness: 0.35, clearcoat: 1, clearcoatRoughness: 0.15 }))
+  nose.scale.set(0.2, 0.13, 0.12)
+  place(nose, 0, -0.5, 0.02, 0.4)
+  const mouth = new THREE.Mesh(curvedPlane(0.62, 0.31, 0.04), new THREE.MeshStandardMaterial({ map: mouthTexture('#1a1212'), transparent: true, alphaTest: 0.2, roughness: 0.6 }))
+  place(mouth, 0, -0.78, 0.015)
+  root.add(nose, mouth)
+
+  // Eyes: glossy domed resin, set into the sockets under the brow.
   const eyeTex = eyeTexture(spec.iris, spec.outline)
   const eyeMat = new THREE.MeshPhysicalMaterial({ map: eyeTex, transparent: true, alphaTest: 0.3, roughness: 0.18, clearcoat: 1, clearcoatRoughness: 0.04 })
   for (const side of [-1, 1]) {
-    const e = new THREE.Mesh(curvedPlane(1.0, 0.82, 0.07), eyeMat)
-    onSurface(e, new THREE.Vector3(side * 0.37, 0.04, 0.93).normalize(), 0.015)
-    e.rotateZ(side * -0.12)
+    const e = new THREE.Mesh(curvedPlane(0.92, 0.75, 0.08), eyeMat)
+    place(e, side * EYE_X, EYE_Y - 0.02, 0.08, 0.45)
+    e.rotateZ(side * -0.18)
     if (side < 0) e.scale.x = -1
     root.add(e)
   }
@@ -450,7 +506,6 @@ export function foxHead(): Model {
       strand: [16, 40],
     },
     iris: ['#3d2010', '#b45a1e', '#f3c060'],
-    muzzle: '#fbf5ec',
     outline: '#120c0c',
   })
 }
@@ -466,7 +521,6 @@ export function huskyHead(): Model {
       strand: [16, 40],
     },
     iris: ['#0d2a4a', '#2d7fc4', '#a6e3ff'],
-    muzzle: '#f6f6f4',
     outline: '#0c0e12',
   })
 }

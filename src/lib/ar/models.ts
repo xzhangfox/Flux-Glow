@@ -714,6 +714,13 @@ function eyewear(style: LensStyle): Model {
 
 // ---- Props --------------------------------------------------------------------
 
+/** The top of the head, centred over the skull: landmark 10 is the top of
+ *  the forehead, at the front; the crown of the head (with hair) is higher
+ *  and well behind it. */
+function crownOf(a: Anchors) {
+  return V(a.top.x, a.top.y + 0.62, -1.15)
+}
+
 function crown(): Model {
   const g = new THREE.CylinderGeometry(0.6, 0.64, 0.36, 160, 8, true)
   const p = g.getAttribute('position') as THREE.BufferAttribute
@@ -748,8 +755,8 @@ function crown(): Model {
     root,
     update(rig) {
       const a = anchors(rig)
-      grp.position.copy(a.top).add(V(0, 0.82, -0.62))
-      grp.rotation.set(-0.32, 0, 0)
+      grp.position.copy(crownOf(a)).add(V(0, 0.25, 0))
+      grp.rotation.set(-0.12, 0, 0)
     },
   }
 }
@@ -804,8 +811,8 @@ function angel(): Model {
     update(rig, t) {
       const a = anchors(rig)
       const bob = Math.sin(t * 2.2) * 0.05
-      grp.position.copy(a.top).add(V(0, 1.3 + bob, -0.55))
-      grp.rotation.set(Math.PI / 2 - 0.42, 0, 0)
+      grp.position.copy(crownOf(a)).add(V(0, 0.75 + bob, 0))
+      grp.rotation.set(Math.PI / 2 - 0.12, 0, 0)
       glow.position.copy(grp.position)
     },
   }
@@ -835,8 +842,8 @@ function stars(): Model {
     root,
     update(rig, t) {
       const a = anchors(rig)
-      orbit.position.copy(a.top).add(V(0, 0.75, -1.1))
-      orbit.rotation.set(0.18, 0, 0)
+      orbit.position.copy(crownOf(a)).add(V(0, 0.2, 0))
+      orbit.rotation.set(0.1, 0, 0)
       list.forEach((m, i) => {
         const ang = t * 0.9 + (i / list.length) * Math.PI * 2
         m.position.set(Math.sin(ang) * 1.5, Math.sin(ang * 2 + i) * 0.06, Math.cos(ang) * 1.5)

@@ -272,7 +272,7 @@ export function drawEffect(canvas: HTMLCanvasElement, P: P3[], effectId: string,
   if (effectId === 'angel') {
     for (let i = 0; i < 4; i++) {
       const a = t * 0.8 + i * 1.6
-      const p = add(add(f.top, f.up, (1.45 + 0.25 * Math.sin(a)) * f.E), f.right, Math.cos(a) * 0.9 * f.E)
+      const p = add(add(f.top, f.up, (1.3 + 0.25 * Math.sin(a)) * f.E), f.right, Math.cos(a) * 0.9 * f.E)
       sparkle(ctx, p, f.E * (0.05 + 0.03 * Math.sin(a * 2)), 'rgba(255,240,200,0.95)')
     }
   }
