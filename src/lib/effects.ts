@@ -9,7 +9,11 @@ let ar: AR | null = null
 let arLoading: Promise<AR> | null = null
 /** Loads the 3D engine (once). Resolves when 3D effects can render. */
 export function preloadAR(): Promise<AR> {
-  arLoading ??= import('./ar/index').then((m) => (ar = m))
+  // The hair segmenter (for hoods and cowls) loads with it.
+  arLoading ??= import('./ar/index').then(async (m) => {
+    await m.preloadHair()
+    return (ar = m)
+  })
   return arLoading
 }
 

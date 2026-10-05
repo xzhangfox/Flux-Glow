@@ -6,7 +6,7 @@ Part of the [Flux](https://xzhangfox.github.io) family of apps.
 
 ## Features
 
-- **Camera**: front/back switch, real optical zoom where the browser exposes it (tap the zoom pill to cycle stops, hold it for a fine-control ruler), 3:4 / 1:1 / full-screen framing, a rule-of-thirds grid, and a 3s/10s self-timer. The viewfinder is exactly what gets saved — no hidden crop.
+- **Camera**: front/back switch, real optical zoom where the browser exposes it, and zooming out below 1x to the camera's full field of view (tap the zoom pill to cycle stops, hold or swipe it for a fine-control ruler), 3:4 / 1:1 / full-screen framing, a rule-of-thirds grid, and a 3s/10s self-timer. The viewfinder is exactly what gets saved — no hidden crop.
 - **Beauty**: skin smoothing, whitening, blemish removal, wrinkle softening, smile-fold softening, and 3D fill light.
 - **Shape**: jaw, temple, cheekbone, eyes, brow height, nose width, nose bridge, and mouth (size, upper lip, lower lip, corners), each bidirectional.
 - **Filter**: ten graded looks (Natural, Peach, Cream, Fresh, Warm, Cool, Soft Glow, Film, Vivid, Mono), previewed as thumbnails on your own face, with an intensity slider.
@@ -23,6 +23,7 @@ Everything runs client-side; nothing is uploaded.
 - **Fill light**: per-vertex surface normals from the 3D face mesh, lit in a WebGL shader (Lambert + Blinn-Phong, with a warm terminator tint approximating subsurface scattering).
 - **Reshape**: a GPU triangulated-mesh warp over MediaPipe's canonical face topology (`faceTriangulation.ts`, `meshWarp.ts`); nose width is a separate isolated radial warp.
 - **Filters**: a grading model (exposure curve, white balance, split-toning, fade, contrast, saturation) blended by intensity — not CSS `filter()` presets.
+- **Head masks** (Spider, Bat): the face part is the live face mesh, smoothed and lifted off the skin; the rest of the hood is traced onto a skull-jaw-neck shape. Hair, and ears or head showing past the mask's edge, are found with MediaPipe's hair and person segmenters (also self-hosted) and painted over with the surrounding background.
 - **Live performance**: the live preview fuses the CPU tone effects into a single pass and swaps the guided filter for a cheaper blur; the full-quality pass runs once a photo is captured.
 
 ## Development

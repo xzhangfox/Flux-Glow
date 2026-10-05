@@ -2,7 +2,8 @@ import * as THREE from 'three'
 import { FaceLandmarker } from '@mediapipe/tasks-vision'
 import { FACE_TRIANGULATION } from '../faceTriangulation'
 import { connectorsToLoop } from '../landmarks'
-import { compositeAR } from './composite'
+import { compositeAR, readLayer } from './composite'
+import { hideHead } from './hair'
 
 // The 3D layer behind every modeled AR effect (fur ears, masks, glasses,
 // crown…). One three.js renderer, reused for every frame and photo.
@@ -53,6 +54,13 @@ export interface Model {
   /** Replaces the whole head (fursuit heads): the real head no longer
    *  occludes or catches shadows, and the composite box grows. */
   fullHead?: boolean
+  /** Covers the head (hoods, cowls): hair the photo shows outside the
+   *  model, and the head itself just outside its edge (ears…) above this
+   *  line (rig y, below the eyes), is painted over with the background. */
+  hidesHead?: number
+  /** How far below the eyes the model reaches (rig units), when that's
+   *  further than a head (a hood's neck). */
+  reach?: number
 }
 
 interface State {
@@ -415,6 +423,32 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
   const x0 = Math.max(0, Math.floor(c.x - r))
   const y0 = Math.max(0, Math.floor(-c.y - r * (model.fullHead ? 1.25 : 1.15)))
   const x1 = Math.min(W, Math.ceil(c.x + r))
-  const y1 = Math.min(H, Math.ceil(-c.y + r))
-  compositeAR(frame, st.renderer.domElement, RS, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, live)
+  const y1 = Math.min(H, Math.ceil(Math.max(-c.y + r, -new THREE.Vector3(0, -(model.reach ?? 0), -0.6).applyMatrix4(rig.matrix).y + rig.E * 0.3)))
+  const box = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+  const layer = readLayer(st.renderer.domElement, RS, box)
+  if (model.hidesHead !== undefined) {
+    const line = model.hidesHead
+    const px = (x: number, y: number) => {
+      const w = new THREE.Vector3(x, y, -1).applyMatrix4(rig.matrix)
+      return [w.x, -w.y] as const
+    }
+    const poly = (ctx: CanvasRenderingContext2D, pts: (readonly [number, number])[]) => {
+      ctx.beginPath()
+      pts.forEach(([x, y], k) => (k ? ctx.lineTo(x, y) : ctx.moveTo(x, y)))
+      ctx.fill()
+    }
+    hideHead(
+      frame,
+      box,
+      layer,
+      {
+        // The face itself stays (the mask's openings show it).
+        keep: (ctx) => poly(ctx, OVAL.map((i) => [P2[i].x, P2[i].y] as const)),
+        zone: (ctx) => poly(ctx, [px(-12, line), px(12, line), px(12, line + 24), px(-12, line + 24)]),
+        margin: rig.E * 0.5,
+      },
+      live,
+    )
+  }
+  compositeAR(frame, layer, box, live)
 }

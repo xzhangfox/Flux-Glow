@@ -88,7 +88,12 @@ function measure(photo: Uint8ClampedArray, w: number, h: number): Stats {
     }
   const avg = (s: number[], n: number, fallback: number): [number, number, number] =>
     n ? [s[0] / n / 255, s[1] / n / 255, s[2] / n / 255] : [fallback, fallback, fallback]
-  const black = avg(b, nb, 0.03)
+  // The shadows' level, but only a hint of their hue: the darkest pixels
+  // are often hair or a dark doorway, and their colour cast on a black
+  // mask reads as that mask being made of them.
+  const dark = avg(b, nb, 0.03)
+  const dl = 0.3 * dark[0] + 0.59 * dark[1] + 0.11 * dark[2]
+  const black = dark.map((v) => dl + (v - dl) * 0.35) as [number, number, number]
   const white = avg(wsum, nw, 0.97)
   return {
     // Don't let a very flat photo crush the layer: keep a sensible range.
@@ -98,22 +103,30 @@ function measure(photo: Uint8ClampedArray, w: number, h: number): Stats {
   }
 }
 
-/** Blends `layer` (same pixel size as `frame`) into `frame` within `box`. */
-export function compositeAR(frame: HTMLCanvasElement, layer: CanvasImageSource, layerScale: number, box: Box, live = false) {
-  const fctx = frame.getContext('2d', { willReadFrequently: true })!
+/** The 3D layer (rendered at `layerScale` of the frame's size) over `box`,
+ *  at the frame's own scale — read back from the GPU once a frame, for
+ *  everything that needs its pixels. */
+export function readLayer(layer: CanvasImageSource, layerScale: number, box: Box): HTMLCanvasElement {
   const { x, y, w, h } = box
-  if (w < 2 || h < 2) return
   scratch ??= document.createElement('canvas')
   if (scratch.width !== w || scratch.height !== h) {
-    scratch.width = w
-    scratch.height = h
+    scratch.width = Math.max(1, w)
+    scratch.height = Math.max(1, h)
   }
   const sctx = scratch.getContext('2d', { willReadFrequently: true })!
   sctx.clearRect(0, 0, w, h)
   sctx.imageSmoothingEnabled = true
   sctx.imageSmoothingQuality = 'high'
   sctx.drawImage(layer, x * layerScale, y * layerScale, w * layerScale, h * layerScale, 0, 0, w, h)
-  const L = sctx.getImageData(0, 0, w, h).data
+  return scratch
+}
+
+/** Blends `layer` (from readLayer) into `frame` within `box`. */
+export function compositeAR(frame: HTMLCanvasElement, layer: HTMLCanvasElement, box: Box, live = false) {
+  const fctx = frame.getContext('2d', { willReadFrequently: true })!
+  const { x, y, w, h } = box
+  if (w < 2 || h < 2) return
+  const L = layer.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, w, h).data
   const img = fctx.getImageData(x, y, w, h)
   const P = img.data
   if (!live || !cached || ++cached.frames > 12) cached = { stats: measure(P, w, h), frames: 0 }
