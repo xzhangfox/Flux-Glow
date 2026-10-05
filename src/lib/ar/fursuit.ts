@@ -64,12 +64,12 @@ function cone(p: V3, a: V3, b: V3, ra: number, rb: number, flat: number) {
 
 // The snout runs from between the eyes, forward and gently down, to a
 // broad nose; the lower jaw sits under it with a mouth line between them.
-const MUZZLE_A = V(0, -0.5, 0.3)
-const MUZZLE_B = V(0, -0.56, 2.1)
-const BRIDGE_A = V(0, 0.02, 0.55)
-const BRIDGE_B = V(0, -0.36, 2.02)
-const JAW_A = V(0, -1.0, 0.3)
-const JAW_B = V(0, -0.98, 1.8)
+const MUZZLE_A = V(0, -0.56, 0.45)
+const MUZZLE_B = V(0, -0.62, 1.62)
+const BRIDGE_A = V(0, -0.3, 0.65)
+const BRIDGE_B = V(0, -0.42, 1.6)
+const JAW_A = V(0, -1.0, 0.4)
+const JAW_B = V(0, -1.02, 1.45)
 const EYE_X = 0.92
 const EYE_Y = -0.06
 const EYE_W = 1.24
@@ -104,20 +104,88 @@ function sdfFace(p: V3) {
   return smin(d, lower, 0.45)
 }
 
-function sdf(p: V3) {
+/** Face, jaw and snout, before the mouth is carved in. */
+function sdfShape(p: V3) {
   // The lower jaw grows out of the lower face…
-  const face = smin(sdfFace(p), cone(p, JAW_A, JAW_B, 0.58, 0.22, 0.66), 0.45)
-  // …and the snout out of the whole middle of the face: broad at its root
-  // (the cheeks flow into it), tapering along a flat-topped bridge to the
-  // muzzle pad under the nose.
-  // A narrow bridge on top carries the line from the forehead, between the
-  // eyes, straight to the nose; the broad muzzle sits under it.
-  const muzzle = smin(cone(p, MUZZLE_A, MUZZLE_B, 0.86, 0.3, 0.82), ellipsoid(p, 0, -0.6, 1.86, 0.42, 0.28, 0.38), 0.22)
-  const snout = smin(muzzle, cone(p, BRIDGE_A, BRIDGE_B, 0.32, 0.2, 1), 0.3)
-  // Broadly blended at the root, crisply toward the front — where the snout
-  // meets the jaw, that crisp seam is the mouth line.
-  const k = 0.55 - 0.47 * ss(p.z, 0.9, 1.65)
+  const face = smin(sdfFace(p), cone(p, JAW_A, JAW_B, 0.52, 0.32, 0.72), 0.45)
+  // …and the snout out of the middle of the face, from a modest root below
+  // the eyes (they stay clear): a bridge on top carries the line to the
+  // nose, the muzzle under it ends round and blunt in a full pad.
+  const muzzle = smin(cone(p, MUZZLE_A, MUZZLE_B, 0.6, 0.44, 0.88), ellipsoid(p, 0, -0.66, 1.56, 0.52, 0.4, 0.46), 0.25)
+  const snout = smin(muzzle, cone(p, BRIDGE_A, BRIDGE_B, 0.3, 0.3, 1), 0.3)
+  // Blended softly at the root, crisply toward the front, where the seam
+  // between snout and jaw is the mouth line.
+  const k = 0.4 - 0.32 * ss(p.z, 0.9, 1.55)
   return smin(face, snout, k)
+}
+
+// The mouth, modelled: a short groove down from the nose and a small "ω"
+// smile, traced onto the snout and carved in.
+interface Mouth {
+  /** The mouth's strokes (philtrum, left and right half of the "ω"). */
+  lines: V3[][]
+  segs: [V3, V3][]
+  nose: V3
+  box: { x: number; y0: number; y1: number; z: number }
+}
+let mouth: Mouth | null = null
+
+/** The surface point at (x, y), marching in from the front. */
+function traceFront(f: (p: V3) => number, x: number, y: number) {
+  const q = V(x, y, 4)
+  for (let k = 0; k < 300; k++) {
+    const dist = f(q)
+    if (dist < 5e-4) break
+    q.z -= Math.max(dist * 0.9, 1e-3)
+  }
+  return q
+}
+
+function buildMouth(): Mouth {
+  // The nose sits on the most forward point of the snout…
+  let best = traceFront(sdfShape, 0, -0.1)
+  for (let y = -0.75; y <= -0.1; y += 0.01) {
+    const q = traceFront(sdfShape, 0, y)
+    if (q.z > best.z) best = q
+  }
+  const nose = best
+  // …and the mouth just below it, on the front of the muzzle pad.
+  const yM = nose.y - 0.3
+  const at = (x: number, y: number) => traceFront(sdfShape, x, y).add(V(0, 0, -0.012))
+  const top = at(0, nose.y - 0.17)
+  const mid = at(0, yM)
+  const half = (s: number) => [mid, at(s * 0.06, yM - 0.045), at(s * 0.13, yM - 0.065), at(s * 0.2, yM - 0.045), at(s * 0.26, yM + 0.005)]
+  const lines = [[top, mid], half(-1), half(1)]
+  const segs: [V3, V3][] = []
+  for (const pts of lines) for (let i = 1; i < pts.length; i++) segs.push([pts[i - 1], pts[i]])
+  return { lines, segs, nose, box: { x: 0.4, y0: yM - 0.2, y1: nose.y, z: nose.z - 0.9 } }
+}
+
+function segDist(p: V3, a: V3, b: V3) {
+  const abx = b.x - a.x
+  const aby = b.y - a.y
+  const abz = b.z - a.z
+  const t = Math.min(1, Math.max(0, ((p.x - a.x) * abx + (p.y - a.y) * aby + (p.z - a.z) * abz) / (abx * abx + aby * aby + abz * abz || 1)))
+  const dx = p.x - a.x - abx * t
+  const dy = p.y - a.y - aby * t
+  const dz = p.z - a.z - abz * t
+  return Math.sqrt(dx * dx + dy * dy + dz * dz)
+}
+
+/** Distance to the mouth groove's centre line (Infinity far from it). */
+function mouthDist(p: V3) {
+  if (!mouth) return Infinity
+  const b = mouth.box
+  if (Math.abs(p.x) > b.x || p.y < b.y0 || p.y > b.y1 || p.z < b.z) return Infinity
+  let d = Infinity
+  for (const [a, c] of mouth.segs) d = Math.min(d, segDist(p, a, c))
+  return d
+}
+
+function sdf(p: V3) {
+  const d = sdfShape(p)
+  const m = mouthDist(p)
+  return m < 0.2 ? smax(d, 0.042 - m, 0.02) : d
 }
 
 function normalAt(p: V3) {
@@ -382,37 +450,6 @@ function eyeTexture(iris: [string, string, string]) {
   return tex
 }
 
-function mouthTexture() {
-  const c = document.createElement('canvas')
-  c.width = 256
-  c.height = 160
-  const ctx = c.getContext('2d')!
-  ctx.strokeStyle = '#1a1212'
-  ctx.lineWidth = 9
-  ctx.lineCap = 'round'
-  ctx.beginPath()
-  ctx.moveTo(128, 6)
-  ctx.lineTo(128, 42)
-  ctx.moveTo(44, 30)
-  ctx.quadraticCurveTo(84, 78, 128, 42)
-  ctx.quadraticCurveTo(172, 78, 212, 30)
-  ctx.stroke()
-  // Small open smile with a pink tongue.
-  ctx.fillStyle = '#2a1414'
-  ctx.beginPath()
-  ctx.moveTo(84, 70)
-  ctx.quadraticCurveTo(128, 150, 172, 70)
-  ctx.quadraticCurveTo(128, 92, 84, 70)
-  ctx.fill()
-  ctx.fillStyle = '#e8828c'
-  ctx.beginPath()
-  ctx.ellipse(128, 106, 24, 12, 0, 0, Math.PI * 2)
-  ctx.fill()
-  const tex = new THREE.CanvasTexture(c)
-  tex.colorSpace = THREE.SRGBColorSpace
-  return tex
-}
-
 /** The head's coat: ~1,500 locks of long fur rooted all over its surface,
  *  each lying back at an angle along a grooming direction — combed out
  *  from the muzzle (up over the brow, out across the cheeks, down the
@@ -472,7 +509,7 @@ function furCoat(head: THREE.Mesh, fur: (p: V3) => THREE.Color, nose: V3, lock: 
     // Keep the eyes, nose and mouth clear.
     if (p.z > 0 && ((ax - EYE_X) / (EYE_W * 0.54)) ** 2 + ((p.y - EYE_Y) / (EYE_H * 0.54)) ** 2 < 1 && p.z < 1) continue
     if (p.distanceTo(nose) < 0.36) continue
-    if (p.distanceTo(V(0, nose.y - 0.27, nose.z - 0.08)) < 0.2) continue
+    if (mouthDist(p) < 0.1) continue
     const n = normalAt(p)
     // Grooming direction.
     const front = ss(p.z, -0.7, 0.2)
@@ -544,6 +581,7 @@ function furCoat(head: THREE.Mesh, fur: (p: V3) => THREE.Color, nose: V3, lock: 
 
 function fursuit(spec: SuitSpec): Model {
   seed = 11
+  mouth ??= buildMouth()
   const root = new THREE.Group()
 
   // ---- Head mesh from the field ----
@@ -567,6 +605,9 @@ function fursuit(spec: SuitSpec): Model {
     const n = normalAt(p)
     nrm.setXYZ(i, n.x, n.y, n.z)
     const c = spec.fur(p).multiplyScalar(occlusion(p, n) / FUR_GREY)
+    // A soft shadow along the carved mouth groove.
+    const md = mouthDist(p)
+    if (md < 0.1) c.multiplyScalar(0.75 + 0.25 * (md / 0.1))
     col.setXYZ(i, c.r, c.g, c.b)
   }
   const furTex = furTexture(1024, 512, 120000)
@@ -631,7 +672,7 @@ function fursuit(spec: SuitSpec): Model {
   const eyeMat = new THREE.MeshPhysicalMaterial({ map: eyeTexture(spec.iris), transparent: true, alphaTest: 0.3, roughness: 0.15, clearcoat: 1, clearcoatRoughness: 0.03, side: THREE.DoubleSide })
   for (const side of [-1, 1]) decal(side * EYE_X, EYE_Y, EYE_W, EYE_H, side * 0.1, side < 0, eyeMat, 0.07, true)
 
-  // ---- Button nose and a tiny smile ----
+  // ---- A big, glossy nose on the tip of the snout (the mouth is carved) ----
   const nose = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 24), new THREE.MeshPhysicalMaterial({ color: 0x141011, roughness: 0.32, clearcoat: 1, clearcoatRoughness: 0.12 }))
   {
     const np = nose.geometry.getAttribute('position') as THREE.BufferAttribute
@@ -640,12 +681,24 @@ function fursuit(spec: SuitSpec): Model {
   }
   // A big, broad nose capping the snout.
   nose.scale.set(0.36, 0.23, 0.22)
-  const tip = hitFront(0, -0.34)
-  nose.position.copy(tip).add(V(0, 0.02, -0.07))
+  nose.position.copy(mouth.nose).add(V(0, 0.03, -0.08))
   nose.rotation.x = 0.3
   nose.castShadow = true
   root.add(nose)
-  decal(0, tip.y - 0.27, 0.4, 0.25, 0, false, new THREE.MeshStandardMaterial({ map: mouthTexture(), transparent: true, alphaTest: 0.25, roughness: 0.7, side: THREE.DoubleSide }), 0.05)
+
+  // The mouth's line itself: a thin dark cord laid in the carved groove, so
+  // it's crisp and smooth whatever the mesh density.
+  const lipMat = new THREE.MeshStandardMaterial({ color: 0x1c110d, roughness: 0.55 })
+  for (const pts of mouth.lines) {
+    const curve = new THREE.CatmullRomCurve3(pts.map((q) => q.clone().add(V(0, 0, 0.012))))
+    const line = new THREE.Mesh(new THREE.TubeGeometry(curve, 48, 0.02, 8, false), lipMat)
+    root.add(line)
+    for (const end of [pts[0], pts[pts.length - 1]]) {
+      const cap = new THREE.Mesh(new THREE.SphereGeometry(0.02, 8, 6), lipMat)
+      cap.position.copy(end).add(V(0, 0, 0.012))
+      root.add(cap)
+    }
+  }
 
   // ---- Ears: huge, long-furred, set high on the head ----
   const earCard = plushCard(spec.ear)
