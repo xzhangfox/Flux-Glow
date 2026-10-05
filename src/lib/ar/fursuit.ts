@@ -2,113 +2,160 @@ import * as THREE from 'three'
 import { plushCard, smooth, type PlushSpec } from './plush'
 import type { Model, Rig } from './scene'
 
-// Full fursuit heads that replace the wearer's head entirely: an oversized
-// plush head (bigger than head + hair, so nothing of the real head shows)
-// sculpted into a canine face — snout, nose bridge, eye sockets, brow,
-// cheeks — with painted fur, glossy resin anime eyes, big plush ears, and — what makes it read as faux fur rather than a smooth ball —
-// fluffy tufts all round the silhouette, re-aimed at the camera every frame
-// so the outline is always soft, with long cheek ruffs at the sides.
+// Full fursuit heads that replace the wearer's head entirely. Sculpted like
+// a real fursuit head (or a character sculpt), not a deformed ball: the head
+// is a smooth union of anatomical forms — rounded cranium, lower head and
+// jaw, cheeks, a long tapering snout with a flat top, a separate lower jaw
+// that leaves a mouth crease under it, brow ridges over eye sockets — as a
+// signed distance field, turned into a mesh by casting rays out from inside
+// it. Fur colour follows that 3D shape (orange snout top, white lower jaw
+// and cheeks), occlusion comes from the same field, and on top: glossy
+// eyeballs set in the sockets, a broad leather nose, tall plush ears, a
+// forehead tuft, and fluffy tufts round the silhouette and cheeks.
+//
+// Everything is in rig units (1 = eye distance; origin between the wearer's
+// eyes; +y up, +z out of the face). The head is sized to cover the
+// wearer's whole head and hair.
 
-type Dir = THREE.Vector3
+type V3 = THREE.Vector3
+const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z)
+const ss = THREE.MathUtils.smoothstep
+const C = (h: string) => new THREE.Color(h)
 
 interface SuitSpec {
-  /** Fur colour at a direction on the head (unit vector, +z = front). */
-  fur: (s: Dir) => THREE.Color
+  /** Fur colour at a point on the head (rig space). */
+  fur: (p: V3) => THREE.Color
   ear: PlushSpec
-  iris: [string, string, string]
-  outline: string
+  iris: [string, string]
+  tuft: string
 }
 
-const C = (h: string) => new THREE.Color(h)
-const ss = THREE.MathUtils.smoothstep
+// ---- The sculpt (signed distance field) ---------------------------------------
 
-// The head shell, in rig units (1 = eye distance; origin between the eyes).
-const CENTER = new THREE.Vector3(0, 0.05, -0.85)
-const RX = 1.8
-const RZ = 1.7
-const ry = (y: number) => (y > 0 ? 2.25 : 2.15)
-const cheekBulge = (y: number) => 1 + 0.1 * Math.exp(-(((y + 0.35) / 0.35) ** 2))
+function smin(a: number, b: number, k: number) {
+  const h = Math.max(k - Math.abs(a - b), 0) / k
+  return Math.min(a, b) - h * h * k * 0.25
+}
+const smax = (a: number, b: number, k: number) => -smin(-a, -b, k)
 
-// The face is a flatter plane than the back of the head, so the snout
-// stands out from it.
-const rz = (z: number) => (z > 0 ? RZ * 0.86 : RZ)
-function shellPoint(s: Dir) {
-  return new THREE.Vector3(s.x * RX * cheekBulge(s.y), s.y * ry(s.y), s.z * rz(s.z)).add(CENTER)
+function ellipsoid(p: V3, cx: number, cy: number, cz: number, rx: number, ry: number, rz: number) {
+  const x = p.x - cx
+  const y = p.y - cy
+  const z = p.z - cz
+  const k0 = Math.hypot(x / rx, y / ry, z / rz)
+  const k1 = Math.hypot(x / (rx * rx), y / (ry * ry), z / (rz * rz))
+  return k1 > 0 ? (k0 * (k0 - 1)) / k1 : -Math.min(rx, ry, rz)
 }
 
-// Sculpting on top of the base volume, in rig units on the face (x across,
-// y up, origin between the wearer's eyes): a canine face rather than a
-// ball — a snout that rises from the stop between the eyes to a blunt nose
-// and curls back under into the mouth and chin, eye sockets under a brow
-// ridge, puffed cheeks. Faded out toward the sides of the head.
+/** A cone with rounded ends between a and b, squashed vertically by
+ *  `flat` (< 1 = flatter on top and underneath). */
+function cone(p: V3, a: V3, b: V3, ra: number, rb: number, flat: number) {
+  const ab = b.clone().sub(a)
+  const t = THREE.MathUtils.clamp(p.clone().sub(a).dot(ab) / ab.lengthSq(), 0, 1)
+  const c = a.clone().addScaledVector(ab, t)
+  const dx = p.x - c.x
+  const dy = (p.y - c.y) / flat
+  const dz = p.z - c.z
+  return Math.hypot(dx, dy, dz) - THREE.MathUtils.lerp(ra, rb, t)
+}
+
+const SNOUT_A = V(0, -0.22, 0.3)
+const SNOUT_B = V(0, -0.52, 1.72)
+const JAW_A = V(0, -0.82, 0.25)
+const JAW_B = V(0, -0.93, 1.32)
 const EYE_X = 0.56
-const EYE_Y = 0.14
-const gauss = (dx: number, dy: number, rx: number, ry: number) => Math.exp(-((dx / rx) ** 2) - (dy / ry) ** 2)
-function sculpt(x: number, y: number) {
-  const ax = Math.abs(x)
-  // Snout: length along the face, rising from the stop to the nose tip,
-  // then curling back under into the chin. Narrow on the bridge, broad at
-  // the mouth, flat-topped across.
-  const len = 1.25 * ss(-y, -0.05, 0.62) * (1 - ss(-y, 0.76, 1.3))
-  const halfW = 0.26 + 0.26 * ss(-y, 0.0, 0.85)
-  const snout = len * Math.exp(-Math.pow(ax / halfW, 3.2))
-  // Stop: a slight dip at the root of the nose, between the eyes.
-  const stop = -0.06 * gauss(x, y - 0.0, 0.16, 0.14)
-  const sockets = -0.07 * gauss(ax - EYE_X, y - EYE_Y, 0.36, 0.3)
-  const brow = 0.09 * gauss(ax - 0.42, y - 0.5, 0.3, 0.1)
-  const cheeks = 0.22 * gauss(ax - 0.8, y + 0.6, 0.34, 0.34)
-  const forehead = 0.06 * gauss(x, y - 0.75, 0.6, 0.35)
-  return snout + stop + sockets + brow + cheeks + forehead
+const EYE_Y = 0.16
+const EYE_Z = 0.5
+const EYE_R = 0.37
+
+function sdf(p: V3) {
+  // Cranium, lower head, cheeks.
+  let d = ellipsoid(p, 0, 0.35, -0.95, 1.85, 2.0, 1.75)
+  d = smin(d, ellipsoid(p, 0, -1.0, -0.5, 1.42, 1.1, 1.35), 0.5)
+  for (const s of [-1, 1]) d = smin(d, ellipsoid(p, s * 1.0, -0.72, -0.15, 0.76, 0.7, 0.78), 0.4)
+  // Snout, then the lower jaw beneath it: blended tightly, so a mouth
+  // crease runs between them.
+  d = smin(d, cone(p, SNOUT_A, SNOUT_B, 0.66, 0.31, 0.8), 0.45)
+  d = smin(d, cone(p, JAW_A, JAW_B, 0.5, 0.24, 0.72), 0.12)
+  // Brow ridges, and the sockets the eyeballs sit in.
+  for (const s of [-1, 1]) d = smin(d, ellipsoid(p, s * 0.54, 0.52, 0.62, 0.44, 0.18, 0.3), 0.25)
+  for (const s of [-1, 1]) d = smax(d, -(p.clone().sub(V(s * EYE_X, EYE_Y, EYE_Z + 0.2)).length() - EYE_R * 1.02), 0.12)
+  return d
 }
 
-function shellNormal(s: Dir) {
-  return new THREE.Vector3(s.x / RX, s.y / ry(s.y), s.z / RZ).normalize()
+function normalAt(p: V3) {
+  const e = 0.01
+  return V(
+    sdf(V(p.x + e, p.y, p.z)) - sdf(V(p.x - e, p.y, p.z)),
+    sdf(V(p.x, p.y + e, p.z)) - sdf(V(p.x, p.y - e, p.z)),
+    sdf(V(p.x, p.y, p.z + e)) - sdf(V(p.x, p.y, p.z - e)),
+  ).normalize()
 }
 
-/** Canvas pixel → direction (matches the rotated SphereGeometry's UVs:
- *  front at the canvas centre, seam at the back). */
+/** Ambient occlusion from the field: how much the surface is hemmed in. */
+function occlusion(p: V3, n: V3) {
+  let occ = 0
+  let w = 1
+  for (let i = 1; i <= 4; i++) {
+    const h = 0.09 * i
+    occ += w * Math.max(0, h - sdf(p.clone().addScaledVector(n, h)))
+    w *= 0.6
+  }
+  return THREE.MathUtils.clamp(1 - occ * 1.5, 0.62, 1)
+}
+
+// Rays start inside the head, behind the face, so the snout (the part
+// furthest out) still gets plenty of the sphere's directions.
+const ORIGIN = V(0, -0.25, -0.55)
+
+/** Canvas pixel ↔ ray direction (front at the canvas centre, seam behind). */
 function dirAt(u: number, v: number) {
   const phi = u * Math.PI * 2
   const th = v * Math.PI
-  return new THREE.Vector3(-Math.sin(phi) * Math.sin(th), Math.cos(th), -Math.cos(phi) * Math.sin(th))
+  return V(-Math.sin(phi) * Math.sin(th), Math.cos(th), -Math.cos(phi) * Math.sin(th))
 }
-function uvOf(s: Dir): [number, number] {
+function uvOf(s: V3): [number, number] {
   const th = Math.acos(THREE.MathUtils.clamp(s.y, -1, 1))
   let phi = Math.atan2(-s.x, -s.z)
   if (phi < 0) phi += Math.PI * 2
   return [phi / (Math.PI * 2), th / Math.PI]
 }
 
+function surfaceAlong(d: V3) {
+  let lo = 0
+  let hi = 0.08
+  while (hi < 6 && sdf(ORIGIN.clone().addScaledVector(d, hi)) < 0) {
+    lo = hi
+    hi += 0.08
+  }
+  for (let i = 0; i < 14; i++) {
+    const m = (lo + hi) / 2
+    if (sdf(ORIGIN.clone().addScaledVector(d, m)) < 0) lo = m
+    else hi = m
+  }
+  return ORIGIN.clone().addScaledVector(d, (lo + hi) / 2)
+}
+
 let seed = 11
 const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647
 
-/** Fur painted in the shell's UV space: a soft base, then tens of thousands
- *  of strands flowing back and down from the face. */
-function paintFur(W: number, H: number, fur: (s: Dir) => THREE.Color, strands: number) {
+/** Neutral fur: grey strands combed back from the nose, multiplied over
+ *  the head's own colours (vertex colours). */
+function furTexture(W: number, H: number, strands: number) {
   const c = document.createElement('canvas')
   c.width = W
   c.height = H
   const ctx = c.getContext('2d')!
-  const img = ctx.createImageData(W, H)
-  for (let y = 0; y < H; y++)
-    for (let x = 0; x < W; x++) {
-      const col = fur(dirAt(x / W, y / H)).multiplyScalar(0.78)
-      const k = (y * W + x) * 4
-      img.data[k] = col.r * 255
-      img.data[k + 1] = col.g * 255
-      img.data[k + 2] = col.b * 255
-      img.data[k + 3] = 255
-    }
-  ctx.putImageData(img, 0, 0)
+  ctx.fillStyle = '#c4c4c4'
+  ctx.fillRect(0, 0, W, H)
   ctx.lineCap = 'round'
-  // Plush fur radiates from the muzzle, back over the head and down.
-  const src = new THREE.Vector3(0, -0.4, 0.92).normalize()
-  const tmp = new THREE.Vector3()
+  const src = SNOUT_B.clone().sub(ORIGIN).normalize()
+  const tmp = V(0, 0, 0)
   for (let i = 0; i < strands; i++) {
     const u = rnd()
     const v = Math.acos(1 - 2 * rnd()) / Math.PI
     const s = dirAt(u, v)
-    const f = tmp.copy(s).sub(src).addScaledVector(s, -s.clone().sub(src).dot(s)).add(new THREE.Vector3(0, -0.15, 0))
+    const f = tmp.copy(s).sub(src).addScaledVector(s, -s.clone().sub(src).dot(s)).add(V(0, -0.12, 0))
     if (f.lengthSq() < 1e-4) f.set(0, -1, 0)
     f.normalize()
     const [u2, v2] = uvOf(s.clone().addScaledVector(f, 0.02).normalize())
@@ -117,12 +164,11 @@ function paintFur(W: number, H: number, fur: (s: Dir) => THREE.Color, strands: n
     if (dx < -W / 2) dx += W
     const dy = (v2 - v) * H
     const l = Math.hypot(dx, dy) || 1
-    const len = (4 + rnd() * 7) * (W / 1024)
-    const j = s.clone().add(new THREE.Vector3(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5).multiplyScalar(0.05)).normalize()
-    const col = fur(j).multiplyScalar(0.7 + rnd() * 0.45)
-    ctx.strokeStyle = '#' + col.getHexString()
-    ctx.globalAlpha = 0.3 + rnd() * 0.4
-    ctx.lineWidth = (0.7 + rnd() * 1.1) * (W / 1024)
+    const len = (3 + rnd() * 6) * (W / 1024)
+    const g = Math.round(140 + rnd() * 115)
+    ctx.strokeStyle = `rgb(${g},${g},${g})`
+    ctx.globalAlpha = 0.25 + rnd() * 0.4
+    ctx.lineWidth = (0.6 + rnd()) * (W / 1024)
     const x0 = u * W
     const y0 = v * H
     const bend = (rnd() - 0.5) * len * 0.4
@@ -131,7 +177,6 @@ function paintFur(W: number, H: number, fur: (s: Dir) => THREE.Color, strands: n
     ctx.quadraticCurveTo(x0 + (dx / l) * len * 0.5 - (dy / l) * bend, y0 + (dy / l) * len * 0.5 + (dx / l) * bend, x0 + (dx / l) * len, y0 + (dy / l) * len)
     ctx.stroke()
   }
-  // A touch of softness: plush, not bristle.
   ctx.globalAlpha = 0.6
   ctx.filter = 'blur(1px)'
   ctx.drawImage(c, 0, 0)
@@ -143,6 +188,9 @@ function paintFur(W: number, H: number, fur: (s: Dir) => THREE.Color, strands: n
   tex.anisotropy = 8
   return tex
 }
+// The texture's average, in linear terms: vertex colours are divided by it
+// so the head comes out at its intended colours.
+const FUR_GREY = new THREE.Color('#c4c4c4').r
 
 /** A neutral (near-white) tuft: strands fanning from the base to a soft
  *  point; tinted per card through the material colour. */
@@ -172,7 +220,7 @@ function tuftTexture() {
     ctx.quadraticCurveTo((x0 + ex) / 2 + bend, (y0 + ey) / 2, ex, ey)
     ctx.stroke()
   }
-  // Roots fade in, so the tufts grow out of the shell's fur without a line.
+  // Roots fade in, so the tufts grow out of the head's fur without a line.
   ctx.globalAlpha = 1
   ctx.globalCompositeOperation = 'destination-in'
   const fade = ctx.createLinearGradient(0, H, 0, H * 0.55)
@@ -186,276 +234,181 @@ function tuftTexture() {
   return tex
 }
 
-/** Big glossy anime eye (the right eye; the left is mirrored). */
-function eyeTexture(iris: [string, string, string], outline: string) {
+/** Eyeball texture (sphere UVs; the iris faces +z): a large dark iris
+ *  glowing toward the bottom, pupil, catch-lights; a sliver of white. */
+function eyeTexture(iris: [string, string]) {
   const W = 512
-  const H = 420
+  const H = 256
   const c = document.createElement('canvas')
   c.width = W
   c.height = H
   const ctx = c.getContext('2d')!
-  const shape = () => {
-    ctx.beginPath()
-    ctx.moveTo(40, 230)
-    ctx.bezierCurveTo(70, 60, 380, 20, 478, 150)
-    ctx.bezierCurveTo(500, 260, 420, 390, 270, 395)
-    ctx.bezierCurveTo(140, 398, 30, 340, 40, 230)
-    ctx.closePath()
-  }
-  ctx.save()
-  shape()
-  ctx.fillStyle = '#fbf8f4'
-  ctx.fill()
-  ctx.clip()
-  // Iris: dark at the top (under the lid's shadow), glowing at the bottom.
-  const g = ctx.createLinearGradient(0, 70, 0, 380)
-  g.addColorStop(0, iris[0])
-  g.addColorStop(0.55, iris[1])
-  g.addColorStop(1, iris[2])
-  ctx.fillStyle = g
-  ctx.beginPath()
-  ctx.ellipse(262, 235, 150, 168, 0, 0, Math.PI * 2)
-  ctx.fill()
-  ctx.strokeStyle = 'rgba(30,15,10,0.6)'
-  ctx.lineWidth = 8
-  ctx.stroke()
-  ctx.fillStyle = 'rgba(25,10,5,0.75)'
-  ctx.beginPath()
-  ctx.ellipse(262, 255, 66, 82, 0, 0, Math.PI * 2)
-  ctx.fill()
-  // Sparkle star and highlights.
-  const star = (x: number, y: number, r: number) => {
-    ctx.beginPath()
-    for (let i = 0; i < 8; i++) {
-      const a = (i * Math.PI) / 4 - Math.PI / 2
-      const rr = i % 2 ? r * 0.3 : r
-      ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr)
+  const img = ctx.createImageData(W, H)
+  const dark = C(iris[0])
+  const glow = C(iris[1])
+  const white = C('#f3f0ea')
+  const col = new THREE.Color()
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) {
+      const phi = (x / W) * Math.PI * 2
+      const th = (y / H) * Math.PI
+      // three.js SphereGeometry vertex direction for this uv.
+      const dx = -Math.cos(phi) * Math.sin(th)
+      const dy = Math.cos(th)
+      const dz = Math.sin(phi) * Math.sin(th)
+      const a = Math.acos(THREE.MathUtils.clamp(dz, -1, 1))
+      if (a < 0.34) col.set('#07080c')
+      else if (a < 0.95) {
+        col.copy(dark).lerp(glow, ss(-dy, -0.3, 0.55))
+        col.multiplyScalar(1 - 0.55 * ss(a, 0.82, 0.95))
+      } else col.copy(white)
+      // Catch-lights: a big one upper-left, a small one lower-right.
+      const h1 = Math.hypot(dx + 0.28, dy - 0.3)
+      const h2 = Math.hypot(dx - 0.2, dy + 0.2)
+      if (dz > 0 && (h1 < 0.13 || h2 < 0.06)) col.set('#ffffff')
+      const k = (y * W + x) * 4
+      img.data[k] = col.r * 255
+      img.data[k + 1] = col.g * 255
+      img.data[k + 2] = col.b * 255
+      img.data[k + 3] = 255
     }
-    ctx.closePath()
-    ctx.fill()
-  }
-  ctx.fillStyle = 'rgba(255,240,200,0.95)'
-  star(230, 200, 46)
-  ctx.fillStyle = 'rgba(255,255,255,0.92)'
-  ctx.beginPath()
-  ctx.ellipse(330, 150, 44, 34, -0.3, 0, Math.PI * 2)
-  ctx.fill()
-  ctx.beginPath()
-  ctx.ellipse(205, 320, 18, 14, 0, 0, Math.PI * 2)
-  ctx.fill()
-  ctx.restore()
-  // Heavy upper lash line, thin lower line, a flick at the outer corner.
-  ctx.strokeStyle = outline
-  ctx.lineCap = 'round'
-  ctx.lineWidth = 34
-  ctx.beginPath()
-  ctx.moveTo(40, 230)
-  ctx.bezierCurveTo(70, 60, 380, 20, 478, 150)
-  ctx.stroke()
-  ctx.lineWidth = 10
-  shape()
-  ctx.stroke()
-  ctx.fillStyle = outline
-  ctx.beginPath()
-  ctx.moveTo(440, 110)
-  ctx.lineTo(505, 120)
-  ctx.lineTo(482, 175)
-  ctx.closePath()
-  ctx.fill()
+  ctx.putImageData(img, 0, 0)
   const tex = new THREE.CanvasTexture(c)
   tex.colorSpace = THREE.SRGBColorSpace
   return tex
-}
-
-function mouthTexture(color: string) {
-  const c = document.createElement('canvas')
-  c.width = 256
-  c.height = 128
-  const ctx = c.getContext('2d')!
-  ctx.strokeStyle = color
-  ctx.lineWidth = 9
-  ctx.lineCap = 'round'
-  ctx.beginPath()
-  ctx.moveTo(128, 8)
-  ctx.lineTo(128, 40)
-  ctx.moveTo(40, 34)
-  ctx.quadraticCurveTo(80, 78, 128, 40)
-  ctx.quadraticCurveTo(176, 78, 216, 34)
-  ctx.stroke()
-  // Small open mouth with a pink tongue.
-  ctx.fillStyle = '#2a1414'
-  ctx.beginPath()
-  ctx.ellipse(128, 70, 38, 22, 0, 0, Math.PI)
-  ctx.fill()
-  ctx.fillStyle = '#e8828c'
-  ctx.beginPath()
-  ctx.ellipse(128, 84, 22, 9, 0, 0, Math.PI)
-  ctx.fill()
-  const tex = new THREE.CanvasTexture(c)
-  tex.colorSpace = THREE.SRGBColorSpace
-  return tex
-}
-
-function curvedPlane(w: number, h: number, bulge: number) {
-  const g = new THREE.PlaneGeometry(w, h, 16, 16)
-  const p = g.getAttribute('position') as THREE.BufferAttribute
-  for (let i = 0; i < p.count; i++) p.setZ(i, bulge * (1 - (p.getX(i) / (w / 2)) ** 2 - (p.getY(i) / (h / 2)) ** 2))
-  g.computeVertexNormals()
-  return g
 }
 
 function fursuit(spec: SuitSpec): Model {
   seed = 11
   const root = new THREE.Group()
 
-  // Shell.
-  const g = new THREE.SphereGeometry(1, 180, 120)
+  // ---- Head mesh from the field ----
+  const g = new THREE.SphereGeometry(1, 220, 160)
   g.rotateY(-Math.PI / 2)
   const pos = g.getAttribute('position') as THREE.BufferAttribute
   const uv = g.getAttribute('uv') as THREE.BufferAttribute
   const col = new THREE.BufferAttribute(new Float32Array(pos.count * 3), 3)
   g.setAttribute('color', col)
-  const v = new THREE.Vector3()
+  const d = V(0, 0, 0)
   for (let i = 0; i < pos.count; i++) {
-    v.fromBufferAttribute(pos, i).normalize()
-    const q = shellPoint(v)
-    const front = ss(v.z, 0.25, 0.65)
-    q.z += sculpt(q.x, q.y) * front
-    pos.setXYZ(i, q.x, q.y, q.z)
-    // Baked occlusion: darker where the surface sits below its
-    // surroundings — beside and under the snout, in the eye sockets.
-    let around = 0
-    for (let k = 0; k < 8; k++) {
-      const a = (k / 8) * Math.PI * 2
-      around += sculpt(q.x + Math.cos(a) * 0.3, q.y + Math.sin(a) * 0.3)
-    }
-    const occ = Math.max(0, around / 8 - sculpt(q.x, q.y)) * front
-    const shade = 1 - Math.min(0.45, occ * 1.6)
-    col.setXYZ(i, shade, shade, shade)
+    d.fromBufferAttribute(pos, i).normalize()
+    const p = surfaceAlong(d)
+    pos.setXYZ(i, p.x, p.y, p.z)
+    const [u, w] = uvOf(d)
     // The seam sits at the back, out of sight; keep the UV's own u there.
-    const [u, w] = uvOf(v)
     uv.setXY(i, Math.abs(u - uv.getX(i)) > 0.5 ? uv.getX(i) : u, 1 - w)
+    const c = spec.fur(p).multiplyScalar(occlusion(p, normalAt(p)) / FUR_GREY)
+    col.setXYZ(i, c.r, c.g, c.b)
   }
   g.computeVertexNormals()
-  const furTex = paintFur(1024, 512, spec.fur, 110000)
-  const furMat = new THREE.MeshPhysicalMaterial({ vertexColors: true, map: furTex, bumpMap: furTex, bumpScale: 0.35, roughness: 0.95, sheen: 0.8, sheenRoughness: 0.6, sheenColor: new THREE.Color(0x8a7a6a) })
-  const shell = new THREE.Mesh(g, furMat)
-  shell.castShadow = true
-  shell.receiveShadow = true
-  root.add(shell)
+  const furTex = furTexture(1024, 512, 120000)
+  const furMat = new THREE.MeshPhysicalMaterial({ vertexColors: true, map: furTex, bumpMap: furTex, bumpScale: 0.3, roughness: 0.95, sheen: 0.7, sheenRoughness: 0.6, sheenColor: new THREE.Color(0x6a5a4a) })
+  const head = new THREE.Mesh(g, furMat)
+  head.castShadow = true
+  head.receiveShadow = true
+  root.add(head)
 
-  // Features sit on the sculpted surface: found by casting rays at it.
-  shell.updateMatrixWorld()
+  // Features sit on the sculpted surface, found by casting rays at it.
+  head.updateMatrixWorld()
   const ray = new THREE.Raycaster()
-  const surface = (x: number, y: number) => {
-    ray.set(new THREE.Vector3(x, y, 10), new THREE.Vector3(0, 0, -1))
-    const hit = ray.intersectObject(shell)[0]
-    const n = hit?.face?.normal.clone() ?? new THREE.Vector3(0, 0, 1)
-    if (n.z < 0) n.negate()
-    return { p: hit?.point ?? new THREE.Vector3(x, y, 1), n }
-  }
-  const place = (o: THREE.Object3D, x: number, y: number, out: number, tiltTo = 0) => {
-    const { p, n } = surface(x, y)
-    n.lerp(new THREE.Vector3(0, 0, 1), tiltTo).normalize()
-    o.position.copy(p).addScaledVector(n, out)
-    o.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n)
+  const hitFront = (x: number, y: number) => {
+    ray.set(V(x, y, 10), V(0, 0, -1))
+    return ray.intersectObject(head)[0]?.point ?? V(x, y, 1)
   }
 
-  // Nose: a broad, glossy leather nose capping the snout.
+  // ---- Nose: broad, glossy leather, wider on top ----
   const noseGeo = new THREE.SphereGeometry(1, 40, 28)
   {
     const np = noseGeo.getAttribute('position') as THREE.BufferAttribute
-    for (let i = 0; i < np.count; i++) {
-      const y = np.getY(i)
-      // Wider on top, tapering underneath into the philtrum.
-      np.setX(i, np.getX(i) * (1 + 0.25 * y))
-    }
+    for (let i = 0; i < np.count; i++) np.setX(i, np.getX(i) * (1 + 0.28 * np.getY(i)))
     noseGeo.computeVertexNormals()
   }
-  const nose = new THREE.Mesh(noseGeo, new THREE.MeshPhysicalMaterial({ color: 0x131012, roughness: 0.35, clearcoat: 1, clearcoatRoughness: 0.15 }))
-  nose.scale.set(0.2, 0.13, 0.12)
-  place(nose, 0, -0.5, 0.02, 0.4)
-  const mouth = new THREE.Mesh(curvedPlane(0.62, 0.31, 0.04), new THREE.MeshStandardMaterial({ map: mouthTexture('#1a1212'), transparent: true, alphaTest: 0.2, roughness: 0.6 }))
-  place(mouth, 0, -0.78, 0.015)
-  root.add(nose, mouth)
+  const nose = new THREE.Mesh(noseGeo, new THREE.MeshPhysicalMaterial({ color: 0x141011, roughness: 0.38, clearcoat: 0.9, clearcoatRoughness: 0.2 }))
+  nose.scale.set(0.3, 0.19, 0.2)
+  nose.position.copy(hitFront(0, -0.48)).add(V(0, 0.02, -0.07))
+  nose.rotation.x = 0.25
+  nose.castShadow = true
+  root.add(nose)
 
-  // Eyes: glossy domed resin, set into the sockets under the brow.
-  const eyeTex = eyeTexture(spec.iris, spec.outline)
-  const eyeMat = new THREE.MeshPhysicalMaterial({ map: eyeTex, transparent: true, alphaTest: 0.3, roughness: 0.18, clearcoat: 1, clearcoatRoughness: 0.04 })
+  // ---- Eyes: glossy eyeballs in the sockets, looking ahead ----
+  const eyeMat = new THREE.MeshPhysicalMaterial({ map: eyeTexture(spec.iris), roughness: 0.12, clearcoat: 1, clearcoatRoughness: 0.03 })
+  const eyeGeo = new THREE.SphereGeometry(EYE_R, 48, 32)
   for (const side of [-1, 1]) {
-    const e = new THREE.Mesh(curvedPlane(0.92, 0.75, 0.08), eyeMat)
-    place(e, side * EYE_X, EYE_Y - 0.02, 0.08, 0.45)
-    e.rotateZ(side * -0.18)
-    if (side < 0) e.scale.x = -1
+    const e = new THREE.Mesh(eyeGeo, eyeMat)
+    e.position.set(side * EYE_X, EYE_Y, EYE_Z)
+    e.rotation.set(0.05, side * 0.1, 0)
     root.add(e)
   }
 
-  // Ears.
+  // ---- Ears: tall plush ears on the top corners of the head ----
   const earCard = plushCard(spec.ear)
   for (const side of [-1, 1]) {
     const ear = earCard.clone()
-    const s = new THREE.Vector3(side * 0.46, 0.86, 0.02).normalize()
-    ear.position.copy(shellPoint(s)).addScaledVector(shellNormal(s), -0.35)
-    ear.rotation.set(-0.08, side * -0.2, side * -0.38)
+    ear.position.set(side * 0.95, 1.95, -0.85)
+    ear.rotation.set(-0.12, side * -0.15, side * -0.3)
     ear.scale.set(side, 1, 1)
     root.add(ear)
   }
 
-  // Silhouette fluff, re-aimed at the camera each frame.
+  // ---- Tufts: forehead tuft, silhouette fluff, cheek ruffs ----
   const tuft = tuftTexture()
   const tuftGeo = new THREE.PlaneGeometry(1, 1)
   tuftGeo.translate(0, 0.5, 0)
+  const tuftMat = (color: THREE.Color) => new THREE.MeshStandardMaterial({ map: tuft, color, transparent: true, alphaTest: 0.04, depthWrite: false, side: THREE.DoubleSide, roughness: 1 })
+  for (let i = 0; i < 6; i++) {
+    const x = (i / 5 - 0.5) * 0.55
+    const m = new THREE.Mesh(tuftGeo, tuftMat(C(spec.tuft)))
+    m.position.copy(hitFront(x, 1.15)).add(V(0, 0, -0.08))
+    m.rotation.set(-0.5, 0, -x * 1.4 + (rnd() - 0.5) * 0.3)
+    m.scale.set(0.5, 0.45 + rnd() * 0.2, 1)
+    m.renderOrder = 3
+    root.add(m)
+  }
+
   interface Tuft { mesh: THREE.Mesh; a: number; inset: number; size: number; ruff: boolean }
   const tufts: Tuft[] = []
   const addTuft = (a: number, inset: number, size: number, ruff: boolean) => {
-    // Drawn over the shell (they only sit on its rim): their soft roots
-    // blend the edge into fluff.
-    const mat = new THREE.MeshStandardMaterial({ map: tuft, transparent: true, alphaTest: 0.04, depthWrite: false, depthTest: false, side: THREE.DoubleSide, roughness: 1 })
-    const mesh = new THREE.Mesh(tuftGeo, mat)
+    const mesh = new THREE.Mesh(tuftGeo, tuftMat(new THREE.Color()))
     mesh.renderOrder = 3
     root.add(mesh)
     tufts.push({ mesh, a, inset, size, ruff })
   }
-  for (let i = 0; i < 90; i++) addTuft((i / 90) * Math.PI * 2 + rnd() * 0.05, 0.88, 0.34 + rnd() * 0.18, false)
-  for (let i = 0; i < 50; i++) addTuft(rnd() * Math.PI * 2, 0.9, 0.45 + rnd() * 0.25, false)
-  // Cheek ruffs: long tufts sweeping out and down at both sides.
+  for (let i = 0; i < 70; i++) addTuft((i / 70) * Math.PI * 2 + rnd() * 0.05, 0.92, 0.28 + rnd() * 0.18, false)
+  // Cheek ruffs: white fluff sweeping out from the cheeks, as on the sculpt.
   for (const side of [-1, 1])
-    for (let i = 0; i < 14; i++) addTuft(Math.PI / 2 - side * (Math.PI / 2 + 0.1 + (i / 13) * 0.8), 0.86, 0.8 + rnd() * 0.5, true)
+    for (let i = 0; i < 14; i++) addTuft(Math.PI / 2 - side * (Math.PI / 2 + 0.25 + (i / 13) * 0.55), 0.86, 0.6 + rnd() * 0.35, true)
 
-  const toCam = new THREE.Vector3()
-  const A = new THREE.Vector3(RX * 1.05, 2.2, RZ)
-  const e1 = new THREE.Vector3()
-  const e2 = new THREE.Vector3()
-  const up = new THREE.Vector3()
+  const SIL_C = V(0, 0.1, -0.85)
+  const SIL_R = V(2.0, 2.25, 1.8)
+  const toCam = V(0, 0, 1)
+  const e1 = V(0, 0, 0)
+  const e2 = V(0, 0, 0)
   const m4 = new THREE.Matrix4()
   return {
     root,
     fullHead: true,
     update(rig: Rig) {
-      // Camera direction in rig space.
+      // Silhouette of the head for this view (as an ellipsoid): s ⟂ R⁻¹·d.
       toCam.set(0, 0, 1).transformDirection(rig.inverse)
-      // Ellipsoid silhouette for that view: s ⟂ A⁻¹·d, point = c + A·s.
-      const m = new THREE.Vector3(toCam.x / A.x, toCam.y / A.y, toCam.z / A.z).normalize()
+      const m = V(toCam.x / SIL_R.x, toCam.y / SIL_R.y, toCam.z / SIL_R.z).normalize()
       e1.set(0, 1, 0).addScaledVector(m, -m.y)
       if (e1.lengthSq() < 1e-4) e1.set(1, 0, 0)
       e1.normalize()
       e2.crossVectors(m, e1).normalize()
       for (const t of tufts) {
         const s = e1.clone().multiplyScalar(Math.sin(t.a)).addScaledVector(e2, Math.cos(t.a))
-        const p = new THREE.Vector3(s.x * A.x, s.y * (s.y > 0 ? 2.25 : 2.15), s.z * A.z)
+        const p = V(s.x * SIL_R.x, s.y * SIL_R.y, s.z * SIL_R.z)
         const outward = p.clone().addScaledVector(toCam, -p.dot(toCam)).normalize()
-        if (t.ruff) outward.add(new THREE.Vector3(0, -0.45, 0)).normalize()
-        // Rooted just inside the rim, so the tufts overlap the shell's edge
-        // and soften it rather than ring it.
-        t.mesh.position.copy(CENTER).addScaledVector(p, t.inset)
-        up.copy(outward)
-        const x = new THREE.Vector3().crossVectors(up, toCam).normalize()
-        const z = new THREE.Vector3().crossVectors(x, up).normalize()
-        m4.makeBasis(x, up, z)
+        if (t.ruff) outward.add(V(0, -0.35, 0)).normalize()
+        // Rooted inside the rim and brought forward to the visible surface,
+        // so they soften the edge while the snout can still pass in front.
+        t.mesh.position.copy(SIL_C).addScaledVector(p, t.inset).addScaledVector(toCam, 0.8)
+        const x = V(0, 0, 0).crossVectors(outward, toCam).normalize()
+        const z = V(0, 0, 0).crossVectors(x, outward).normalize()
+        m4.makeBasis(x, outward, z)
         t.mesh.quaternion.setFromRotationMatrix(m4)
-        const len = t.size * (t.ruff ? 1 : 1)
-        t.mesh.scale.set(len * 1.1, len, 1)
-        ;(t.mesh.material as THREE.MeshStandardMaterial).color.copy(spec.fur(s.clone().normalize()))
+        t.mesh.scale.set(t.size * 1.1, t.size, 1)
+        ;(t.mesh.material as THREE.MeshStandardMaterial).color.copy(spec.fur(t.mesh.position))
       }
     },
   }
@@ -463,50 +416,46 @@ function fursuit(spec: SuitSpec): Model {
 
 // ---- Designs ----------------------------------------------------------------
 
-const near = (s: Dir, x: number, y: number, r: number) => Math.exp(-(((s.x - x) ** 2 + (s.y - y) ** 2) / (r * r)))
-
-function foxFur(s: Dir) {
-  const orange = C('#f4a463').lerp(C('#ffcf9c'), ss(s.y, 0.2, 0.9) * 0.35 * Math.max(0, s.z))
-  const white = C('#fbf5ec')
-  const ax = Math.abs(s.x)
-  const front = ss(s.z, -0.25, 0.15)
-  // White cheeks and chin; the nose bridge stays orange.
-  let w = ss(-s.y + (ax - 0.3) * 0.3, 0.06, 0.16) * front
-  w = Math.max(w, ss(-s.y, 0.42, 0.55))
-  w *= 1 - Math.exp(-((s.x / 0.16) ** 2)) * ss(s.y, -0.42, -0.3) * front
-  // Two pale brow spots.
-  w = Math.max(w, (near(s, -0.21, 0.36, 0.06) + near(s, 0.21, 0.36, 0.06)) * front)
-  return orange.lerp(white, THREE.MathUtils.clamp(w, 0, 1))
+/** 0 above the mouth line, 1 below it — the line rises toward the cheeks. */
+function lowerFace(p: V3) {
+  const ax = Math.abs(p.x)
+  const line = -0.86 + 0.42 * ss(ax, 0.35, 1.15)
+  const back = ss(p.z, -1.3, -0.5)
+  return Math.max(ss(line - p.y, -0.05, 0.05) * back, ss(-p.y, 1.65, 1.85))
 }
 
-function huskyFur(s: Dir) {
-  const grey = C('#5d626c').lerp(C('#3a3e46'), ss(s.y, 0.3, 1) * 0.6)
-  const white = C('#f6f6f4')
-  const ax = Math.abs(s.x)
-  const front = ss(s.z, -0.1, 0.3)
-  // White face mask with a dark widow's peak down to between the eyes.
-  let w = ss(0.28 - s.y + (ax - 0.1) * 0.3, 0, 0.12) * front
-  w *= 1 - Math.exp(-((s.x / 0.1) ** 2)) * ss(s.y, 0.12, 0.25)
-  w = Math.max(w, ss(-s.y, 0.35, 0.5))
-  w = Math.max(w, (near(s, -0.22, 0.32, 0.05) + near(s, 0.22, 0.32, 0.05)) * front)
-  return grey.lerp(white, THREE.MathUtils.clamp(w, 0, 1))
+function foxFur(p: V3) {
+  const orange = C('#e88634').lerp(C('#f6a85c'), ss(p.y, -0.6, 0.6) * 0.3 * ss(p.z, 0, 1))
+  return orange.lerp(C('#f8f4ee'), lowerFace(p))
 }
 
-const SUIT_EAR_OUTLINE = smooth([[50, 690], [70, 380], [175, 130], [290, 15], [380, 140], [462, 390], [478, 690], [260, 700]])
-const SUIT_EAR_INNER = smooth([[150, 660], [165, 420], [250, 210], [300, 140], [365, 380], [385, 660], [265, 672]])
+function huskyFur(p: V3) {
+  const grey = C('#5a5f69').lerp(C('#3b3f47'), ss(p.y, 0.6, 2) * 0.6)
+  const ax = Math.abs(p.x)
+  const front = ss(p.z, -0.2, 0.4)
+  // White face below the brows, except a grey stripe down the nose bridge;
+  // white eyebrow dots.
+  let w = ss(0.4 - p.y, -0.05, 0.08) * front * (1 - ss(0.26 - ax, -0.04, 0.04) * ss(p.y, -0.5, -0.35))
+  w = Math.max(w, lowerFace(p), front * Math.exp(-(((ax - 0.5) / 0.1) ** 2) - ((p.y - 0.78) / 0.07) ** 2))
+  return grey.lerp(C('#f5f5f3'), THREE.MathUtils.clamp(w, 0, 1))
+}
+
+const EAR_OUTLINE = smooth([[60, 890], [70, 520], [150, 230], [262, 20], [372, 230], [452, 520], [462, 890], [262, 900]])
+const EAR_INNER = smooth([[150, 860], [160, 560], [222, 300], [262, 170], [302, 300], [362, 560], [372, 860], [262, 872]])
 
 export function foxHead(): Model {
   return fursuit({
     fur: foxFur,
     ear: {
-      w: 512, h: 700, cardW: 1.9,
-      outline: SUIT_EAR_OUTLINE, inner: SUIT_EAR_INNER, tip: [292, 0],
-      root: '#c9763a', mid: '#f2a25f', light: '#ffd2a0',
-      skin: '#f0a27a', plush: '#f7b48c', tuft: '#fff6ea',
+      w: 512, h: 900, cardW: 1.75,
+      outline: EAR_OUTLINE, inner: EAR_INNER, tip: [262, 0],
+      root: '#b0601f', mid: '#e88634', light: '#ffc07a',
+      earTip: ['#3a1d10', 380],
+      skin: '#e98f48', plush: '#f6b277', tuft: '#fff2e2',
       strand: [16, 40],
     },
-    iris: ['#3d2010', '#b45a1e', '#f3c060'],
-    outline: '#120c0c',
+    iris: ['#0b1b38', '#2f6fb4'],
+    tuft: '#e47f2e',
   })
 }
 
@@ -514,13 +463,13 @@ export function huskyHead(): Model {
   return fursuit({
     fur: huskyFur,
     ear: {
-      w: 512, h: 700, cardW: 1.8,
-      outline: SUIT_EAR_OUTLINE, inner: SUIT_EAR_INNER, tip: [292, 0],
-      root: '#2c3036', mid: '#555a63', light: '#8d939c',
-      skin: '#d9d6d6', plush: '#f4f2f0', tuft: '#ffffff',
+      w: 512, h: 900, cardW: 1.65,
+      outline: EAR_OUTLINE, inner: EAR_INNER, tip: [262, 0],
+      root: '#2a2e35', mid: '#565b65', light: '#8e949d',
+      skin: '#d8d4d2', plush: '#f4f2f0', tuft: '#ffffff',
       strand: [16, 40],
     },
-    iris: ['#0d2a4a', '#2d7fc4', '#a6e3ff'],
-    outline: '#0c0e12',
+    iris: ['#0b2a4a', '#5ab8f0'],
+    tuft: '#4d525b',
   })
 }
