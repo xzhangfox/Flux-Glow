@@ -47,7 +47,14 @@ function ellipsoid(x: number, y: number, z: number, rx: number, ry: number, rz: 
 }
 
 // Skull: an egg, rounder at the forehead than at the back.
-const SKULL = { y: 0.34, z: -1.38, rx: 1.27, ry: 1.38, front: 1.22, back: 1.64 }
+interface Skull {
+  y: number
+  z: number
+  rx: number
+  ry: number
+  front: number
+  back: number
+}
 const NECK = { z: -1.35, rx: 0.82, rz: 0.74, bottom: -4.2 }
 // The hood's paths end a little below the hem, which is then cut clean
 // (antialiased) in the shader.
@@ -55,6 +62,10 @@ const HEM_Y = -3.05
 const SPIDER_HEM = -2.85
 
 interface HoodSpec {
+  /** The cranium under the mask: an egg, rounder at the forehead. Masks
+   *  make it a little taller and rounder than a bare skull — the head a
+   *  hood is pulled over, hair and all. */
+  skull: Skull
   /** Thickness over the head. */
   lift: number
   /** How far the ears under the mask push it out. */
@@ -62,8 +73,9 @@ interface HoodSpec {
 }
 
 function headSdf(x: number, y: number, z: number, spec: HoodSpec) {
-  const zs = z - SKULL.z
-  let d = ellipsoid(x, y - SKULL.y, zs, SKULL.rx, SKULL.ry, zs > 0 ? SKULL.front : SKULL.back)
+  const S = spec.skull
+  const zs = z - S.z
+  let d = ellipsoid(x, y - S.y, zs, S.rx, S.ry, zs > 0 ? S.front : S.back)
   // Jaw and the underside of the head, behind the face.
   d = smin(d, ellipsoid(x, y + 0.85, z + 1.05, 0.98, 0.92, 0.95), 0.45)
   // Neck (an elliptic column), stopping well below the hem.
@@ -103,7 +115,7 @@ function slerpDir(a: V3, b: V3, s: number, out: V3) {
  *  over the crown to the back of the head; u = 0.5 (the side, at the
  *  ear) → the nape; then down the back of the neck and round the hem to
  *  the front of the neck (u = 1, under the chin). */
-function hoodTarget(u: number, side: number, out: V3) {
+function hoodTarget(u: number, side: number, SKULL: Skull, out: V3) {
   if (u <= 0.5) {
     const th = THREE.MathUtils.lerp(0.15, -0.95, u / 0.5)
     return out.set(0, SKULL.y + SKULL.ry * Math.sin(th), SKULL.z - SKULL.back * Math.cos(th))
@@ -260,7 +272,7 @@ function fitMask(g: THREE.BufferGeometry, rig: Rig, shape: MaskShape): Fit {
     const e = P[i]
     const u = Math.atan2(Math.abs(raw[i].x), raw[i].y + 0.5) / Math.PI
     d0.subVectors(e, ORIGIN).normalize()
-    dT.subVectors(hoodTarget(u, Math.sign(raw[i].x) || 1, dT), ORIGIN).normalize()
+    dT.subVectors(hoodTarget(u, Math.sign(raw[i].x) || 1, shape.skull, dT), ORIGIN).normalize()
     trace(d0, shape, q0)
     off.subVectors(e, q0)
     for (let k = 1; k <= RINGS; k++) {
@@ -719,7 +731,9 @@ export function spiderMask(): Model {
   const lenses = [-1, 1].map((side) =>
     rimmedPanel(LENS, rim, 0.04, 0.02, (fit, p) => {
       const e = eyeCentres(fit.L)[side < 0 ? 0 : 1]
-      return { x: e.x + side * (p.x * 1.05 + 0.03), y: e.y + 0.08 + p.y * 1.28 }
+      // Set wide, as on the reference: a clear band of fabric between
+      // the rims over the bridge of the nose.
+      return { x: e.x + side * (p.x * 0.98 + 0.15), y: e.y + 0.08 + p.y * 1.28 }
     }, side < 0),
   )
   const root = new THREE.Group()
@@ -731,7 +745,8 @@ export function spiderMask(): Model {
   }
   // Stretch fabric: close over the face (smoothed only enough to bridge
   // the eye sockets and soften the lips), snug over the head and neck.
-  const shape: MaskShape = { faceLift: () => 0.03, smooth: 3, lift: 0.04, ears: 0.2 }
+  // A high, round crown: the hood wraps the face and rises well above it.
+  const shape: MaskShape = { faceLift: () => 0.03, smooth: 3, lift: 0.04, ears: 0.2, skull: { y: 0.55, z: -1.35, rx: 1.3, ry: 1.62, front: 1.3, back: 1.66 } }
   return {
     root,
     fullHead: true,
@@ -845,13 +860,17 @@ export function batCowl(): Model {
     },
     smooth: 7,
     lift: 0.07,
-    ears: 0.2,
+    ears: 0.06,
+    // Tall and round on top, but close at the temples.
+    skull: { y: 0.5, z: -1.35, rx: 1.16, ry: 1.58, front: 1.28, back: 1.62 },
   }
   const dir = new THREE.Vector3()
   const base = new THREE.Vector3()
   return {
     root,
-    fullHead: true,
+    // Worn on the face: the face hides the inside of the cowl, which
+    // otherwise shows through the eye holes and round the mouth.
+    occludeFace: true,
     // Ears and the sides of the head, down to the cowl's lower edge.
     hidesHead: -1.25,
     update(rig) {

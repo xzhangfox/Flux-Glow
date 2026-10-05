@@ -54,6 +54,10 @@ export interface Model {
   /** Replaces the whole head (fursuit heads): the real head no longer
    *  occludes or catches shadows, and the composite box grows. */
   fullHead?: boolean
+  /** Only the face (not the rest of the head) hides what's behind it, and
+   *  catches shadows: for masks that cover the head but leave the face
+   *  showing through openings. */
+  occludeFace?: boolean
   /** Covers the head (hoods, cowls): hair the photo shows outside the
    *  model, and the head itself just outside its edge (ears…) above this
    *  line (rig y, below the eyes), is painted over with the background. */
@@ -411,7 +415,7 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
   }
   for (const [id, m] of st.models) m.root.visible = id === effectId
   model.update?.(rig, t)
-  for (const o of st.headParts) o.visible = !model.fullHead
+  st.headParts.forEach((o, i) => (o.visible = model.occludeFace ? i < 2 : !model.fullHead))
 
   estimateLight(st, frame, P, rig)
   updateEnvironment(st, frame, !live)
