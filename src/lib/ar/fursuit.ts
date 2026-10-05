@@ -60,15 +60,15 @@ function cone(p: V3, a: V3, b: V3, ra: number, rb: number, flat: number) {
 
 const MUZZLE_A = V(0, -0.36, 0.3)
 const MUZZLE_B = V(0, -0.56, 0.95)
-const EYE_X = 0.7
-const EYE_Y = -0.08
+const EYE_X = 0.76
+const EYE_Y = -0.1
 
 function sdf(p: V3) {
   // Broad cranium, full cheeks, and a narrower lower face to a small chin:
   // the V face.
-  let d = ellipsoid(p, 0, 0.45, -0.95, 1.8, 1.95, 1.7)
-  for (const s of [-1, 1]) d = smin(d, ellipsoid(p, s * 0.95, -0.35, -0.25, 0.95, 0.82, 0.88), 0.5)
-  d = smin(d, ellipsoid(p, 0, -1.05, -0.38, 1.0, 1.05, 1.15), 0.55)
+  let d = ellipsoid(p, 0, 0.5, -0.95, 1.95, 1.82, 1.7)
+  for (const s of [-1, 1]) d = smin(d, ellipsoid(p, s * 1.0, -0.4, -0.25, 0.95, 0.8, 0.88), 0.5)
+  d = smin(d, ellipsoid(p, 0, -1.05, -0.38, 0.95, 1.05, 1.15), 0.55)
   // Short, soft muzzle with a little chin under it.
   d = smin(d, cone(p, MUZZLE_A, MUZZLE_B, 0.5, 0.22, 0.85), 0.35)
   d = smin(d, ellipsoid(p, 0, -0.86, 0.55, 0.3, 0.17, 0.3), 0.18)
@@ -184,38 +184,40 @@ function furTexture(W: number, H: number, strands: number) {
 // so the head comes out at its intended colours.
 const FUR_GREY = new THREE.Color('#c4c4c4').r
 
-/** A neutral (near-white) tuft: strands fanning from the base to a soft
- *  point; tinted per card through the material colour. */
-function tuftTexture() {
-  const W = 256
+/** One lock of long-pile faux fur (neutral, tinted per card): fine
+ *  strands from a broad root converging to a soft point, darker at the
+ *  roots and lighter toward the tips, the root fading in. */
+function lockTexture() {
+  const W = 160
   const H = 320
   const c = document.createElement('canvas')
   c.width = W
   c.height = H
   const ctx = c.getContext('2d')!
   ctx.lineCap = 'round'
-  for (let i = 0; i < 2600; i++) {
-    const k = i / 2600
-    const x0 = W / 2 + (rnd() - 0.5) * W * 0.62
-    const y0 = H - 10 - rnd() * H * 0.3
-    const ang = -Math.PI / 2 + ((x0 - W / 2) / W) * 1.6 + (rnd() - 0.5) * 0.5
-    const len = H * (0.2 + rnd() * 0.55) * Math.sqrt(Math.max(0, 1 - ((x0 - W / 2) / (W * 0.31)) ** 2))
-    const g = Math.round(150 + 105 * (0.4 + 0.6 * k) * (0.75 + 0.25 * rnd()))
-    ctx.strokeStyle = `rgb(${g},${g},${g})`
-    ctx.globalAlpha = 0.18 + rnd() * 0.4
-    ctx.lineWidth = 0.8 + rnd() * 1.6
-    const ex = x0 + Math.cos(ang) * len
-    const ey = y0 + Math.sin(ang) * len
-    const bend = (rnd() - 0.5) * len * 0.3
+  for (let i = 0; i < 650; i++) {
+    const x0 = W / 2 + (rnd() - 0.5) * W * 0.86
+    const y0 = H * (0.9 + rnd() * 0.1)
+    const reach = 0.55 + rnd() * 0.45
+    const x1 = W / 2 + (x0 - W / 2) * (0.35 + rnd() * 0.45) + (rnd() - 0.5) * W * 0.18
+    const y1 = H - (H - 8) * reach * (1 - 0.8 * Math.abs(x0 - W / 2) / W)
+    const cx = (x0 + x1) / 2 + (x0 - W / 2) * 0.35 + (rnd() - 0.5) * 10
+    const cy = (y0 + y1) / 2
+    const g = ctx.createLinearGradient(0, y0, 0, y1)
+    const r = 215 + rnd() * 25
+    g.addColorStop(0, `rgb(${r},${r},${r})`)
+    g.addColorStop(1, 'rgb(255,255,255)')
+    ctx.strokeStyle = g
+    ctx.globalAlpha = 0.1 + rnd() * 0.3
+    ctx.lineWidth = 0.7 + rnd() * 1.3
     ctx.beginPath()
     ctx.moveTo(x0, y0)
-    ctx.quadraticCurveTo((x0 + ex) / 2 + bend, (y0 + ey) / 2, ex, ey)
+    ctx.quadraticCurveTo(cx, cy, x1, y1)
     ctx.stroke()
   }
-  // Roots fade in, so the tufts grow out of the head's fur without a line.
   ctx.globalAlpha = 1
   ctx.globalCompositeOperation = 'destination-in'
-  const fade = ctx.createLinearGradient(0, H, 0, H * 0.55)
+  const fade = ctx.createLinearGradient(0, H, 0, H * 0.72)
   fade.addColorStop(0, 'rgba(0,0,0,0)')
   fade.addColorStop(1, 'rgba(0,0,0,1)')
   ctx.fillStyle = fade
@@ -223,7 +225,21 @@ function tuftTexture() {
   ctx.globalCompositeOperation = 'source-over'
   const tex = new THREE.CanvasTexture(c)
   tex.colorSpace = THREE.SRGBColorSpace
+  tex.anisotropy = 4
   return tex
+}
+
+/** Lighting as if every fur card were the head's own surface: cards keep
+ *  the head's normal on both sides (no dark backs where locks lift off). */
+function furLit<T extends THREE.Material>(m: T): T {
+  m.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <normal_fragment_begin>',
+      THREE.ShaderChunk.normal_fragment_begin.replace('float faceDirection = gl_FrontFacing ? 1.0 : - 1.0;', 'float faceDirection = 1.0;'),
+    )
+  }
+  m.customProgramCacheKey = () => 'fur-lit'
+  return m
 }
 
 /** Big glossy anime eye (the right eye; the left is mirrored): dark lash
@@ -341,6 +357,135 @@ function mouthTexture() {
   return tex
 }
 
+/** The head's coat: ~1,500 locks of long fur rooted all over its surface,
+ *  each lying back at an angle along a grooming direction — combed out
+ *  from the muzzle (up over the brow, out across the cheeks, down the
+ *  chin), down the back of the head — short round the eyes and muzzle,
+ *  long and swept sideways on the cheeks. All lit with the head's own
+ *  normals, as one coat. */
+function furCoat(head: THREE.Mesh, fur: (p: V3) => THREE.Color, nose: V3, lock: THREE.Texture) {
+  const g = head.geometry
+  const pos = g.getAttribute('position') as THREE.BufferAttribute
+  const index = g.getIndex()!
+  const cum: number[] = []
+  const tris: number[] = []
+  let total = 0
+  const a = V(0, 0, 0)
+  const b = V(0, 0, 0)
+  const c = V(0, 0, 0)
+  for (let t = 0; t < index.count; t += 3) {
+    a.fromBufferAttribute(pos, index.getX(t))
+    b.fromBufferAttribute(pos, index.getX(t + 1))
+    c.fromBufferAttribute(pos, index.getX(t + 2))
+    const area = b.clone().sub(a).cross(c.clone().sub(a)).length() / 2
+    if (area < 1e-7) continue
+    total += area
+    cum.push(total)
+    tris.push(t)
+  }
+  const P: number[] = []
+  const Nn: number[] = []
+  const Cc: number[] = []
+  const UV: number[] = []
+  const I: number[] = []
+  const centers: number[] = []
+  const back = V(0, -0.6, -1).normalize()
+  const SEG = 3
+  for (let k = 0; k < 1900; k++) {
+    // Area-weighted random point on the head.
+    const r = rnd() * total
+    let lo = 0
+    let hi = cum.length - 1
+    while (lo < hi) {
+      const m = (lo + hi) >> 1
+      if (cum[m] < r) lo = m + 1
+      else hi = m
+    }
+    const t = tris[lo]
+    a.fromBufferAttribute(pos, index.getX(t))
+    b.fromBufferAttribute(pos, index.getX(t + 1))
+    c.fromBufferAttribute(pos, index.getX(t + 2))
+    let u = rnd()
+    let v = rnd()
+    if (u + v > 1) {
+      u = 1 - u
+      v = 1 - v
+    }
+    const p = a.clone().addScaledVector(b.clone().sub(a), u).addScaledVector(c.clone().sub(a), v)
+    const ax = Math.abs(p.x)
+    // Keep the eyes, nose and mouth clear.
+    if (p.z > 0 && ((ax - EYE_X) / 0.74) ** 2 + ((p.y - EYE_Y) / 0.62) ** 2 < 1) continue
+    if (p.distanceTo(nose) < 0.24) continue
+    if (p.z > 0.3 && ax < 0.3 && p.y < -0.58 && p.y > -0.95) continue
+    const n = normalAt(p)
+    // Grooming direction.
+    const front = ss(p.z, -0.7, 0.2)
+    const f = p.clone().sub(nose).multiplyScalar(front).addScaledVector(back, (1 - front) * 1.5)
+    const cheek = ss(ax, 0.55, 1.1) * Math.exp(-(((p.y + 0.45) / 0.5) ** 2)) * ss(p.z, -0.7, 0.1)
+    f.x += Math.sign(p.x) * cheek * 1.5
+    f.addScaledVector(n, -f.dot(n))
+    if (f.lengthSq() < 1e-5) f.set(0, -1, 0).addScaledVector(n, -n.y)
+    f.normalize()
+    const side = n.clone().cross(f).normalize()
+    // Length and lift by region.
+    const nearFace = p.z > 0.1 ? Math.exp(-((p.distanceTo(nose) / 0.9) ** 2)) : 0
+    let len = THREE.MathUtils.lerp(0.55, 0.24, nearFace)
+    len = THREE.MathUtils.lerp(len, 0.85, cheek)
+    len *= 0.8 + rnd() * 0.4
+    const lift = THREE.MathUtils.lerp(0.28, 0.5, cheek) + (rnd() - 0.5) * 0.12
+    const w = 0.12 + len * 0.32
+    const axis = f.clone().multiplyScalar(Math.cos(lift)).addScaledVector(n, Math.sin(lift))
+    const col = fur(p).multiplyScalar(0.97 + rnd() * 0.08)
+    const base = P.length / 3
+    const root = p.clone().addScaledVector(n, -0.02)
+    for (let sIdx = 0; sIdx <= SEG; sIdx++) {
+      const sv = sIdx / SEG
+      // Each lock droops back toward the coat along its length.
+      const q = root.clone().addScaledVector(axis, len * sv).addScaledVector(n, -len * 0.18 * sv * sv)
+      for (const e of [-0.5, 0.5]) {
+        const qq = q.clone().addScaledVector(side, e * w)
+        P.push(qq.x, qq.y, qq.z)
+        Nn.push(n.x, n.y, n.z)
+        Cc.push(col.r, col.g, col.b)
+        UV.push(e + 0.5, sv)
+      }
+      if (sIdx < SEG) {
+        const i0 = base + sIdx * 2
+        I.push(i0, i0 + 2, i0 + 1, i0 + 1, i0 + 2, i0 + 3)
+      }
+    }
+    const mid = root.clone().addScaledVector(axis, len * 0.5)
+    centers.push(mid.x, mid.y, mid.z)
+  }
+  const cg = new THREE.BufferGeometry()
+  cg.setAttribute('position', new THREE.Float32BufferAttribute(P, 3))
+  cg.setAttribute('normal', new THREE.Float32BufferAttribute(Nn, 3))
+  cg.setAttribute('color', new THREE.Float32BufferAttribute(Cc, 3))
+  cg.setAttribute('uv', new THREE.Float32BufferAttribute(UV, 2))
+  cg.setIndex(I)
+  // Soft, blended locks, drawn back to front: re-sorted for each view.
+  const mat = furLit(new THREE.MeshStandardMaterial({ map: lock, vertexColors: true, transparent: true, depthWrite: false, alphaTest: 0.01, side: THREE.DoubleSide, roughness: 1 }))
+  const coat = new THREE.Mesh(cg, mat)
+  coat.frustumCulled = false
+  coat.renderOrder = 2
+  const cards = centers.length / 3
+  const order = Array.from({ length: cards }, (_, i) => i)
+  const depth = new Float32Array(cards)
+  const quad = I.slice(0, SEG * 6)
+  const sorted = new Uint32Array(I.length)
+  const sort = (toCam: V3) => {
+    for (let i = 0; i < cards; i++) depth[i] = centers[i * 3] * toCam.x + centers[i * 3 + 1] * toCam.y + centers[i * 3 + 2] * toCam.z
+    order.sort((x, y) => depth[x] - depth[y])
+    let o = 0
+    for (const card of order) {
+      const base = card * (SEG + 1) * 2
+      for (const q of quad) sorted[o++] = base + q
+    }
+    cg.setIndex(new THREE.BufferAttribute(sorted, 1))
+  }
+  return { coat, sort }
+}
+
 function fursuit(spec: SuitSpec): Model {
   seed = 11
   const root = new THREE.Group()
@@ -365,7 +510,7 @@ function fursuit(spec: SuitSpec): Model {
   }
   g.computeVertexNormals()
   const furTex = furTexture(1024, 512, 120000)
-  const furMat = new THREE.MeshPhysicalMaterial({ vertexColors: true, map: furTex, bumpMap: furTex, bumpScale: 0.3, roughness: 0.95, sheen: 0.7, sheenRoughness: 0.6, sheenColor: new THREE.Color(0x6a5a4a) })
+  const furMat = new THREE.MeshPhysicalMaterial({ vertexColors: true, map: furTex, bumpMap: furTex, bumpScale: 0.2, roughness: 1, sheen: 0.3, sheenRoughness: 0.8, sheenColor: new THREE.Color(0x6a5a4a) })
   const head = new THREE.Mesh(g, furMat)
   head.castShadow = true
   head.receiveShadow = true
@@ -381,7 +526,7 @@ function fursuit(spec: SuitSpec): Model {
 
   // A decal conformed to the head: a grid laid over (x, y) on the face,
   // each vertex dropped onto the surface just in front of it.
-  const decal = (cx: number, cy: number, w: number, h: number, rot: number, mirror: boolean, mat: THREE.Material) => {
+  const decal = (cx: number, cy: number, w: number, h: number, rot: number, mirror: boolean, mat: THREE.Material, lift: number) => {
     const N = 20
     const pts: number[] = []
     const uvs: number[] = []
@@ -393,7 +538,7 @@ function fursuit(spec: SuitSpec): Model {
         const x = cx + Math.cos(rot) * u * w - Math.sin(rot) * v * h
         const y = cy + Math.sin(rot) * u * w + Math.cos(rot) * v * h
         const q = hitFront(x, y)
-        pts.push(q.x, q.y, q.z + 0.02)
+        pts.push(q.x, q.y, q.z + lift)
         uvs.push(mirror ? 0.5 - u : u + 0.5, v + 0.5)
         if (i < N && j < N) {
           const a = j * (N + 1) + i
@@ -412,7 +557,7 @@ function fursuit(spec: SuitSpec): Model {
 
   // ---- Eyes: big glossy anime eyes, outer corners lifted ----
   const eyeMat = new THREE.MeshPhysicalMaterial({ map: eyeTexture(spec.iris), transparent: true, alphaTest: 0.3, roughness: 0.15, clearcoat: 1, clearcoatRoughness: 0.03, side: THREE.DoubleSide })
-  for (const side of [-1, 1]) decal(side * EYE_X, EYE_Y, 1.24, 1.06, side * 0.1, side < 0, eyeMat)
+  for (const side of [-1, 1]) decal(side * EYE_X, EYE_Y, 1.42, 1.2, side * 0.1, side < 0, eyeMat, 0.07)
 
   // ---- Button nose and a tiny smile ----
   const nose = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 24), new THREE.MeshPhysicalMaterial({ color: 0x141011, roughness: 0.32, clearcoat: 1, clearcoatRoughness: 0.12 }))
@@ -422,26 +567,31 @@ function fursuit(spec: SuitSpec): Model {
     nose.geometry.computeVertexNormals()
   }
   nose.scale.set(0.15, 0.1, 0.1)
-  nose.position.copy(hitFront(0, -0.5)).add(V(0, 0, -0.02))
+  nose.position.copy(hitFront(0, -0.5)).add(V(0, 0, 0.02))
   nose.castShadow = true
   root.add(nose)
-  decal(0, -0.72, 0.46, 0.29, 0, false, new THREE.MeshStandardMaterial({ map: mouthTexture(), transparent: true, alphaTest: 0.25, roughness: 0.7, side: THREE.DoubleSide }))
+  decal(0, -0.72, 0.46, 0.29, 0, false, new THREE.MeshStandardMaterial({ map: mouthTexture(), transparent: true, alphaTest: 0.25, roughness: 0.7, side: THREE.DoubleSide }), 0.05)
 
   // ---- Ears: huge, long-furred, set high on the head ----
   const earCard = plushCard(spec.ear)
   for (const side of [-1, 1]) {
     const ear = earCard.clone()
-    ear.position.set(side * 0.95, 1.55, -0.7)
-    ear.rotation.set(-0.08, side * -0.28, side * -0.3)
+    ear.position.set(side * 0.98, 1.7, -0.8)
+    ear.rotation.set(-0.06, side * -0.25, side * -0.3)
     ear.scale.set(side, 1, 1)
     root.add(ear)
   }
 
-  // ---- Fluff ----
-  const tuft = tuftTexture()
+  // ---- Fur coat: locks of long-pile fur rooted all over the head ----
+  const lock = lockTexture()
+  const coat = furCoat(head, spec.fur, nose.position, lock)
+  root.add(coat.coat)
+
+  // ---- Silhouette fluff and cheek locks, aimed at the camera ----
+  const tuft = lock
   const tuftGeo = new THREE.PlaneGeometry(1, 1)
   tuftGeo.translate(0, 0.5, 0)
-  const tuftMat = (color: THREE.Color) => new THREE.MeshStandardMaterial({ map: tuft, color, transparent: true, alphaTest: 0.04, depthWrite: false, side: THREE.DoubleSide, roughness: 1 })
+  const tuftMat = (color: THREE.Color) => furLit(new THREE.MeshStandardMaterial({ map: tuft, color, transparent: true, depthWrite: false, alphaTest: 0.01, side: THREE.DoubleSide, roughness: 1 }))
   interface Tuft { mesh: THREE.Mesh; a: number; inset: number; size: number; ruff: boolean }
   const tufts: Tuft[] = []
   const addTuft = (a: number, inset: number, size: number, ruff: boolean) => {
@@ -450,16 +600,16 @@ function fursuit(spec: SuitSpec): Model {
     root.add(mesh)
     tufts.push({ mesh, a, inset, size, ruff })
   }
-  for (let i = 0; i < 110; i++) addTuft((i / 110) * Math.PI * 2 + rnd() * 0.05, 0.92, 0.42 + rnd() * 0.32, false)
+  for (let i = 0; i < 90; i++) addTuft((i / 90) * Math.PI * 2 + rnd() * 0.05, 0.95, 0.45 + rnd() * 0.35, false)
   // Big white cheek fluff, sweeping out sideways from the cheeks (angle
   // 0 = the head's left in view, π = its right; a little below level).
   for (let i = 0; i < 22; i++) {
     const t = i / 21
-    addTuft(-0.08 - t * 0.75, 0.84, 0.9 + rnd() * 0.75, true)
-    addTuft(Math.PI + 0.08 + t * 0.75, 0.84, 0.9 + rnd() * 0.75, true)
+    addTuft(-0.02 - t * 0.6, 0.86, 0.9 + rnd() * 0.9, true)
+    addTuft(Math.PI + 0.02 + t * 0.6, 0.86, 0.9 + rnd() * 0.9, true)
   }
-  const SIL_C = V(0, 0.15, -0.85)
-  const SIL_R = V(2.0, 2.2, 1.75)
+  const SIL_C = V(0, 0.2, -0.85)
+  const SIL_R = V(2.1, 2.15, 1.75)
   const toCam = V(0, 0, 1)
   const e1 = V(0, 0, 0)
   const e2 = V(0, 0, 0)
@@ -470,6 +620,7 @@ function fursuit(spec: SuitSpec): Model {
     update(rig: Rig) {
       // Silhouette of the head for this view (as an ellipsoid): s ⟂ R⁻¹·d.
       toCam.set(0, 0, 1).transformDirection(rig.inverse)
+      coat.sort(toCam)
       const m = V(toCam.x / SIL_R.x, toCam.y / SIL_R.y, toCam.z / SIL_R.z).normalize()
       e1.set(0, 1, 0).addScaledVector(m, -m.y)
       if (e1.lengthSq() < 1e-4) e1.set(1, 0, 0)
@@ -487,8 +638,8 @@ function fursuit(spec: SuitSpec): Model {
         const z = V(0, 0, 0).crossVectors(x, outward).normalize()
         m4.makeBasis(x, outward, z)
         t.mesh.quaternion.setFromRotationMatrix(m4)
-        t.mesh.scale.set(t.size * 1.1, t.size, 1)
-        ;(t.mesh.material as THREE.MeshStandardMaterial).color.copy(spec.fur(t.mesh.position)).multiplyScalar(1.25)
+        t.mesh.scale.set(t.size * 0.6, t.size, 1)
+        ;(t.mesh.material as THREE.MeshStandardMaterial).color.copy(spec.fur(t.mesh.position)).multiplyScalar(1.1)
       }
     },
   }
@@ -514,8 +665,10 @@ function whiteFace(p: V3) {
 }
 
 function foxFur(p: V3) {
-  const peach = C('#f09b55').lerp(C('#f8bb84'), ss(p.y, -0.5, 1.2) * 0.45 * ss(p.z, -0.2, 0.8))
-  return peach.lerp(C('#fbf7f1'), whiteFace(p))
+  // Pastel peach, a touch deeper down the nose bridge; cream white.
+  const bridge = Math.exp(-((p.x / 0.3) ** 2)) * ss(p.y, -0.6, -0.1) * (1 - ss(p.y, 0.4, 0.9)) * ss(p.z, 0, 0.5)
+  const peach = C('#f2a465').lerp(C('#f8c08c'), ss(p.y, 0.2, 1.8) * 0.5).lerp(C('#ec9152'), bridge * 0.7)
+  return peach.lerp(C('#fbf6ee'), whiteFace(p))
 }
 
 function huskyFur(p: V3) {
@@ -526,17 +679,18 @@ function huskyFur(p: V3) {
   return grey.lerp(C('#f6f6f4'), Math.max(whiteFace(p), mask))
 }
 
-const EAR_OUTLINE = smooth([[60, 890], [60, 560], [130, 270], [250, 20], [380, 250], [460, 540], [462, 890], [262, 900]])
-const EAR_INNER = smooth([[150, 850], [150, 590], [205, 330], [255, 170], [318, 330], [370, 590], [372, 850], [262, 862]])
+const EAR_OUTLINE = smooth([[22, 890], [40, 570], [118, 280], [250, 20], [392, 260], [478, 550], [494, 890], [262, 900]])
+const EAR_INNER = smooth([[118, 850], [124, 590], [192, 330], [254, 150], [326, 330], [392, 590], [400, 850], [262, 862]])
 
 export function foxHead(): Model {
   return fursuit({
     fur: foxFur,
     ear: {
-      w: 512, h: 900, cardW: 2.5,
+      w: 512, h: 900, cardW: 2.3,
       outline: EAR_OUTLINE, inner: EAR_INNER, tip: [255, -40],
-      root: '#d77a3a', mid: '#f3a462', light: '#ffd0a2',
-      skin: '#f2a073', plush: '#f6b58a', tuft: '#fff4e8',
+      root: '#e48a4c', mid: '#f3a66c', light: '#ffd2a8',
+      skin: '#e88a50', plush: '#ee9a62', tuft: '#fff3e4',
+      fan: 0.35,
       strand: [28, 70],
     },
     iris: ['#3b1d10', '#a35a26', '#f5c46a'],
@@ -547,7 +701,8 @@ export function huskyHead(): Model {
   return fursuit({
     fur: huskyFur,
     ear: {
-      w: 512, h: 900, cardW: 2.35,
+      w: 512, h: 900, cardW: 2.2,
+      fan: 0.35,
       outline: EAR_OUTLINE, inner: EAR_INNER, tip: [255, -40],
       root: '#33373e', mid: '#60656f', light: '#a0a5ad',
       skin: '#dad6d4', plush: '#f4f2f0', tuft: '#ffffff',

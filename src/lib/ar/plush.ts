@@ -33,6 +33,9 @@ export interface PlushSpec {
   tuft?: string
   strand: [number, number]
   hang?: boolean
+  /** How strongly edge hairs fan outward over the outline (default 0.9;
+   *  lower = softer, combed toward the tip). */
+  fan?: number
 }
 
 function inside(p: XY, poly: XY[]) {
@@ -107,8 +110,9 @@ export function paintEar(spec: PlushSpec): HTMLCanvasElement {
     l = Math.hypot(ox, oy) || 1
     ox /= l
     oy /= l
-    const fx = dx * (1 - e * 0.75) + ox * e * 0.9
-    const fy = dy * (1 - e * 0.75) + oy * e * 0.9
+    const fan = spec.fan ?? 0.9
+    const fx = dx * (1 - e * 0.75) + ox * e * fan
+    const fy = dy * (1 - e * 0.75) + oy * e * fan
     l = Math.hypot(fx, fy) || 1
     return [fx / l, fy / l]
   }
