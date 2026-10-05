@@ -32,9 +32,11 @@ export function cropRectFor(srcW: number, srcH: number, targetAspect: number | n
     if (srcAspect > targetAspect) fw = targetAspect / srcAspect
     else fh = srcAspect / targetAspect
   }
-  if (zoom > 1) {
-    fw /= zoom
-    fh /= zoom
+  // Zooming out (below 1) widens the crop until it reaches the frame's
+  // edges — which changes the saved shape, but shows more of the scene.
+  if (zoom !== 1) {
+    fw = Math.min(1, fw / zoom)
+    fh = Math.min(1, fh / zoom)
   }
   return { x0: (1 - fw) / 2, y0: (1 - fh) / 2, fw, fh }
 }

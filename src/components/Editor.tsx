@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ComponentType, type ReactNode, type RefObject, type SVGProps } from 'react'
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
-import { detectFaceLandmarks, detectFaceLandmarksForVideo } from '../lib/faceLandmarker'
+import { detectFaceLandmarks, LiveFaceTracker } from '../lib/faceLandmarker'
 import { processFrame, DEFAULT_PARAMS, faceFocus, type EditParams, type NumericParam } from '../lib/pipeline'
 import { renderFilterThumbnails } from '../lib/filters'
 import { ASPECT_MODES, aspectRatioFor, cropRectFor, drawFrame, remapLandmarks, type AspectMode } from '../lib/frame'
@@ -16,7 +16,7 @@ import { EFFECTS, findEffect, preloadAR } from '../lib/effects'
 import { renderFaceThumbs } from '../lib/thumbs'
 import { artImage, drawStickers, emojiCanvas, photoSticker, placeSticker, textCanvas, type Sticker } from '../lib/stickers'
 import ZoomControl from './ZoomControl'
-import { DIGITAL_ZOOM_RANGE, type ZoomRange } from '../lib/zoom'
+import { DIGITAL_ZOOM_RANGE, cropZoom, wideZoom, type ZoomRange } from '../lib/zoom'
 import {
   IconSpinner,
   IconCompare,
@@ -311,10 +311,12 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
     setLive(true)
     setStatus('loading')
     try {
-      // No `height` constraint: most phone sensors are natively wider than
-      // square, and pinning both dimensions makes the browser center-crop
-      // the lens's real field of view before our own framing ever runs.
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facingModeRef.current, width: { ideal: 1280 } } })
+      // No `height` constraint: pinning both dimensions makes the browser
+      // center-crop the lens's real field of view before our own framing
+      // ever runs. A 4:3 shape instead: phone sensors are natively 4:3, and
+      // the 16:9 modes browsers otherwise pick cut a quarter of the width
+      // off a portrait selfie.
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facingModeRef.current, width: { ideal: 1440 }, aspectRatio: { ideal: 4 / 3 } } })
       if (gen !== liveGenRef.current) {
         stream.getTracks().forEach((t) => t.stop())
         return
@@ -331,13 +333,11 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
       const track = stream.getVideoTracks()[0]
       zoomTrackRef.current = track
       const caps = track.getCapabilities?.() as (MediaTrackCapabilities & { zoom?: { min: number; max: number } }) | undefined
-      const range: ZoomRange = caps?.zoom && caps.zoom.max > caps.zoom.min ? { min: caps.zoom.min, max: caps.zoom.max, mode: 'hardware' } : DIGITAL_ZOOM_RANGE
+      const range: ZoomRange = caps?.zoom && caps.zoom.max > caps.zoom.min ? { min: caps.zoom.min, max: caps.zoom.max, mode: 'hardware', floor: caps.zoom.min } : DIGITAL_ZOOM_RANGE
       const initial = Math.min(range.max, Math.max(range.min, 1))
-      zoomRangeRef.current = range
-      zoomRef.current = initial
-      setZoomRange(range)
-      setZoom(initial)
       if (range.mode === 'hardware') track.applyConstraints({ advanced: [{ zoom: initial } as unknown as MediaTrackConstraintSet] }).catch(() => {})
+      updateZoomRange(range, initial)
+      const tracker = new LiveFaceTracker()
 
       const loop = () => {
         if (gen !== liveGenRef.current) return
@@ -353,9 +353,10 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
         const mirror = facingModeRef.current === 'user'
         // Hardware zoom already zoomed the sensor output — cropping again
         // on top of it would double-zoom.
-        const crop = cropRectFor(video.videoWidth, video.videoHeight, aspectRatioFor(aspectRef.current), zoomRangeRef.current.mode === 'hardware' ? 1 : zoomRef.current)
+        const crop = cropRectFor(video.videoWidth, video.videoHeight, aspectRatioFor(aspectRef.current), cropZoom(zoomRef.current, zoomRangeRef.current))
         const base = drawFrame(video, LIVE_MAX_DIMENSION, crop, mirror)
-        detectFaceLandmarksForVideo(video, now)
+        tracker
+          .detect(video, now, { x: crop.x0, y: crop.y0, w: crop.fw, h: crop.fh })
           .then((raw) => {
             if (gen !== liveGenRef.current) return
             const landmarks = remapLandmarks(raw, crop, mirror)
@@ -380,16 +381,19 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
   // detection on that exact frame (IMAGE mode, not the live tracker's
   // estimate), then the high-quality retouching pass.
   const loadStill = useCallback(
-    async (base: HTMLCanvasElement) => {
+    async (base: HTMLCanvasElement, liveLandmarks: NormalizedLandmark[] | null = null) => {
       staticBusyRef.current = true
       setProcessing(true)
       baseRef.current = base
       render()
       await nextPaint()
       try {
-        landmarksRef.current = await detectFaceLandmarks(base)
+        // A captured frame falls back on the live tracker's landmarks for
+        // it: tracking keeps hold of a face (half behind the phone, say)
+        // that detecting from scratch on a single frame can miss.
+        landmarksRef.current = (await detectFaceLandmarks(base, liveLandmarks)) ?? liveLandmarks
       } catch {
-        landmarksRef.current = null
+        landmarksRef.current = liveLandmarks
       }
       setStatus(landmarksRef.current ? 'ready' : 'no-face')
       await nextPaint()
@@ -407,15 +411,16 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
     setFlashKey((k) => k + 1)
     navigator.vibrate?.(15)
     const mirror = facingModeRef.current === 'user'
-    const crop = cropRectFor(video.videoWidth, video.videoHeight, aspectRatioFor(aspectRef.current), zoomRangeRef.current.mode === 'hardware' ? 1 : zoomRef.current)
+    const crop = cropRectFor(video.videoWidth, video.videoHeight, aspectRatioFor(aspectRef.current), cropZoom(zoomRef.current, zoomRangeRef.current))
     const base = drawFrame(video, MAX_DIMENSION, crop, mirror)
+    const liveLandmarks = landmarksRef.current
     staticBusyRef.current = true
     stopLive()
     setLive(false)
     // The last live frame (already retouched at preview quality) stays on
     // screen while the full-quality pass runs, so there's no flash of the
     // untouched photo in between.
-    loadStill(base)
+    loadStill(base, liveLandmarks)
   }, [stopLive, loadStill])
 
   // Uploaded photo.
@@ -609,19 +614,35 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
   }
 
   const applyZoom = useCallback((value: number) => {
-    const { min, max, mode } = zoomRangeRef.current
+    const { min, max, mode, floor } = zoomRangeRef.current
     const clamped = Math.min(max, Math.max(min, value))
+    const hw = Math.max(floor, clamped)
+    const prevHw = Math.max(floor, zoomRef.current)
     zoomRef.current = clamped
     setZoom(clamped)
-    if (mode === 'hardware' && zoomTrackRef.current) {
-      zoomTrackRef.current.applyConstraints({ advanced: [{ zoom: clamped } as unknown as MediaTrackConstraintSet] }).catch(() => {})
+    if (mode === 'hardware' && zoomTrackRef.current && hw !== prevHw) {
+      zoomTrackRef.current.applyConstraints({ advanced: [{ zoom: hw } as unknown as MediaTrackConstraintSet] }).catch(() => {})
     }
   }, [])
+
+  // The zoom range for the current camera and frame shape: zooming out
+  // below 1x reaches as far as the camera's whole field of view.
+  function updateZoomRange(base: ZoomRange, value: number) {
+    const video = videoRef.current
+    const wide = video?.videoWidth ? wideZoom(cropRectFor(video.videoWidth, video.videoHeight, aspectRatioFor(aspectRef.current), 1)) : 1
+    const range = { ...base, min: Math.min(base.floor, Math.ceil(base.floor * wide * 100) / 100) }
+    const clamped = Math.min(range.max, Math.max(range.min, value))
+    zoomRangeRef.current = range
+    zoomRef.current = clamped
+    setZoomRange(range)
+    setZoom(clamped)
+  }
 
   const cycleAspect = () => {
     const next = ASPECT_MODES[(ASPECT_MODES.indexOf(aspect) + 1) % ASPECT_MODES.length]
     aspectRef.current = next
     setAspect(next)
+    updateZoomRange(zoomRangeRef.current, zoomRef.current)
   }
 
   const exportBlob = (): Promise<Blob | null> => {
