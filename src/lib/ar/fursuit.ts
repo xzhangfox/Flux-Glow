@@ -37,6 +37,8 @@ function smin(a: number, b: number, k: number) {
   return Math.min(a, b) - h * h * k * 0.25
 }
 
+const smax = (a: number, b: number, k: number) => -smin(-a, -b, k)
+
 function ellipsoid(p: V3, cx: number, cy: number, cz: number, rx: number, ry: number, rz: number) {
   const x = p.x - cx
   const y = p.y - cy
@@ -58,20 +60,37 @@ function cone(p: V3, a: V3, b: V3, ra: number, rb: number, flat: number) {
   return Math.hypot(dx, dy, dz) - THREE.MathUtils.lerp(ra, rb, t)
 }
 
-const MUZZLE_A = V(0, -0.36, 0.3)
-const MUZZLE_B = V(0, -0.56, 0.95)
+const MUZZLE_A = V(0, -0.34, 0.35)
+const MUZZLE_B = V(0, -0.56, 1.12)
 const EYE_X = 0.76
 const EYE_Y = -0.1
 
+/** A box with rounded edges: half-size (bx, by, bz) to the start of the
+ *  rounding, radius r on top. */
+function roundBox(p: V3, cx: number, cy: number, cz: number, bx: number, by: number, bz: number, r: number) {
+  const qx = Math.abs(p.x - cx) - bx
+  const qy = Math.abs(p.y - cy) - by
+  const qz = Math.abs(p.z - cz) - bz
+  const out = Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0))
+  return out + Math.min(Math.max(qx, qy, qz), 0) - r
+}
+
 function sdf(p: V3) {
-  // Broad cranium, full cheeks, and a narrower lower face to a small chin:
-  // the V face.
-  let d = ellipsoid(p, 0, 0.5, -0.95, 1.95, 1.82, 1.7)
-  for (const s of [-1, 1]) d = smin(d, ellipsoid(p, s * 1.0, -0.4, -0.25, 0.95, 0.8, 0.88), 0.5)
-  d = smin(d, ellipsoid(p, 0, -1.05, -0.38, 0.95, 1.05, 1.15), 0.55)
-  // Short, soft muzzle with a little chin under it.
-  d = smin(d, cone(p, MUZZLE_A, MUZZLE_B, 0.5, 0.22, 0.85), 0.35)
-  d = smin(d, ellipsoid(p, 0, -0.86, 0.55, 0.3, 0.17, 0.3), 0.18)
+  // A head, not a ball: a rounded-box skull (flatter crown and sides,
+  // rounded back), cut in front by a face plane that leans back a little
+  // toward the forehead.
+  let d = roundBox(p, 0, 0.62, -1.0, 0.68, 0.48, 0.52, 1.24)
+  d = smax(d, p.z - (0.72 - 0.16 * p.y), 0.5)
+  // Cheekbones: the head is widest at eye level.
+  for (const s of [-1, 1]) d = smin(d, ellipsoid(p, s * 1.1, -0.35, -0.25, 0.82, 0.7, 0.78), 0.55)
+  // The jaw tapers from the cheeks to a small chin: the V face.
+  // A broad lower face trimmed by two side planes that run straight from
+  // the cheekbones to a small chin.
+  const lower = smax(ellipsoid(p, 0, -0.7, -0.45, 1.85, 1.25, 1.2), (Math.abs(p.x) - (0.42 + (p.y + 1.75) * 1.0)) * 0.7, 0.3)
+  d = smin(d, lower, 0.45)
+  // A short muzzle block with a little chin pad under it.
+  d = smin(d, cone(p, MUZZLE_A, MUZZLE_B, 0.48, 0.27, 0.78), 0.32)
+  d = smin(d, ellipsoid(p, 0, -0.93, 0.7, 0.3, 0.17, 0.26), 0.16)
   return d
 }
 
@@ -576,7 +595,7 @@ function fursuit(spec: SuitSpec): Model {
   const earCard = plushCard(spec.ear)
   for (const side of [-1, 1]) {
     const ear = earCard.clone()
-    ear.position.set(side * 0.98, 1.7, -0.8)
+    ear.position.set(side * 1.12, 1.95, -0.85)
     ear.rotation.set(-0.06, side * -0.25, side * -0.3)
     ear.scale.set(side, 1, 1)
     root.add(ear)
@@ -608,8 +627,8 @@ function fursuit(spec: SuitSpec): Model {
     addTuft(-0.02 - t * 0.6, 0.86, 0.9 + rnd() * 0.9, true)
     addTuft(Math.PI + 0.02 + t * 0.6, 0.86, 0.9 + rnd() * 0.9, true)
   }
-  const SIL_C = V(0, 0.2, -0.85)
-  const SIL_R = V(2.1, 2.15, 1.75)
+  const SIL_C = V(0, 0.3, -0.95)
+  const SIL_R = V(2.05, 2.15, 1.95)
   const toCam = V(0, 0, 1)
   const e1 = V(0, 0, 0)
   const e2 = V(0, 0, 0)
