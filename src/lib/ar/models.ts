@@ -748,7 +748,7 @@ function crown(): Model {
     root,
     update(rig) {
       const a = anchors(rig)
-      grp.position.copy(a.top).add(V(0, 0.42, -0.62))
+      grp.position.copy(a.top).add(V(0, 0.82, -0.62))
       grp.rotation.set(-0.32, 0, 0)
     },
   }
@@ -804,7 +804,7 @@ function angel(): Model {
     update(rig, t) {
       const a = anchors(rig)
       const bob = Math.sin(t * 2.2) * 0.05
-      grp.position.copy(a.top).add(V(0, 0.82 + bob, -0.55))
+      grp.position.copy(a.top).add(V(0, 1.3 + bob, -0.55))
       grp.rotation.set(Math.PI / 2 - 0.42, 0, 0)
       glow.position.copy(grp.position)
     },
@@ -835,7 +835,7 @@ function stars(): Model {
     root,
     update(rig, t) {
       const a = anchors(rig)
-      orbit.position.copy(a.top).add(V(0, 0.15, -1.1))
+      orbit.position.copy(a.top).add(V(0, 0.75, -1.1))
       orbit.rotation.set(0.18, 0, 0)
       list.forEach((m, i) => {
         const ang = t * 0.9 + (i / list.length) * Math.PI * 2

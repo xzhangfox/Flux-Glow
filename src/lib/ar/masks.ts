@@ -32,10 +32,6 @@ interface MaskShape {
   lift: (p: THREE.Vector3) => number
   /** Extra height over the crown, to cover the hair. */
   hair: number
-  /** Signed "keep" value per vertex (negative = cut away). Interpolated
-   *  across triangles and cut in the shader, so openings and edges come
-   *  out as smooth curves rather than the mesh's triangle staircase. */
-  cut?: (p: THREE.Vector3, eyes: EyeHole[]) => number
   /** Laplacian smoothing passes over the face before lifting: a moulded
    *  shell shouldn't follow every contour of the face underneath it. */
   smooth?: number
@@ -66,7 +62,7 @@ function maskGeometry() {
   g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(VERTS * 3), 3))
   g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(VERTS * 3), 3))
   g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(VERTS * 2), 2))
-  g.setAttribute('aCut', new THREE.BufferAttribute(new Float32Array(VERTS).fill(1), 1))
+  g.setAttribute('aLocal', new THREE.BufferAttribute(new Float32Array(VERTS * 3), 3))
   const face: number[] = Array.from(FACE_TRIANGULATION)
   const ringIdx: number[] = []
   const ring = (k: number, o: number) => (k === 0 ? OVAL[o] : N + (k - 1) * OVAL.length + o)
@@ -91,25 +87,68 @@ function maskGeometry() {
   return g
 }
 
-/** Adds the per-vertex cut to a standard material. */
-function withCut<T extends THREE.Material>(m: T): T {
+// Eye masks are cut out of the full mask surface per pixel: each fragment
+// gets its face-space position (vLocal) and a GLSL "keep" function decides
+// (negative = cut away), so the outline and eye openings are exact smooth
+// curves rather than following the face mesh's coarse triangles.
+const CUT_GLSL = `
+varying vec3 vLocal;
+uniform vec4 uEyeA;
+uniform vec4 uEyeB;
+uniform float uEyeY;
+// A band across the eyes between top and bottom (relative to eye height),
+// narrowing into ties past the temples, ending before the back of the head.
+float domino(vec3 p, float top, float bottom) {
+  float ax = abs(p.x);
+  float taper = max(0.0, ax - 0.95) * 0.55 + max(0.0, -0.2 - p.z) * 0.22;
+  return min(min(uEyeY + top - taper - p.y, p.y - (uEyeY + bottom + taper)), p.z + 1.05);
+}
+// Almond opening around an eye (x, y, rx, ry), outer corner swept up.
+float almond(vec3 p, vec4 e) {
+  float side = e.x < 0.0 ? -1.0 : 1.0;
+  vec2 d = p.xy - e.xy;
+  float a = -side * 0.22;
+  float u = (d.x * cos(a) - d.y * sin(a)) / (e.z * 1.15);
+  float v = (d.x * sin(a) + d.y * cos(a)) / (e.w * 1.3);
+  return (pow(abs(u), 1.7) + pow(abs(v), 2.2) - 1.0) * e.z * 0.5;
+}
+`
+
+interface CutUniforms {
+  uEyeA: { value: THREE.Vector4 }
+  uEyeB: { value: THREE.Vector4 }
+  uEyeY: { value: number }
+}
+
+/** Adds a per-pixel cut (`keep`: GLSL body of float maskKeep(vec3 p)). */
+function withCut<T extends THREE.Material>(m: T, name: string, keep: string): { material: T; uniforms: CutUniforms } {
+  const uniforms: CutUniforms = { uEyeA: { value: new THREE.Vector4() }, uEyeB: { value: new THREE.Vector4() }, uEyeY: { value: 0 } }
   // Antialiased: coverage ramps over one pixel of the cut function, resolved
-  // smooth by alpha-to-coverage instead of a hard, stair-stepped discard.
+  // by alpha-to-coverage instead of a hard, stair-stepped discard.
   m.alphaToCoverage = true
   m.onBeforeCompile = (shader) => {
-    shader.vertexShader = 'attribute float aCut;\nvarying float vCut;\n' + shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n  vCut = aCut;')
+    Object.assign(shader.uniforms, uniforms)
+    shader.vertexShader = 'attribute vec3 aLocal;\nvarying vec3 vLocal;\n' + shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n  vLocal = aLocal;')
     shader.fragmentShader =
-      'varying float vCut;\n' +
+      CUT_GLSL +
+      `float maskKeep(vec3 p) {\n${keep}\n}\n` +
       shader.fragmentShader
-        .replace('void main() {', 'void main() {\n  float cutA = clamp(vCut / max(fwidth(vCut), 1e-4) + 0.5, 0.0, 1.0);\n  if (cutA <= 0.0) discard;')
+        .replace('void main() {', 'void main() {\n  float keepV = maskKeep(vLocal);\n  float cutA = clamp(keepV / max(fwidth(keepV), 1e-5) + 0.5, 0.0, 1.0);\n  if (cutA <= 0.0) discard;')
         .replace('#include <dithering_fragment>', '#include <dithering_fragment>\n  gl_FragColor.a *= cutA;')
   }
-  m.customProgramCacheKey = () => 'mask-cut'
-  return m
+  m.customProgramCacheKey = () => 'mask-cut-' + name
+  return { material: m, uniforms }
+}
+
+function setEyes(u: CutUniforms, eyes: EyeHole[]) {
+  const [a, b] = eyes
+  u.uEyeA.value.set(a.c.x, a.c.y, a.rx, a.ry)
+  u.uEyeB.value.set(b.c.x, b.c.y, b.rx, b.ry)
+  u.uEyeY.value = (a.c.y + b.c.y) / 2
 }
 
 /** Rebuilds the mask surface from this frame's landmarks. */
-function updateMask(g: THREE.BufferGeometry, rig: Rig, shape: MaskShape) {
+function updateMask(g: THREE.BufferGeometry, rig: Rig, shape: MaskShape): EyeHole[] {
   const raw: THREE.Vector3[] = Array.from({ length: N }, (_, i) => rig.local(i))
   let L = raw
   if (shape.smooth) {
@@ -194,12 +233,13 @@ function updateMask(g: THREE.BufferGeometry, rig: Rig, shape: MaskShape) {
   })
   const pos = g.getAttribute('position') as THREE.BufferAttribute
   const uv = g.getAttribute('uv') as THREE.BufferAttribute
-  const cut = g.getAttribute('aCut') as THREE.BufferAttribute
+  const local = g.getAttribute('aLocal') as THREE.BufferAttribute
   P.forEach((p, i) => {
     pos.setXYZ(i, p.x, p.y, p.z)
     const [u, v] = uvOf(p)
     uv.setXY(i, u, v)
-    cut.setX(i, shape.cut ? shape.cut(i < N ? L[i] : p, eyes) : 1)
+    const q = i < N ? L[i] : p
+    local.setXYZ(i, q.x, q.y, q.z)
   })
   // A mirrored selfie reverses the face mesh's triangle winding, which makes
   // the renderer treat the outer surface as a back face and light it inside-
@@ -229,9 +269,10 @@ function updateMask(g: THREE.BufferGeometry, rig: Rig, shape: MaskShape) {
   }
   pos.needsUpdate = true
   uv.needsUpdate = true
-  cut.needsUpdate = true
+  local.needsUpdate = true
   nAttr.needsUpdate = true
   g.computeBoundingSphere()
+  return eyes
 }
 
 // ---- Procedural textures -----------------------------------------------------
@@ -361,24 +402,35 @@ function spiderLens(side: number) {
 export function spiderMask(): Model {
   const geo = maskGeometry()
   const { map, normal } = spiderTextures()
-  const mesh = new THREE.Mesh(
-    geo,
+  const { material, uniforms } = withCut(
     new THREE.MeshPhysicalMaterial({ map, normalMap: normal, normalScale: new THREE.Vector2(1.1, 1.1), roughness: 0.62, sheen: 0.7, sheenRoughness: 0.45, sheenColor: new THREE.Color(0xff5a5a), side: THREE.DoubleSide }),
+    'spider',
+    `float ax = abs(p.x);
+    float top = 0.44 - 0.07 * exp(-pow(ax / 0.2, 2.0));
+    float bottom = -0.34 + 0.12 * exp(-pow(ax / 0.15, 2.0)) + 0.06 * smoothstep(0.55, 0.9, ax);
+    return domino(p, top, bottom);`,
   )
+  const mesh = new THREE.Mesh(geo, material)
   mesh.frustumCulled = false
   const lenses = [spiderLens(-1), spiderLens(1)]
   const root = new THREE.Group()
   root.add(mesh, ...lenses)
-  const shape: MaskShape = { lift: () => 0.03, hair: 0.45 }
+  // A stretch-fabric eye mask: it bridges the eye sockets (smoothed) and
+  // the white lenses sit on it, covering the eyes.
+  const shape: MaskShape = {
+    lift: () => 0.035,
+    hair: 0,
+    smooth: 4,
+  }
   return {
     root,
     update(rig) {
-      updateMask(geo, rig, shape)
+      setEyes(uniforms, updateMask(geo, rig, shape))
       const eyes = [LEFT_EYE, RIGHT_EYE].map((loop) => loop.reduce((s, i) => s.add(rig.local(i)), new THREE.Vector3()).divideScalar(loop.length))
       eyes.sort((a, b) => a.x - b.x)
       eyes.forEach((e, k) => {
         const side = k ? 1 : -1
-        lenses[k].position.set(e.x + side * 0.04, e.y + 0.05, e.z + 0.1)
+        lenses[k].position.set(e.x + side * 0.04, e.y + 0.05, e.z + 0.17)
         lenses[k].rotation.set(-0.05, side * 0.32, side * 0.12)
       })
     },
@@ -389,87 +441,36 @@ export function spiderMask(): Model {
 
 export function batCowl(): Model {
   const geo = maskGeometry()
-  // Moulded blue-black plastic: smooth and glossy, so the sculpting reads
-  // through sharp highlights rather than texture.
-  // Satin-finish moulded plastic: soft, broad highlights rather than a
+  // Satin-finish moulded black: soft, broad highlights rather than a
   // pin-point CG glint.
-  const plastic = () => new THREE.MeshPhysicalMaterial({ color: 0x11151d, roughness: 0.5, metalness: 0, clearcoat: 0.8, clearcoatRoughness: 0.22, envMapIntensity: 0.7, side: THREE.DoubleSide })
-  const mesh = new THREE.Mesh(geo, withCut(plastic()))
-  mesh.castShadow = true
+  const { material, uniforms } = withCut(
+    new THREE.MeshPhysicalMaterial({ color: 0x101319, roughness: 0.62, metalness: 0, clearcoat: 0.2, clearcoatRoughness: 0.45, envMapIntensity: 0.7, side: THREE.DoubleSide }),
+    'bat',
+    // Top edge rising into two pointed bat ears over the brows and sweeping
+    // up at the outer corners; almond eye openings.
+    `float ax = abs(p.x);
+    float ear = pow(max(0.0, 1.0 - abs(ax - 0.42) / 0.12), 1.5) * 0.34;
+    float top = 0.32 + 0.2 * smoothstep(0.5, 0.95, ax) - 0.05 * exp(-pow(ax / 0.18, 2.0)) + ear;
+    float bottom = -0.3 + 0.13 * exp(-pow(ax / 0.15, 2.0)) - 0.06 * smoothstep(0.55, 0.85, ax);
+    return min(domino(p, top, bottom), min(almond(p, uEyeA), almond(p, uEyeB)));`,
+  )
+  const mesh = new THREE.Mesh(geo, material)
   mesh.frustumCulled = false
-  // Ears: tall, thin fins with slightly concave sides, bevelled edges.
-  const earShape = new THREE.Shape()
-  earShape.moveTo(-0.3, 0)
-  earShape.quadraticCurveTo(-0.1, 0.5, -0.03, 1.2)
-  earShape.lineTo(0.03, 1.2)
-  earShape.quadraticCurveTo(0.14, 0.55, 0.34, 0)
-  earShape.lineTo(-0.3, 0)
-  const earGeo = new THREE.ExtrudeGeometry(earShape, { depth: 0.07, bevelEnabled: true, bevelThickness: 0.035, bevelSize: 0.03, bevelSegments: 5, curveSegments: 24 })
-  earGeo.translate(0, -0.12, -0.035)
-  const earMat = plastic()
-  const ears = [-1, 1].map((s) => {
-    const m = new THREE.Mesh(earGeo, earMat)
-    m.castShadow = true
-    m.userData.s = s
-    return m
-  })
   const root = new THREE.Group()
-  root.add(mesh, ...ears)
-  let cutY = -0.9
-  let jawY = -1.6
-  // Straight across under the nose, then down the cheek flaps to the jaw.
-  const lowerEdge = (x: number) => {
-    const ax = Math.abs(x)
-    const drop = THREE.MathUtils.smoothstep(ax, 0.5, 0.78)
-    return THREE.MathUtils.lerp(cutY, jawY, drop)
-  }
+  root.add(mesh)
   const shape: MaskShape = {
-    // Sculpted: an angled V brow ridge with a furrow at its centre,
-    // cheekbone ridges and a moulded nose guard (all smooth functions, so
-    // the surface stays continuous).
     lift: (p) => {
       const ax = Math.abs(p.x)
-      const brow = 0.07 * Math.exp(-(((p.y - (0.16 + 0.32 * ax)) / 0.09) ** 2)) * THREE.MathUtils.smoothstep(ax, 0.04, 0.16) * (1 - THREE.MathUtils.smoothstep(ax, 0.7, 0.95))
-      const furrow = 0.035 * Math.exp(-((p.x / 0.05) ** 2)) * Math.exp(-(((p.y - 0.3) / 0.18) ** 2))
-      const cheek = 0.035 * Math.exp(-(((ax - 0.58) / 0.16) ** 2) - (((p.y + 0.48) / 0.2) ** 2))
-      // The smoothing flattens the real nose, so the guard is re-sculpted.
-      const nose = 0.05 * Math.exp(-((p.x / 0.16) ** 2)) * THREE.MathUtils.smoothstep(-p.y, -0.15, 0.1) * (1 - THREE.MathUtils.smoothstep(-p.y, 0.7, 0.95))
-      return 0.085 + brow + furrow + cheek + nose
+      const brow = 0.04 * Math.exp(-(((p.y - (0.16 + 0.25 * ax)) / 0.1) ** 2)) * THREE.MathUtils.smoothstep(ax, 0.04, 0.16)
+      return 0.05 + brow
     },
-    hair: 0.4,
+    hair: 0,
     smooth: 6,
-    cut: (p, eyes) => {
-      const below = (p.y - lowerEdge(p.x)) * 6
-      // Big almond openings, outer corners swept up.
-      const hole = Math.min(
-        ...eyes.map((e) => {
-          const side = Math.sign(e.c.x) || 1
-          const dx = p.x - e.c.x
-          const dy = p.y - e.c.y
-          const a = -side * 0.22
-          const u = (dx * Math.cos(a) - dy * Math.sin(a)) / (e.rx * 1.18)
-          const v = (dx * Math.sin(a) + dy * Math.cos(a)) / (e.ry * 1.25)
-          return Math.pow(Math.abs(u), 1.7) + Math.pow(Math.abs(v), 2.2) - 1
-        }),
-      )
-      return Math.min(below, hole)
-    },
   }
   return {
     root,
     update(rig) {
-      cutY = rig.local(2).y - 0.04
-      jawY = rig.local(152).y + 0.45
-      updateMask(geo, rig, shape)
-      const top = rig.local(10)
-      const tl = rig.local(21)
-      const tr = rig.local(251)
-      for (const e of ears) {
-        const temple = e.userData.s < 0 ? (tl.x < tr.x ? tl : tr) : tl.x < tr.x ? tr : tl
-        e.position.copy(top).lerp(temple, 0.66).add(new THREE.Vector3(e.userData.s * 0.08, 0.62, -0.36))
-        // Broad side to the front, as on the real cowl; a slight outward lean.
-        e.rotation.set(-0.12, e.userData.s * 0.12, e.userData.s * -0.12)
-      }
+      setEyes(uniforms, updateMask(geo, rig, shape))
     },
   }
 }

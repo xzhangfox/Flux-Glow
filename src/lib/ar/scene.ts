@@ -50,6 +50,9 @@ export interface Rig {
 export interface Model {
   root: THREE.Object3D
   update?: (rig: Rig, t: number) => void
+  /** Replaces the whole head (fursuit heads): the real head no longer
+   *  occludes or catches shadows, and the composite box grows. */
+  fullHead?: boolean
 }
 
 interface State {
@@ -68,6 +71,8 @@ interface State {
   envFrame: number
   sample: CanvasRenderingContext2D
   models: Map<string, Model>
+  /** Head occluders and shadow catchers, off under a full head. */
+  headParts: THREE.Object3D[]
 }
 
 let S: State | null = null
@@ -163,6 +168,7 @@ function init(): State {
     envFrame: 0,
     sample: sampleCanvas.getContext('2d', { willReadFrequently: true })!,
     models: new Map(),
+    headParts: [occluder, catcher, head, headCatch],
   }
 }
 
@@ -397,6 +403,7 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
   }
   for (const [id, m] of st.models) m.root.visible = id === effectId
   model.update?.(rig, t)
+  for (const o of st.headParts) o.visible = !model.fullHead
 
   estimateLight(st, frame, P, rig)
   updateEnvironment(st, frame, !live)
@@ -404,9 +411,9 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
   // Composite over a box around the head (ears, halo and hood included),
   // matched to the photo's tones and grain — see composite.ts.
   const c = new THREE.Vector3(0, 0.4, -0.6).applyMatrix4(rig.matrix)
-  const r = rig.E * 3.4
+  const r = rig.E * (model.fullHead ? 4.4 : 3.4)
   const x0 = Math.max(0, Math.floor(c.x - r))
-  const y0 = Math.max(0, Math.floor(-c.y - r * 1.15))
+  const y0 = Math.max(0, Math.floor(-c.y - r * (model.fullHead ? 1.25 : 1.15)))
   const x1 = Math.min(W, Math.ceil(c.x + r))
   const y1 = Math.min(H, Math.ceil(-c.y + r))
   compositeAR(frame, st.renderer.domElement, RS, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, live)

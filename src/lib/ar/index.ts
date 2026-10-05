@@ -3,3 +3,4 @@
 export { renderAR } from './scene'
 export { buildModel } from './models'
 export { spiderMask, batCowl } from './masks'
+export { foxHead, huskyHead } from './fursuit'

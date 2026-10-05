@@ -41,12 +41,14 @@ const BABY = { eyes: 0.3, eyeHeight: 0.2, noseTip: 0.25, chin: -0.3, face: 0.15,
 
 export const EFFECTS: EffectDef[] = [
   { id: 'none', label: 'None' },
-  { id: 'kitty', label: 'Kitty', boost: BABY },
-  { id: 'fox', label: 'Fox', boost: BABY },
-  { id: 'puppy', label: 'Puppy', boost: BABY },
-  { id: 'bunny', label: 'Bunny', boost: BABY },
-  { id: 'bear', label: 'Bear', boost: BABY },
+  { id: 'kitty', label: 'Kitty' },
+  { id: 'fox', label: 'Fox' },
+  { id: 'puppy', label: 'Puppy' },
+  { id: 'bunny', label: 'Bunny' },
+  { id: 'bear', label: 'Bear' },
   { id: 'doll', label: 'Doll', boost: { ...BABY, eyes: 0.45, eyeHeight: 0.3, chin: -0.4, whitening: 0.25 } },
+  { id: 'foxhead', label: 'Fox Head' },
+  { id: 'huskyhead', label: 'Husky Head' },
   { id: 'spider', label: 'Spider' },
   { id: 'bat', label: 'Bat' },
   { id: 'square', label: 'Square' },
@@ -234,7 +236,7 @@ function sparkle(ctx: CanvasRenderingContext2D, c: Pt, r: number, color: string)
 }
 
 
-const THREE_D = new Set(['kitty', 'fox', 'puppy', 'bunny', 'bear', 'spider', 'bat', 'aviator', 'square', 'oval', 'shield', 'cateye', 'tinted', 'hearts', 'crown', 'devil', 'angel', 'stars'])
+const THREE_D = new Set(['foxhead', 'huskyhead', 'kitty', 'fox', 'puppy', 'bunny', 'bear', 'spider', 'bat', 'aviator', 'square', 'oval', 'shield', 'cateye', 'tinted', 'hearts', 'crown', 'devil', 'angel', 'stars'])
 
 /** Draw `effectId` onto `canvas` (in place). `P` are landmark pixel
  *  positions; z is MediaPipe's relative depth in pixels (negative = nearer). */
@@ -255,8 +257,9 @@ export function drawEffect(canvas: HTMLCanvasElement, P: P3[], effectId: string,
       preloadAR()
       return
     }
-    const { renderAR, spiderMask, batCowl, buildModel } = ar
-    const build = () => (effectId === 'spider' ? spiderMask() : effectId === 'bat' ? batCowl() : buildModel(effectId))
+    const { renderAR, spiderMask, batCowl, foxHead, huskyHead, buildModel } = ar
+    const special: Record<string, () => import('./ar/scene').Model> = { spider: spiderMask, bat: batCowl, foxhead: foxHead, huskyhead: huskyHead }
+    const build = special[effectId] ?? (() => buildModel(effectId))
     try {
       renderAR(canvas, P, effectId, build, t, live)
     } catch (err) {
@@ -269,7 +272,7 @@ export function drawEffect(canvas: HTMLCanvasElement, P: P3[], effectId: string,
   if (effectId === 'angel') {
     for (let i = 0; i < 4; i++) {
       const a = t * 0.8 + i * 1.6
-      const p = add(add(f.top, f.up, (1.0 + 0.25 * Math.sin(a)) * f.E), f.right, Math.cos(a) * 0.9 * f.E)
+      const p = add(add(f.top, f.up, (1.45 + 0.25 * Math.sin(a)) * f.E), f.right, Math.cos(a) * 0.9 * f.E)
       sparkle(ctx, p, f.E * (0.05 + 0.03 * Math.sin(a * 2)), 'rgba(255,240,200,0.95)')
     }
   }
