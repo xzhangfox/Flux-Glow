@@ -59,7 +59,9 @@ function headBody(x: number, y: number, z: number) {
   for (const s of [-1, 1]) d = smin(d, ellipsoid(x - s * 0.46, y + 0.38, z - 0.0, 0.36, 0.32, 0.3), 0.2)
   d = smin(d, ellipsoid(x, y + 0.7, z - 0.06, 0.26, 0.14, 0.24), 0.14)
   // The two round pads under the nose that the mouth curls round.
-  for (const s of [-1, 1]) d = smin(d, ellipsoid(x - s * 0.12, y + 0.57, z - 0.36, 0.16, 0.12, 0.13), 0.08)
+  for (const s of [-1, 1]) d = smin(d, ellipsoid(x - s * 0.135, y + 0.565, z - 0.4, 0.17, 0.14, 0.16), 0.035)
+  // ...with a shallow groove down between them from the nose.
+  d = smax(d, -(Math.hypot(x / 0.5, (z - 0.58) / 0.5) * 0.5 - 0.018 + Math.max(0, y + 0.47) * 2 + Math.max(0, -0.68 - y) * 2), 0.02)
   // A short neck at the back.
   d = smin(d, ellipsoid(x, y + 0.34, z + 0.52, 0.45, 0.3, 0.38), 0.3)
   return d
@@ -77,13 +79,13 @@ interface Ear {
 }
 
 function makeEar(side: number): Ear {
-  const base = V(side * 0.58, 0.64, -0.5)
+  const base = V(side * 0.56, 0.62, -0.48)
   // Upright at the root; it sweeps back as it rises (see earLocal).
-  const u = V(side * 0.26, 1, -0.05).normalize()
-  const f0 = V(side * 0.4, 0, 1).normalize()
+  const u = V(side * 0.4, 1, -0.05).normalize()
+  const f0 = V(side * 0.22, 0, 1).normalize()
   const r = new THREE.Vector3().crossVectors(u, f0).normalize()
   const f = new THREE.Vector3().crossVectors(r, u).normalize()
-  return { base, u, r, f, h: 0.9, w: 0.39, t: 0.3 }
+  return { base, u, r, f, h: 0.94, w: 0.39, t: 0.42 }
 }
 const EARS = [makeEar(-1), makeEar(1)]
 
@@ -109,7 +111,7 @@ function earSection(e: Ear, a: number) {
   // Below its root the ear narrows away inside the head, so it never
   // breaks out of the side of the head as a ledge.
   const root = 1 - 0.9 * ss(-a, -0.08, 0.36)
-  return { w: (e.w * (1 - k ** 1.15) ** 0.62 + 0.035) * root, th: (e.t * (1 - k) ** 0.5 + 0.03) * root }
+  return { w: (e.w * (1 - k ** 1.3) ** 0.8 + 0.022) * root, th: (e.t * (1 - k) ** 0.5 + 0.055) * root }
 }
 
 /** A thick ear with a deep hollow in its front and a rolled rim round it. */
@@ -125,7 +127,7 @@ function earSdf(e: Ear, x: number, y: number, z: number) {
   const kc = Math.min(1, Math.max(0, (a - 0.02) / (e.h * 0.86)))
   // (closing over at the bottom, so the hollow's floor curves into the head)
   // (closing up smoothly short of the tip, so it leaves no seam there)
-  const wc = (e.w * 0.6 * (1 - kc) ** 0.6 + 0.005) * Math.sqrt(ss(a, -0.06, 0.22)) * (1 - ss(a, e.h * 0.55, e.h * 0.8)) + 1e-3
+  const wc = (e.w * 0.62 * (1 - kc) ** 0.6 + 0.005) * Math.sqrt(ss(a, -0.06, 0.22)) * (1 - ss(a, e.h * 0.66, e.h * 0.88)) + 1e-3
   const dc = th * 1.2 + 0.01
   const cav = Math.max((Math.hypot(s / wc, (t - th * 0.85) / dc) - 1) * Math.min(wc, dc), 0.02 - a)
   d = smax(d, -cav, 0.04)
@@ -136,8 +138,8 @@ function earSdf(e: Ear, x: number, y: number, z: number) {
 function earHollow(e: Ear, p: V3) {
   const { a, s, t } = earLocal(e, p.x, p.y, p.z)
   const kc = Math.min(1, Math.max(0, (a - 0.02) / (e.h * 0.86)))
-  const wc = e.w * 0.58 * (1 - kc) ** 0.6 + 0.005
-  return ss(wc - Math.abs(s), -0.012, 0.012) * ss(a, 0.0, 0.04) * ss(e.h * 0.76 - a, -0.01, 0.03) * ss(t, -earSection(e, a).th * 0.6, -earSection(e, a).th * 0.3)
+  const wc = e.w * 0.5 * (1 - kc) ** 0.6 + 0.005
+  return ss(wc - Math.abs(s), -0.012, 0.012) * ss(a, 0.0, 0.04) * ss(e.h * 0.84 - a, -0.01, 0.03) * ss(t, -earSection(e, a).th * 0.6, -earSection(e, a).th * 0.3)
 }
 
 interface Spike {
@@ -257,8 +259,8 @@ function buildSpikes() {
     // past the rim.
     const e = EARS[s < 0 ? 0 : 1]
     const out = e.r.clone().multiplyScalar(Math.sign(e.r.x * s))
-    const a = e.base.clone().addScaledVector(e.u, 0.1).addScaledVector(out, e.w * 0.45).addScaledVector(e.f, 0.1)
-    pushSpike(a, out.clone().multiplyScalar(0.7).addScaledVector(e.u, 0.4).addScaledVector(e.f, 0.6).normalize(), 0.2, 0.08, true)
+    const a = e.base.clone().addScaledVector(e.u, 0.08).addScaledVector(out, e.w * 0.55).addScaledVector(e.f, 0.12)
+    pushSpike(a, out.clone().addScaledVector(e.u, 0.05).addScaledVector(e.f, 0.45).normalize(), 0.26, 0.1, true)
   }
 }
 
@@ -551,7 +553,8 @@ function paintTexture() {
     for (const s of [-1, 1]) {
       g.fillStyle = '#f5e9d6'
       g.beginPath()
-      g.ellipse(px(s * 0.31), py(0.41), 0.12 * k, 0.074 * k, s * 0.12, 0, Math.PI * 2)
+      // (tilted, the outer end raised)
+      g.ellipse(px(s * 0.32), py(0.42), 0.135 * k, 0.082 * k, -s * 0.42, 0, Math.PI * 2)
       g.fill()
       g.lineCap = 'round'
       // The brown marks beside the bridge of the nose, slanting out.
@@ -565,8 +568,8 @@ function paintTexture() {
       g.strokeStyle = 'rgba(70,36,16,0.85)'
       g.lineWidth = 0.012 * k
       g.beginPath()
-      g.moveTo(px(s * 0.36), py(0.285))
-      g.lineTo(px(s * 0.4), py(0.27))
+      g.moveTo(px(s * 0.33), py(0.29))
+      g.lineTo(px(s * 0.38), py(0.265))
       g.stroke()
     }
   })
@@ -706,12 +709,12 @@ export function shibaHead(): Model {
   const np = ng.getAttribute('position') as THREE.BufferAttribute
   for (let i = 0; i < np.count; i++) {
     const y = np.getY(i)
-    np.setX(i, np.getX(i) * (0.78 + 0.32 * y))
+    np.setX(i, np.getX(i) * (0.72 + 0.42 * y))
     np.setZ(i, np.getZ(i) * (1 - 0.15 * Math.max(0, -y)))
   }
   ng.computeVertexNormals()
   const nose = new THREE.Mesh(ng, new THREE.MeshPhysicalMaterial({ color: 0x141214, roughness: 0.28, clearcoat: 1, clearcoatRoughness: 0.08 }))
-  nose.scale.set(0.2, 0.115, 0.11)
+  nose.scale.set(0.23, 0.13, 0.12)
   nose.position.set(0, tip.y, tip.z - 0.02)
   nose.rotation.x = -0.25
   sculpt.add(nose)
@@ -720,9 +723,9 @@ export function shibaHead(): Model {
   // ends hook up into the cheeks.
   const line = new THREE.MeshStandardMaterial({ color: 0x24160f, roughness: 0.6 })
   const strokes: [number, number][][] = [
-    [[0, -0.48], [0, -0.65]],
-    [[0, -0.65], [-0.08, -0.705], [-0.2, -0.71], [-0.31, -0.64], [-0.37, -0.54], [-0.355, -0.505]],
-    [[0, -0.65], [0.08, -0.705], [0.2, -0.71], [0.31, -0.64], [0.37, -0.54], [0.355, -0.505]],
+    [[0, -0.5], [0, -0.64]],
+    [[0, -0.64], [-0.06, -0.69], [-0.16, -0.715], [-0.26, -0.69], [-0.33, -0.61], [-0.365, -0.52], [-0.35, -0.48]],
+    [[0, -0.64], [0.06, -0.69], [0.16, -0.715], [0.26, -0.69], [0.33, -0.61], [0.365, -0.52], [0.35, -0.48]],
   ]
   for (const st of strokes) {
     const pts = st.map(([x, y]) => onFront(x, y).add(V(0, 0, 0.004)))
