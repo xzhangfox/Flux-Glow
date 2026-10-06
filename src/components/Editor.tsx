@@ -12,7 +12,8 @@ import StickerPanel, { type StickerRequest } from './StickerPanel'
 import StickerLayer from './StickerLayer'
 import { SHAPE_PARAMS } from '../lib/deform'
 import { LOOKS, applyLook, findLook } from '../lib/looks'
-import { EFFECTS, findEffect, preloadAR } from '../lib/effects'
+import { EFFECTS, findEffect, preloadAR, setCustomImage } from '../lib/effects'
+import CropDialog from './CropDialog'
 import { renderFaceThumbs } from '../lib/thumbs'
 import { artImage, drawStickers, emojiCanvas, photoSticker, placeSticker, textCanvas, type Sticker } from '../lib/stickers'
 import ZoomControl from './ZoomControl'
@@ -43,6 +44,7 @@ import {
   IconEars,
   IconSticker,
   IconRefresh,
+  IconPlus,
 } from './icons'
 
 // Saved photos and uploads are worked on at up to this size — phone photos
@@ -203,6 +205,10 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
   const trayRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // Custom effect: the photo being cropped, and the cropped square's preview.
+  const customInputRef = useRef<HTMLInputElement>(null)
+  const [cropFile, setCropFile] = useState<File | null>(null)
+  const [customUrl, setCustomUrl] = useState<string | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const zoomTrackRef = useRef<MediaStreamTrack | null>(null)
   const baseRef = useRef<HTMLCanvasElement | null>(null)
@@ -506,7 +512,7 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
         const items = LOOKS.map((l) => ({ id: l.id, params: applyLook(l, 1, { ...DEFAULT_PARAMS, effectId: 'none' }) }))
         renderFaceThumbs(base, landmarksRef.current, items, 1, (id, url) => setLookThumbs((m) => ({ ...m, [id]: url })), () => cancelled)
       } else {
-        const items = EFFECTS.filter((e) => e.id !== 'none').map((e) => ({ id: e.id, params: { ...paramsRef.current, effectId: e.id } }))
+        const items = EFFECTS.filter((e) => e.id !== 'none' && e.id !== 'custom').map((e) => ({ id: e.id, params: { ...paramsRef.current, effectId: e.id } }))
         preloadAR().then(() => {
           if (!cancelled) renderFaceThumbs(base, landmarksRef.current, items, 1.75, (id, url) => setEffectThumbs((m) => ({ ...m, [id]: url })), () => cancelled)
         })
@@ -944,12 +950,22 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
                     items={EFFECTS.map((e) => ({ id: e.id, label: e.label, badge: e.boost ? '♥' : undefined }))}
                     thumbs={effectThumbs}
                     selected={params.effectId}
-                    onSelect={(id) => setParams((p) => ({ ...p, effectId: id }))}
-                    fallback={(id) => (id === 'none' ? <IconClose className="w-6 h-6 text-white/60" /> : null)}
+                    onSelect={(id) => {
+                      // Custom: pick a photo first (or a new one, tapping it again).
+                      if (id === 'custom' && (!customUrl || params.effectId === 'custom')) customInputRef.current?.click()
+                      else setParams((p) => ({ ...p, effectId: id }))
+                    }}
+                    fallback={(id) =>
+                      id === 'none' ? (
+                        <IconClose className="w-6 h-6 text-white/60" />
+                      ) : id === 'custom' ? (
+                        customUrl ? <img src={customUrl} alt="" className="w-full h-full object-cover" draggable={false} /> : <IconPlus className="w-6 h-6 text-white/60" />
+                      ) : null
+                    }
                   />
                 )}
+                {params.effectId === 'custom' && !noFace && <p className="text-[11px] text-white/55 mt-2.5">Tap Custom again to use a different picture.</p>}
                 {findEffect(params.effectId).boost && !noFace && <p className="text-[11px] text-white/55 mt-2.5">Comes with a baby-face touch-up on top of your own Beauty and Shape settings.</p>}
-                {params.effectId === 'puppy' && live && <p className="text-[11px] text-white/55 mt-1">Open your mouth 👅</p>}
               </div>
             )}
             {panel === 'stickers' && <StickerPanel count={stickers.length} onAdd={addSticker} onClearAll={() => { setStickers([]); setSelectedSticker(null) }} />}
@@ -1011,6 +1027,29 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
         </div>
       </div>
 
+      <input
+        ref={customInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          if (file) setCropFile(file)
+          e.target.value = ''
+        }}
+      />
+      {cropFile && (
+        <CropDialog
+          file={cropFile}
+          onCancel={() => setCropFile(null)}
+          onDone={(square) => {
+            setCustomImage(square)
+            setCustomUrl(square.toDataURL('image/jpeg', 0.85))
+            setCropFile(null)
+            setParams((p) => ({ ...p, effectId: 'custom' }))
+          }}
+        />
+      )}
       <input
         ref={fileInputRef}
         type="file"

@@ -217,14 +217,6 @@ const BEAR: PlushSpec = {
   skin: '#b98a68', plush: '#d6ad8a', tuft: '#f0dcc2',
   strand: [14, 32],
 }
-const DOG: PlushSpec = {
-  w: 400, h: 760, cardW: 0.66, hang: true,
-  outline: smooth([[110, 10], [300, 10], [360, 200], [372, 480], [322, 700], [220, 755], [118, 700], [58, 480], [62, 200]]),
-  tip: [212, 800],
-  root: '#3c2112', mid: '#9a6238', light: '#e2ad72',
-  strand: [18, 40],
-}
-
 function nose(mat: THREE.Material, sx: number, sy: number, sz: number, tri = 0.5) {
   // A soft inverted-triangle nose: narrower toward the bottom.
   return blob(sx, sy, sz, mat, (v) => {
@@ -267,40 +259,6 @@ function fox(): Model {
   })
 }
 
-function puppy(): Model {
-  return animalModel({ card: DOG, t: 1, lift: V(0.2, 0.24, -0.45), rot: new THREE.Euler(0.1, -0.35, 0.22), scale: 1 }, (root) => {
-    const black = physical({ color: 0x141416, roughness: 0.28, clearcoat: 1, clearcoatRoughness: 0.15 })
-    const n = nose(black, 0.2, 0.13, 0.13, 0.35)
-    const nostrilMat = new THREE.MeshStandardMaterial({ color: 0x050505, roughness: 0.9 })
-    const nostrils = [-1, 1].map((s) => {
-      const m = blob(0.045, 0.028, 0.03, nostrilMat)
-      m.position.set(s * 0.075, -0.035, 0.115)
-      n.add(m)
-      return m
-    })
-    void nostrils
-    root.add(n)
-    // Tongue: shown when the mouth opens, longer the wider it opens.
-    const tongue = shadowed(
-      new THREE.Mesh(
-        new THREE.CapsuleGeometry(0.13, 0.32, 8, 24),
-        physical({ color: 0xe55d7c, roughness: 0.42, clearcoat: 0.6, clearcoatRoughness: 0.2, sheen: 0.4, sheenColor: new THREE.Color(0xffb0c0) }),
-      ),
-    )
-    tongue.scale.set(1, 1, 0.38)
-    root.add(tongue)
-    return (a, rig) => {
-      n.position.copy(a.noseTip).add(V(0, 0.04, 0.07))
-      const open = THREE.MathUtils.clamp((rig.mouthOpen - 0.12) / 0.3, 0, 1)
-      tongue.visible = open > 0.02
-      const len = 0.35 + 0.65 * open
-      tongue.scale.set(0.9, len, 0.38)
-      tongue.position.copy(a.lipLowerInner).add(V(0, -0.2 * len, 0.09))
-      tongue.rotation.set(0.35, 0, 0)
-    }
-  })
-}
-
 function bunny(): Model {
   return animalModel({ card: BUNNY, t: 0.4, lift: V(0.02, 0.3, -0.42), rot: new THREE.Euler(-0.2, -0.12, -0.14), scale: 1 }, (root) => {
     const n = nose(physical({ color: 0xff8fab, roughness: 0.35, clearcoat: 0.6 }), 0.055, 0.04, 0.035)
@@ -333,7 +291,7 @@ function bear(): Model {
 
 // ---- Eyewear ------------------------------------------------------------------
 
-type LensStyle = 'square' | 'oval' | 'cateye' | 'shield' | 'tinted' | 'aviator' | 'hearts'
+type LensStyle = 'square' | 'oval'
 
 // All sizes in rig units (1 = distance between the eye centres ≈ 63 mm),
 // taken from real frames: a 55 mm sunglass lens is ≈ 0.87 wide, a bridge
@@ -362,50 +320,6 @@ function lensShape(style: LensStyle): THREE.Shape {
       s.bezierCurveTo(0.46, -0.11, 0.24, -0.16, 0.0, -0.16)
       s.bezierCurveTo(-0.28, -0.16, -0.4, -0.11, -0.4, 0.0)
       break
-    case 'cateye':
-      // Upswept outer corners, a flatter inner edge.
-      s.moveTo(-0.4, 0.17)
-      s.bezierCurveTo(-0.2, 0.25, 0.2, 0.26, 0.47, 0.34)
-      s.bezierCurveTo(0.5, 0.2, 0.44, -0.05, 0.32, -0.2)
-      s.bezierCurveTo(0.18, -0.33, -0.18, -0.33, -0.32, -0.2)
-      s.bezierCurveTo(-0.42, -0.1, -0.44, 0.08, -0.4, 0.17)
-      break
-    case 'tinted':
-      // Soft octagon, the 'kpop tinted' shape.
-      s.moveTo(-0.24, 0.33)
-      s.lineTo(0.24, 0.33)
-      s.quadraticCurveTo(0.4, 0.31, 0.41, 0.14)
-      s.lineTo(0.41, -0.1)
-      s.quadraticCurveTo(0.4, -0.3, 0.22, -0.33)
-      s.lineTo(-0.22, -0.33)
-      s.quadraticCurveTo(-0.4, -0.3, -0.41, -0.1)
-      s.lineTo(-0.41, 0.14)
-      s.quadraticCurveTo(-0.4, 0.31, -0.24, 0.33)
-      break
-    case 'aviator':
-      s.moveTo(-0.38, 0.22)
-      s.bezierCurveTo(-0.16, 0.32, 0.26, 0.31, 0.41, 0.17)
-      s.bezierCurveTo(0.5, 0.0, 0.42, -0.36, 0.1, -0.4)
-      s.bezierCurveTo(-0.2, -0.43, -0.42, -0.18, -0.42, 0.04)
-      s.bezierCurveTo(-0.42, 0.13, -0.41, 0.19, -0.38, 0.22)
-      break
-    case 'hearts':
-      s.moveTo(0, -0.36)
-      s.bezierCurveTo(-0.5, -0.03, -0.47, 0.37, -0.17, 0.35)
-      s.bezierCurveTo(-0.06, 0.34, 0, 0.24, 0, 0.18)
-      s.bezierCurveTo(0, 0.24, 0.06, 0.34, 0.17, 0.35)
-      s.bezierCurveTo(0.47, 0.37, 0.5, -0.03, 0, -0.36)
-      break
-    case 'shield':
-      // One wraparound visor across both eyes, notched for the nose.
-      s.moveTo(-1.08, 0.18)
-      s.bezierCurveTo(-0.7, 0.34, 0.7, 0.34, 1.08, 0.18)
-      s.bezierCurveTo(1.16, 0.0, 1.06, -0.26, 0.82, -0.3)
-      s.bezierCurveTo(0.5, -0.33, 0.2, -0.26, 0.12, -0.12)
-      s.quadraticCurveTo(0, -0.02, -0.12, -0.12)
-      s.bezierCurveTo(-0.2, -0.26, -0.5, -0.33, -0.82, -0.3)
-      s.bezierCurveTo(-1.06, -0.26, -1.16, 0.0, -1.08, 0.18)
-      break
   }
   return s
 }
@@ -427,10 +341,8 @@ function offsetOutline(pts: THREE.Vector2[], th: (p: THREE.Vector2) => number) {
   })
 }
 
-/** Lens/frame curvature: real fronts bow back toward the temples; a shield
- *  wraps hard around the face. */
-const bow = (style: LensStyle) => (style === 'shield' ? 0.2 : 0.16)
-const lensZ = (style: LensStyle, x: number, y: number) => (style === 'shield' ? -bow(style) * x * x - 0.06 * y * y : 0.01 - bow(style) * (x * x + y * y))
+/** Lens/frame curvature: real fronts bow back toward the temples. */
+const lensZ = (_style: LensStyle, x: number, y: number) => 0.01 - 0.16 * (x * x + y * y)
 
 function curvedLens(shape: THREE.Shape, style: LensStyle) {
   const g = new THREE.ShapeGeometry(shape, 48)
@@ -465,54 +377,8 @@ function acetateTemple(depthFront: number, thickness: number) {
   return g
 }
 
-let tortoiseTex: THREE.CanvasTexture | null = null
-/** Tortoiseshell acetate: amber with soft dark-brown mottling. */
-function tortoise() {
-  if (tortoiseTex) return tortoiseTex
-  const c = document.createElement('canvas')
-  c.width = c.height = 256
-  const ctx = c.getContext('2d')!
-  ctx.fillStyle = '#8a4e1c'
-  ctx.fillRect(0, 0, 256, 256)
-  let seed = 5
-  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647
-  for (let i = 0; i < 160; i++) {
-    const x = rnd() * 256
-    const y = rnd() * 256
-    const r = 6 + rnd() * 26
-    const g = ctx.createRadialGradient(x, y, 0, x, y, r)
-    const dark = rnd() < 0.65
-    g.addColorStop(0, dark ? 'rgba(40,18,6,0.85)' : 'rgba(214,150,70,0.6)')
-    g.addColorStop(1, dark ? 'rgba(40,18,6,0)' : 'rgba(214,150,70,0)')
-    ctx.fillStyle = g
-    ctx.beginPath()
-    ctx.ellipse(x, y, r, r * (0.5 + rnd()), rnd() * Math.PI, 0, Math.PI * 2)
-    ctx.fill()
-  }
-  tortoiseTex = new THREE.CanvasTexture(c)
-  tortoiseTex.colorSpace = THREE.SRGBColorSpace
-  tortoiseTex.wrapS = tortoiseTex.wrapT = THREE.RepeatWrapping
-  tortoiseTex.repeat.set(2.2, 2.2)
-  return tortoiseTex
-}
-
-function gradientLens(top: string, bottom: string, opacity: number) {
-  const c = document.createElement('canvas')
-  c.width = 4
-  c.height = 64
-  const ctx = c.getContext('2d')!
-  const g = ctx.createLinearGradient(0, 0, 0, 64)
-  g.addColorStop(0, top)
-  g.addColorStop(1, bottom)
-  ctx.fillStyle = g
-  ctx.fillRect(0, 0, 4, 64)
-  const tex = new THREE.CanvasTexture(c)
-  tex.colorSpace = THREE.SRGBColorSpace
-  return physical({ map: tex, roughness: 0.03, transparent: true, opacity, clearcoat: 1, envMapIntensity: 1.3, side: THREE.DoubleSide, depthWrite: false })
-}
-
 interface Style {
-  frame: 'acetate' | 'wire' | 'shield'
+  frame: 'acetate'
   frameMat: () => THREE.Material
   lensMat: () => THREE.Material
   rim?: (p: THREE.Vector2) => number
@@ -542,53 +408,6 @@ const STYLES: Record<LensStyle, Style> = {
     depth: 0.065,
     temple: [0.07, 0.035],
   },
-  cateye: {
-    frame: 'acetate',
-    frameMat: () => acetate({ color: 0xffffff, map: tortoise() }),
-    lensMat: () => gradientLens('rgba(70,40,20,0.95)', 'rgba(190,140,90,0.55)', 0.92),
-    rim: (p) => 0.06 + 0.05 * THREE.MathUtils.smoothstep(p.x, 0.25, 0.47) * THREE.MathUtils.smoothstep(p.y, 0.0, 0.3),
-    depth: 0.07,
-    temple: [0.09, 0.04],
-  },
-  tinted: {
-    frame: 'wire',
-    frameMat: () => new THREE.MeshStandardMaterial({ color: 0xd8b26a, metalness: 1, roughness: 0.16 }),
-    lensMat: () => gradientLens('rgba(255,120,150,0.75)', 'rgba(255,200,210,0.25)', 0.75),
-  },
-  aviator: {
-    frame: 'wire',
-    frameMat: gold,
-    lensMat: () => gradientLens('rgba(40,52,60,0.97)', 'rgba(120,135,140,0.6)', 0.9),
-  },
-  hearts: {
-    frame: 'acetate',
-    frameMat: () => acetate({ color: 0xff3d85, roughness: 0.22 }),
-    lensMat: () => gradientLens('rgba(255,70,140,0.7)', 'rgba(255,170,205,0.4)', 0.75),
-    depth: 0.07,
-    temple: [0.07, 0.035],
-  },
-  shield: {
-    frame: 'shield',
-    frameMat: () => new THREE.MeshStandardMaterial({ color: 0xd9dde3, metalness: 1, roughness: 0.12 }),
-    // Mirrored, iridescent visor: blue-violet sheen that shifts with angle.
-    lensMat: () => {
-      // Y2K oil-slick mirror: blue through violet and pink to a gold top edge.
-      const c = document.createElement('canvas')
-      c.width = 4
-      c.height = 128
-      const ctx = c.getContext('2d')!
-      const g = ctx.createLinearGradient(0, 0, 0, 128)
-      g.addColorStop(0, '#f2c14e')
-      g.addColorStop(0.3, '#f15bb5')
-      g.addColorStop(0.6, '#7b5cf0')
-      g.addColorStop(1, '#2f6fe0')
-      ctx.fillStyle = g
-      ctx.fillRect(0, 0, 4, 128)
-      const map = new THREE.CanvasTexture(c)
-      map.colorSpace = THREE.SRGBColorSpace
-      return physical({ map, metalness: 0.55, roughness: 0.06, iridescence: 0.8, iridescenceIOR: 1.5, clearcoat: 1, transparent: true, opacity: 0.92, envMapIntensity: 1.8, side: THREE.DoubleSide, depthWrite: false })
-    },
-  },
 }
 
 function eyewear(style: LensStyle): Model {
@@ -603,50 +422,31 @@ function eyewear(style: LensStyle): Model {
   let hinge: number
   let hingeY = 0.12
 
-  if (S.frame === 'shield') {
-    const lens = new THREE.Mesh(curvedLens(shape, style), lensMat)
-    lens.renderOrder = 5
-    glasses.add(lens)
-    // A slim metal top bar following the visor's top edge.
-    const top = pts.filter((p) => p.y > 0.12 && Math.abs(p.x) < halfW - 0.04).sort((a, b) => a.x - b.x)
-    const curve = new THREE.CatmullRomCurve3(top.map((p) => V(p.x, p.y + 0.02, lensZ(style, p.x, p.y) + 0.01)))
-    glasses.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 120, 0.018, 10, false), frameMat))
-    hinge = halfW - 0.03
-    hingeY = 0.12
-    for (const side of [-1, 1]) {
-      const z0 = lensZ(style, hinge, 0.12)
-      glasses.add(new THREE.Mesh(taperTube([V(side * hinge, hingeY, z0), V(side * (hinge + 0.02), hingeY, z0 - 0.3), V(side * 1.04, hingeY, -0.95), V(side * 1.0, -0.02, -1.3)], 0.016, 0.013, 10, 48), frameMat))
-    }
-  } else {
+  {
     const cx = 0.15 + halfW
-    const outerPts = S.frame === 'acetate' ? (style === 'hearts' ? pts.map((p) => new THREE.Vector2(p.x * 1.2, p.y * 1.24)) : offsetOutline(pts, S.rim ?? (() => 0.07))) : pts
+    const outerPts = offsetOutline(pts, S.rim ?? (() => 0.07))
     const depth = S.depth ?? 0.06
     const lensFor = (side: -1 | 1) => {
       const grp = new THREE.Group()
       const lens = new THREE.Mesh(curvedLens(shape, style), lensMat)
       lens.renderOrder = 5
       grp.add(lens)
-      if (S.frame === 'wire') {
-        const curve = new THREE.CatmullRomCurve3(pts.map((p) => V(p.x, p.y, lensZ(style, p.x, p.y))), true)
-        grp.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 200, 0.017, 12, true), frameMat))
-      } else {
-        const outer = new THREE.Shape(outerPts)
-        outer.holes.push(new THREE.Path(pts.slice().reverse()))
-        const g = new THREE.ExtrudeGeometry(outer, { depth, bevelEnabled: true, bevelThickness: 0.024, bevelSize: 0.02, bevelSegments: 5, curveSegments: 64 })
-        g.translate(0, 0, -depth + 0.01)
-        // Bow the rim with the lens.
-        const p = g.getAttribute('position') as THREE.BufferAttribute
-        for (let i = 0; i < p.count; i++) p.setZ(i, p.getZ(i) + lensZ(style, p.getX(i), p.getY(i)) - 0.01)
-        g.computeVertexNormals()
-        grp.add(new THREE.Mesh(g, frameMat))
-        if (S.pins) {
-          const top = outerPts.reduce((a, b) => (b.x > 0.25 && b.y > a.y ? b : a), outerPts[0])
-          for (const dy of [0, -0.06]) {
-            const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 0.012, 16), silver)
-            pin.rotation.x = Math.PI / 2
-            pin.position.set(top.x - 0.06, top.y - 0.07 + dy, lensZ(style, top.x, top.y) + 0.045)
-            grp.add(pin)
-          }
+      const outer = new THREE.Shape(outerPts)
+      outer.holes.push(new THREE.Path(pts.slice().reverse()))
+      const g = new THREE.ExtrudeGeometry(outer, { depth, bevelEnabled: true, bevelThickness: 0.024, bevelSize: 0.02, bevelSegments: 5, curveSegments: 64 })
+      g.translate(0, 0, -depth + 0.01)
+      // Bow the rim with the lens.
+      const p = g.getAttribute('position') as THREE.BufferAttribute
+      for (let i = 0; i < p.count; i++) p.setZ(i, p.getZ(i) + lensZ(style, p.getX(i), p.getY(i)) - 0.01)
+      g.computeVertexNormals()
+      grp.add(new THREE.Mesh(g, frameMat))
+      if (S.pins) {
+        const top = outerPts.reduce((a, b) => (b.x > 0.25 && b.y > a.y ? b : a), outerPts[0])
+        for (const dy of [0, -0.06]) {
+          const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 0.012, 16), silver)
+          pin.rotation.x = Math.PI / 2
+          pin.position.set(top.x - 0.06, top.y - 0.07 + dy, lensZ(style, top.x, top.y) + 0.045)
+          grp.add(pin)
         }
       }
       grp.position.x = side * cx
@@ -656,28 +456,22 @@ function eyewear(style: LensStyle): Model {
     glasses.add(lensFor(-1), lensFor(1))
     const outerW = Math.max(...outerPts.map((p) => p.x))
     const innerW = Math.max(...outerPts.map((p) => -p.x))
-    hinge = cx + (S.frame === 'wire' ? halfW : outerW - 0.03)
-    hingeY = S.frame === 'wire' ? 0.12 : Math.max(...outerPts.map((p) => p.y)) - 0.1
-    if (S.frame === 'wire') {
-      const inner = cx - halfW
-      glasses.add(new THREE.Mesh(taperTube([V(-inner, 0.12, 0), V(0, 0.18, 0.03), V(inner, 0.12, 0)], 0.016, 0.016, 10, 24), frameMat))
-      if (style === 'aviator') glasses.add(new THREE.Mesh(taperTube([V(-inner - 0.04, 0.27, -0.01), V(0, 0.29, 0.0), V(inner + 0.04, 0.27, -0.01)], 0.014, 0.014, 10, 24), frameMat))
-    } else {
-      // Keyhole bridge: a moulded bar joining the two rims.
-      const gap = cx - innerW + 0.04
-      const by = style === 'oval' ? 0.04 : 0.13
-      const b = new THREE.Shape()
-      b.moveTo(-gap, by + 0.06)
-      b.lineTo(gap, by + 0.06)
-      b.lineTo(gap, by - 0.045)
-      b.quadraticCurveTo(0, by + 0.0, -gap, by - 0.045)
-      b.lineTo(-gap, by + 0.06)
-      const bg = new THREE.ExtrudeGeometry(b, { depth, bevelEnabled: true, bevelThickness: 0.024, bevelSize: 0.014, bevelSegments: 4 })
-      bg.translate(0, 0, -depth + 0.02)
-      glasses.add(new THREE.Mesh(bg, frameMat))
-    }
+    hinge = cx + outerW - 0.03
+    hingeY = Math.max(...outerPts.map((p) => p.y)) - 0.1
+    // Keyhole bridge: a moulded bar joining the two rims.
+    const gap = cx - innerW + 0.04
+    const by = style === 'oval' ? 0.04 : 0.13
+    const b = new THREE.Shape()
+    b.moveTo(-gap, by + 0.06)
+    b.lineTo(gap, by + 0.06)
+    b.lineTo(gap, by - 0.045)
+    b.quadraticCurveTo(0, by + 0.0, -gap, by - 0.045)
+    b.lineTo(-gap, by + 0.06)
+    const bg = new THREE.ExtrudeGeometry(b, { depth, bevelEnabled: true, bevelThickness: 0.024, bevelSize: 0.014, bevelSegments: 4 })
+    bg.translate(0, 0, -depth + 0.02)
+    glasses.add(new THREE.Mesh(bg, frameMat))
     for (const side of [-1, 1]) {
-      if (S.frame === 'wire' || !S.temple) {
+      if (!S.temple) {
         glasses.add(new THREE.Mesh(taperTube([V(side * hinge, hingeY, -0.03), V(side * (hinge + 0.04), hingeY, -0.28), V(side * 1.06, hingeY, -0.95), V(side * 1.02, -0.02, -1.3)], 0.016, 0.013, 10, 48), frameMat))
       } else {
         const temple = new THREE.Mesh(acetateTemple(S.temple[0], S.temple[1]), frameMat)
@@ -706,7 +500,7 @@ function eyewear(style: LensStyle): Model {
       const a = anchors(rig)
       // Glasses ride on the nose: lenses centred a little below the eyes.
       const y = (a.eyeL.y + a.eyeR.y) / 2 - 0.05
-      glasses.position.set(0, y, a.bridge.z + (style === 'shield' ? 0.2 : 0.13))
+      glasses.position.set(0, y, a.bridge.z + 0.13)
       glasses.rotation.set(-0.08, 0, 0)
     },
   }
@@ -854,20 +648,54 @@ function stars(): Model {
   }
 }
 
+// ---- Custom face sticker ------------------------------------------------------
+
+/** The user's own square picture worn over the face: a gently curved card
+ *  in front of it, turning with the head. Picks up a new picture whenever
+ *  the source's version changes. */
+export function faceSticker(source: () => { image: HTMLCanvasElement | null; version: number }): Model {
+  const g = new THREE.PlaneGeometry(1, 1, 16, 16)
+  const p = g.getAttribute('position') as THREE.BufferAttribute
+  // Curved round the face a little, like a card held to it.
+  for (let i = 0; i < p.count; i++) p.setZ(i, -0.22 * p.getX(i) ** 2 - 0.06 * p.getY(i) ** 2)
+  g.computeVertexNormals()
+  const tex = new THREE.CanvasTexture(document.createElement('canvas'))
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.anisotropy = 8
+  const mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, toneMapped: false })
+  const card = new THREE.Mesh(g, mat)
+  card.castShadow = true
+  const root = new THREE.Group()
+  root.add(card)
+  let version = -1
+  return {
+    root,
+    update(rig) {
+      const src = source()
+      card.visible = !!src.image
+      if (src.image && src.version !== version) {
+        version = src.version
+        tex.image = src.image
+        tex.needsUpdate = true
+      }
+      // Covers the face from brow to chin, centred on it, in front of the
+      // nose.
+      const a = anchors(rig)
+      const size = 2.9
+      card.scale.set(size, size, size)
+      card.position.set(0, (a.top.y + rig.local(152).y) / 2 - 0.05, a.noseTip.z + 0.35)
+    },
+  }
+}
+
 export function buildModel(id: string): Model {
   switch (id) {
     case 'kitty': return kitty()
     case 'fox': return fox()
-    case 'puppy': return puppy()
     case 'bunny': return bunny()
     case 'bear': return bear()
-    case 'aviator': return eyewear('aviator')
     case 'square': return eyewear('square')
     case 'oval': return eyewear('oval')
-    case 'cateye': return eyewear('cateye')
-    case 'shield': return eyewear('shield')
-    case 'tinted': return eyewear('tinted')
-    case 'hearts': return eyewear('hearts')
     case 'crown': return crown()
     case 'devil': return devil()
     case 'angel': return angel()

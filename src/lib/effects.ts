@@ -47,7 +47,6 @@ export const EFFECTS: EffectDef[] = [
   { id: 'none', label: 'None' },
   { id: 'kitty', label: 'Kitty' },
   { id: 'fox', label: 'Fox' },
-  { id: 'puppy', label: 'Puppy' },
   { id: 'bunny', label: 'Bunny' },
   { id: 'bear', label: 'Bear' },
   { id: 'doll', label: 'Doll', boost: { ...BABY, eyes: 0.45, eyeHeight: 0.3, chin: -0.4, whitening: 0.25 } },
@@ -57,15 +56,11 @@ export const EFFECTS: EffectDef[] = [
   { id: 'bat', label: 'Bat' },
   { id: 'square', label: 'Square' },
   { id: 'oval', label: 'Oval' },
-  { id: 'shield', label: 'Shield' },
-  { id: 'cateye', label: 'Cat-eye' },
-  { id: 'tinted', label: 'Tinted' },
-  { id: 'aviator', label: 'Aviator' },
-  { id: 'hearts', label: 'Hearts' },
   { id: 'crown', label: 'Crown' },
   { id: 'devil', label: 'Devil' },
   { id: 'angel', label: 'Angel' },
   { id: 'stars', label: 'Stars' },
+  { id: 'custom', label: 'Custom' },
 ]
 
 export const findEffect = (id: string) => EFFECTS.find((e) => e.id === id) ?? EFFECTS[0]
@@ -240,7 +235,16 @@ function sparkle(ctx: CanvasRenderingContext2D, c: Pt, r: number, color: string)
 }
 
 
-const THREE_D = new Set(['foxhead', 'huskyhead', 'kitty', 'fox', 'puppy', 'bunny', 'bear', 'spider', 'bat', 'aviator', 'square', 'oval', 'shield', 'cateye', 'tinted', 'hearts', 'crown', 'devil', 'angel', 'stars'])
+const THREE_D = new Set(['foxhead', 'huskyhead', 'kitty', 'fox', 'bunny', 'bear', 'spider', 'bat', 'square', 'oval', 'crown', 'devil', 'angel', 'stars', 'custom'])
+
+// The Custom effect's picture: a square the user cropped from their own
+// photo, worn in front of the face. Bumped version = a new picture.
+const custom = { image: null as HTMLCanvasElement | null, version: 0 }
+export function setCustomImage(image: HTMLCanvasElement) {
+  custom.image = image
+  custom.version++
+}
+export const getCustomImage = () => custom.image
 
 /** Draw `effectId` onto `canvas` (in place). `P` are landmark pixel
  *  positions; z is MediaPipe's relative depth in pixels (negative = nearer). */
@@ -261,8 +265,8 @@ export function drawEffect(canvas: HTMLCanvasElement, P: P3[], effectId: string,
       preloadAR()
       return
     }
-    const { renderAR, spiderMask, batCowl, foxHead, huskyHead, buildModel } = ar
-    const special: Record<string, () => import('./ar/scene').Model> = { spider: spiderMask, bat: batCowl, foxhead: foxHead, huskyhead: huskyHead }
+    const { renderAR, spiderMask, batCowl, foxHead, huskyHead, faceSticker, buildModel } = ar
+    const special: Record<string, () => import('./ar/scene').Model> = { spider: spiderMask, bat: batCowl, foxhead: foxHead, huskyhead: huskyHead, custom: () => faceSticker(() => custom) }
     const build = special[effectId] ?? (() => buildModel(effectId))
     try {
       renderAR(canvas, P, effectId, build, t, live)

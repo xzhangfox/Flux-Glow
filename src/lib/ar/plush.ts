@@ -84,7 +84,8 @@ export function smooth(ctrl: XY[], per = 10): XY[] {
 const hex = (c: string) => new THREE.Color(c)
 const mixHex = (a: string, b: string, t: number) => '#' + hex(a).lerp(hex(b), t).getHexString()
 
-export function paintEar(spec: PlushSpec): HTMLCanvasElement {
+/** `back`: the ear's back — fur all over, no inner ear. */
+export function paintEar(spec: PlushSpec, back = false): HTMLCanvasElement {
   const { w, h, outline, inner, tip } = spec
   const c = document.createElement('canvas')
   c.width = w
@@ -145,6 +146,21 @@ export function paintEar(spec: PlushSpec): HTMLCanvasElement {
     return col
   }
 
+  // 0. A soft halo of fur round the whole ear: plush has a fuzzy, glowing
+  // outline, not a fringe of hard spikes.
+  ctx.save()
+  ctx.filter = 'blur(10px)'
+  ctx.globalAlpha = 0.75
+  ctx.beginPath()
+  outline.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])))
+  ctx.closePath()
+  ctx.fillStyle = spec.mid
+  ctx.lineWidth = 14
+  ctx.strokeStyle = spec.mid
+  ctx.fill()
+  ctx.stroke()
+  ctx.restore()
+
   // 1. Base silhouette: soft dark under-coat.
   ctx.save()
   ctx.beginPath()
@@ -163,16 +179,17 @@ export function paintEar(spec: PlushSpec): HTMLCanvasElement {
     const len = l0 + (l1 - l0) * (0.4 + 0.6 * rnd()) * (0.6 + 0.6 * k)
     hair(p, flow(p, 46), len, 1 + rnd() * 1.6, colorAt(p, k * (0.6 + 0.4 * rnd())), 0.5 + 0.45 * rnd())
   }
-  // 3. Edge fluff: hairs rooted just inside the outline, reaching past it.
-  for (let i = 0; i < 3200; i++) {
+  // 3. Edge fluff: many short, fine, translucent hairs rooted just inside
+  // the outline and curling past it — soft, not spiky.
+  for (let i = 0; i < 7000; i++) {
     const a = outline[Math.floor(rnd() * outline.length)]
-    const p: XY = [a[0] + (cx - a[0]) * 0.05 * rnd(), a[1] + (cy - a[1]) * 0.05 * rnd()]
-    const len = l1 * (0.6 + 0.9 * rnd())
-    hair(p, flow(p, 80), len, 0.8 + rnd() * 1.2, colorAt(p, 0.5 + 0.5 * rnd()), 0.35 + 0.5 * rnd())
+    const p: XY = [a[0] + (cx - a[0]) * 0.07 * rnd(), a[1] + (cy - a[1]) * 0.07 * rnd()]
+    const len = l1 * (0.3 + 0.6 * rnd())
+    hair(p, flow(p, 80), len, 0.6 + rnd() * 0.9, colorAt(p, 0.5 + 0.5 * rnd()), 0.15 + 0.35 * rnd())
   }
 
   // 4. Inner ear: pink plush with long pale tufts fanning out of its base.
-  if (inner && spec.skin && spec.plush && spec.tuft) {
+  if (!back && inner && spec.skin && spec.plush && spec.tuft) {
     ctx.save()
     ctx.globalAlpha = 1
     ctx.beginPath()
@@ -205,30 +222,81 @@ export function paintEar(spec: PlushSpec): HTMLCanvasElement {
   return c
 }
 
-/** A card for the painted ear, gently curved (convex back, slightly cupped
- *  front), base at y = 0, rising (or hanging) along y. */
+/** A plush ear with volume: a puffed back (thickest in the middle,
+ *  tapering to the outline, furred all over), the painted front with its
+ *  furred rim rolled forward round the cupped inner ear, and a soft fringe
+ *  of fur between the two so the outline stays fuzzy from any angle. Base
+ *  at y = 0, rising (or hanging) along y. */
 export function plushCard(spec: PlushSpec) {
   const aspect = spec.h / spec.w
   const cw = spec.cardW
   const chh = cw * aspect
-  const g = new THREE.PlaneGeometry(cw, chh, 24, 24)
-  const p = g.getAttribute('position') as THREE.BufferAttribute
-  for (let i = 0; i < p.count; i++) {
-    const x = p.getX(i) / (cw / 2)
-    const y = p.getY(i) / (chh / 2)
-    p.setZ(i, -0.14 * cw * x * x - 0.04 * cw * y * y)
+  const SEG = 36
+  // Thickness at each point of the card: rising from the outline inward.
+  const T = 0.26 * cw
+  const ramp = spec.w * 0.3
+  const toCanvas = (x: number, y: number): XY => [(x / cw + 0.5) * spec.w, (0.5 - y / chh) * spec.h]
+  const thick = (x: number, y: number) => {
+    const p = toCanvas(x, y)
+    if (!inside(p, spec.outline)) return 0
+    const e = Math.min(1, edgeDist(p, spec.outline) / ramp)
+    return T * Math.sqrt(e * (2 - e))
   }
-  g.computeVertexNormals()
-  // The ear's base (canvas bottom, or top when hanging) sits at y = 0.
-  g.translate(0, spec.hang ? -chh / 2 : chh / 2, 0)
-  const tex = new THREE.CanvasTexture(paintEar(spec))
-  tex.colorSpace = THREE.SRGBColorSpace
-  tex.anisotropy = 8
-  const mat = new THREE.MeshStandardMaterial({ map: tex, transparent: true, alphaTest: 0.02, roughness: 0.95, metalness: 0, side: THREE.DoubleSide, depthWrite: false })
-  const mesh = new THREE.Mesh(g, mat)
-  mesh.castShadow = true
-  // Shadows follow the painted silhouette, not the card's rectangle.
-  mesh.customDepthMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: tex, alphaTest: 0.5 })
-  mesh.renderOrder = 2
-  return mesh
+  const rim = (x: number, y: number) => (spec.inner && inside(toCanvas(x, y), spec.inner) ? Math.max(0, 1 - edgeDist(toCanvas(x, y), spec.inner) / (spec.w * 0.08)) * 0.15 : 1)
+  const cup = (x: number, y: number) => -0.14 * cw * (x / (cw / 2)) ** 2 - 0.04 * cw * (y / (chh / 2)) ** 2
+  const surface = (z: (x: number, y: number) => number, flip: boolean) => {
+    const g = new THREE.PlaneGeometry(cw, chh, SEG, SEG)
+    const p = g.getAttribute('position') as THREE.BufferAttribute
+    for (let i = 0; i < p.count; i++) p.setZ(i, z(p.getX(i), p.getY(i)))
+    if (flip) {
+      const idx = g.getIndex()!
+      const a = idx.array as Uint16Array
+      for (let t = 0; t < a.length; t += 3) [a[t + 1], a[t + 2]] = [a[t + 2], a[t + 1]]
+      idx.needsUpdate = true
+    }
+    g.computeVertexNormals()
+    // The ear's base (canvas bottom, or top when hanging) sits at y = 0.
+    g.translate(0, spec.hang ? -chh / 2 : chh / 2, 0)
+    return g
+  }
+  const texture = (back: boolean) => {
+    const tex = new THREE.CanvasTexture(paintEar(spec, back))
+    tex.colorSpace = THREE.SRGBColorSpace
+    tex.anisotropy = 8
+    return tex
+  }
+  const frontTex = texture(false)
+  const backTex = texture(true)
+  // Plush: a soft sheen grazing the pile.
+  const plush = (map: THREE.Texture, o: THREE.MeshPhysicalMaterialParameters) =>
+    new THREE.MeshPhysicalMaterial({ map, roughness: 0.95, metalness: 0, sheen: 0.6, sheenRoughness: 0.6, sheenColor: new THREE.Color(spec.light), ...o })
+
+  // The front: cupped, its furred rim rolled forward round the inner ear.
+  const front = new THREE.Mesh(
+    surface((x, y) => cup(x, y) + 0.55 * thick(x, y) * rim(x, y), false),
+    plush(frontTex, { transparent: true, alphaTest: 0.02, side: THREE.DoubleSide, depthWrite: false }),
+  )
+  front.renderOrder = 2
+  // The back: puffed out behind the front, solid.
+  const backMesh = new THREE.Mesh(
+    surface((x, y) => cup(x, y) - thick(x, y), true),
+    // Only the solid core: its cut edge stays inside the fuzzy outline.
+    plush(backTex, { alphaTest: 0.92, side: THREE.DoubleSide }),
+  )
+  backMesh.renderOrder = 1
+  // The fringe: the fur's soft outline again, halfway through the ear, so
+  // the edge is fuzzy seen from the side too.
+  const fringe = new THREE.Mesh(
+    surface((x, y) => cup(x, y) - 0.4 * thick(x, y), false),
+    plush(backTex, { transparent: true, alphaTest: 0.02, side: THREE.DoubleSide, depthWrite: false, opacity: 0.7 }),
+  )
+  fringe.renderOrder = 1
+  const group = new THREE.Group()
+  group.add(backMesh, fringe, front)
+  for (const m of [backMesh, front]) {
+    m.castShadow = true
+    // Shadows follow the painted silhouette, not the card's rectangle.
+    m.customDepthMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: m === front ? frontTex : backTex, alphaTest: 0.5 })
+  }
+  return group
 }
