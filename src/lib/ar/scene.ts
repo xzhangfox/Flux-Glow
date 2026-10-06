@@ -429,6 +429,23 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
   const x1 = Math.min(W, Math.ceil(c.x + r))
   const y1 = Math.min(H, Math.ceil(Math.max(-c.y + r, -new THREE.Vector3(0, -(model.reach ?? 0), -0.6).applyMatrix4(rig.matrix).y + rig.E * 0.3)))
   const box = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+  // A head this big shades the neck and shoulders under it: a soft
+  // contact shadow on the photo, below the chin.
+  if (model.fullHead) {
+    const o = new THREE.Vector3(0, -2.5, -0.9).applyMatrix4(rig.matrix)
+    const ax = new THREE.Vector3(2.3, -2.5, -0.9).applyMatrix4(rig.matrix).sub(o)
+    const ay = new THREE.Vector3(0, -1.6, -0.9).applyMatrix4(rig.matrix).sub(o)
+    const ctx = frame.getContext('2d')!
+    ctx.save()
+    ctx.setTransform(ax.x, -ax.y, ay.x, -ay.y, o.x, -o.y)
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 1)
+    g.addColorStop(0, 'rgba(0,0,0,0.42)')
+    g.addColorStop(0.55, 'rgba(0,0,0,0.2)')
+    g.addColorStop(1, 'rgba(0,0,0,0)')
+    ctx.fillStyle = g
+    ctx.fillRect(-1, -1, 2, 2)
+    ctx.restore()
+  }
   const layer = readLayer(st.renderer.domElement, RS, box)
   if (model.hidesHead !== undefined) {
     const line = model.hidesHead

@@ -357,10 +357,14 @@ function lockTexture() {
  *  the head's normal on both sides (no dark backs where locks lift off). */
 function furLit<T extends THREE.Material>(m: T): T {
   m.onBeforeCompile = (shader) => {
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <normal_fragment_begin>',
-      THREE.ShaderChunk.normal_fragment_begin.replace('float faceDirection = gl_FrontFacing ? 1.0 : - 1.0;', 'float faceDirection = 1.0;'),
-    )
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <normal_fragment_begin>',
+        THREE.ShaderChunk.normal_fragment_begin.replace('float faceDirection = gl_FrontFacing ? 1.0 : - 1.0;', 'float faceDirection = 1.0;'),
+      )
+      // A soft glow where the coat turns away toward the outline, as
+      // backlit plush does — the fluffy, toy-like edge of a fursuit.
+      .replace('#include <opaque_fragment>', 'outgoingLight += diffuseColor.rgb * pow(1.0 - clamp(abs(normal.z), 0.0, 1.0), 2.5) * 0.35;\n#include <opaque_fragment>')
   }
   m.customProgramCacheKey = () => 'fur-lit'
   return m
@@ -484,7 +488,7 @@ function furCoat(head: THREE.Mesh, fur: (p: V3) => THREE.Color, nose: V3, lock: 
   const centers: number[] = []
   const back = V(0, -0.6, -1).normalize()
   const SEG = 3
-  for (let k = 0; k < 1900; k++) {
+  for (let k = 0; k < 3000; k++) {
     // Area-weighted random point on the head.
     const r = rnd() * total
     let lo = 0
@@ -507,7 +511,8 @@ function furCoat(head: THREE.Mesh, fur: (p: V3) => THREE.Color, nose: V3, lock: 
     const p = a.clone().addScaledVector(b.clone().sub(a), u).addScaledVector(c.clone().sub(a), v)
     const ax = Math.abs(p.x)
     // Keep the eyes, nose and mouth clear.
-    if (p.z > 0 && ((ax - EYE_X) / (EYE_W * 0.54)) ** 2 + ((p.y - EYE_Y) / (EYE_H * 0.54)) ** 2 < 1 && p.z < 1) continue
+    // (Fur grows right up to the eyes' rims: a bare ring reads as a sticker.)
+    if (p.z > 0 && ((ax - EYE_X) / (EYE_W * 0.47)) ** 2 + ((p.y - EYE_Y) / (EYE_H * 0.47)) ** 2 < 1 && p.z < 1) continue
     if (p.distanceTo(nose) < 0.36) continue
     if (mouthDist(p) < 0.1) continue
     const n = normalAt(p)
@@ -526,9 +531,11 @@ function furCoat(head: THREE.Mesh, fur: (p: V3) => THREE.Color, nose: V3, lock: 
     len = THREE.MathUtils.lerp(len, 0.85, cheek)
     len *= 0.8 + rnd() * 0.4
     const lift = THREE.MathUtils.lerp(0.28, 0.5, cheek) + (rnd() - 0.5) * 0.12
-    const w = 0.12 + len * 0.32
+    // Narrow locks, many of them: broad cards overlap into a pattern of
+    // scallops, like feathers.
+    const w = 0.075 + len * 0.22
     const axis = f.clone().multiplyScalar(Math.cos(lift)).addScaledVector(n, Math.sin(lift))
-    const col = fur(p).multiplyScalar(0.97 + rnd() * 0.08)
+    const col = fur(p).multiplyScalar(0.92 + rnd() * 0.14)
     const base = P.length / 3
     const root = p.clone().addScaledVector(n, -0.02)
     for (let sIdx = 0; sIdx <= SEG; sIdx++) {
@@ -557,7 +564,9 @@ function furCoat(head: THREE.Mesh, fur: (p: V3) => THREE.Color, nose: V3, lock: 
   cg.setAttribute('uv', new THREE.Float32BufferAttribute(UV, 2))
   cg.setIndex(I)
   // Soft, blended locks, drawn back to front: re-sorted for each view.
-  const mat = furLit(new THREE.MeshStandardMaterial({ map: lock, vertexColors: true, transparent: true, depthWrite: false, alphaTest: 0.01, side: THREE.DoubleSide, roughness: 1 }))
+  // A touch translucent, so overlapping locks blend instead of stacking
+  // into hard-edged shards.
+  const mat = furLit(new THREE.MeshStandardMaterial({ map: lock, vertexColors: true, transparent: true, opacity: 0.86, depthWrite: false, alphaTest: 0.01, side: THREE.DoubleSide, roughness: 1 }))
   const coat = new THREE.Mesh(cg, mat)
   coat.frustumCulled = false
   coat.renderOrder = 2
@@ -605,6 +614,11 @@ function fursuit(spec: SuitSpec): Model {
     const n = normalAt(p)
     nrm.setXYZ(i, n.x, n.y, n.z)
     const c = spec.fur(p).multiplyScalar(occlusion(p, n) / FUR_GREY)
+    // The eyes sit in shallow hollows: a soft shadow round each.
+    if (p.z > 0) {
+      const e = Math.sqrt(((Math.abs(p.x) - EYE_X) / (EYE_W * 0.5)) ** 2 + ((p.y - EYE_Y) / (EYE_H * 0.5)) ** 2)
+      c.multiplyScalar(1 - 0.28 * Math.exp(-(((e - 1.02) / 0.16) ** 2)))
+    }
     // A soft shadow along the carved mouth groove.
     const md = mouthDist(p)
     if (md < 0.1) c.multiplyScalar(0.75 + 0.25 * (md / 0.1))
@@ -639,7 +653,7 @@ function fursuit(spec: SuitSpec): Model {
   // A decal conformed to the head: a grid laid over (x, y) on the face,
   // each vertex dropped onto the surface just in front of it (`face`: the
   // face under the snout, so eyes sit beside the bridge, not on it).
-  const decal = (cx: number, cy: number, w: number, h: number, rot: number, mirror: boolean, mat: THREE.Material, lift: number, face = false) => {
+  const decal = (cx: number, cy: number, w: number, h: number, rot: number, mirror: boolean, mat: THREE.Material, lift: number, face = false, dome = 0) => {
     const N = 20
     const pts: number[] = []
     const uvs: number[] = []
@@ -651,7 +665,8 @@ function fursuit(spec: SuitSpec): Model {
         const x = cx + Math.cos(rot) * u * w - Math.sin(rot) * v * h
         const y = cy + Math.sin(rot) * u * w + Math.cos(rot) * v * h
         const q = face ? onFace(x, y) : hitFront(x, y)
-        pts.push(q.x, q.y, q.z + lift)
+        // `dome`: bulged out in the middle, like a moulded acrylic eye.
+        pts.push(q.x, q.y, q.z + lift + dome * Math.max(0, 1 - 4 * (u * u + v * v)))
         uvs.push(mirror ? 0.5 - u : u + 0.5, v + 0.5)
         if (i < N && j < N) {
           const a = j * (N + 1) + i
@@ -670,7 +685,9 @@ function fursuit(spec: SuitSpec): Model {
 
   // ---- Eyes: big glossy anime eyes, outer corners lifted ----
   const eyeMat = new THREE.MeshPhysicalMaterial({ map: eyeTexture(spec.iris), transparent: true, alphaTest: 0.3, roughness: 0.15, clearcoat: 1, clearcoatRoughness: 0.03, side: THREE.DoubleSide })
-  for (const side of [-1, 1]) decal(side * EYE_X, EYE_Y, EYE_W, EYE_H, side * 0.1, side < 0, eyeMat, 0.07, true)
+  // Domed, so the catch-lights and reflections move over them with the
+  // head, as on a fursuit's acrylic eyes.
+  for (const side of [-1, 1]) decal(side * EYE_X, EYE_Y, EYE_W, EYE_H, side * 0.1, side < 0, eyeMat, 0.05, true, 0.1)
 
   // ---- A big, glossy nose on the tip of the snout (the mouth is carved) ----
   const nose = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 24), new THREE.MeshPhysicalMaterial({ color: 0x141011, roughness: 0.32, clearcoat: 1, clearcoatRoughness: 0.12 }))
@@ -784,8 +801,9 @@ function whiteFace(p: V3) {
   const ax = Math.abs(p.x)
   const front = ss(p.z, -1.0, -0.3)
   // (Not on the snout: its top and sides stay coloured down to the mouth.)
-  const cheeks = ss(0.12 - p.y, -0.06, 0.06) * ss(ax, 0.22, 0.4) * (1 - ss(p.z, 0.8, 1.05))
-  const lower = ss(-0.6 - p.y, -0.05, 0.05)
+  // Crisp edges: markings read as graphic shapes, as in anime.
+  const cheeks = ss(0.12 - p.y, -0.03, 0.03) * ss(ax, 0.26, 0.34) * (1 - ss(p.z, 0.86, 1.0))
+  const lower = ss(-0.6 - p.y, -0.03, 0.03)
   let w = Math.max(cheeks, lower) * front
   w = Math.max(w, ss(-p.y, 1.55, 1.8))
   // Pale brow spots above the inner corners of the eyes.
