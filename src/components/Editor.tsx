@@ -187,6 +187,17 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
   const [params, setParams] = useState<EditParams>(DEFAULT_PARAMS)
   const [status, setStatus] = useState<Status>('loading')
   const [live, setLive] = useState(source.kind === 'live')
+  // A photo just taken with the camera (not an upload): shown and edited
+  // exactly as the viewfinder showed it — same framing, same face fit,
+  // same rendering — nothing re-detected or re-processed differently.
+  const [captured, setCaptured] = useState(false)
+  const capturedRef = useRef(false)
+  // Video: long-press the shutter to record.
+  const [recordingSince, setRecordingSince] = useState<number | null>(null)
+  const [recordTick, setRecordTick] = useState(0)
+  const recRef = useRef<{ rec: MediaRecorder; chunks: Blob[]; audio: MediaStream | null } | null>(null)
+  const pressTimerRef = useRef<number | null>(null)
+  const pressHandledRef = useRef(false)
   const [processing, setProcessing] = useState(false)
   const [panel, setPanel] = useState<Panel | null>(null)
   const [showBefore, setShowBefore] = useState(false)
@@ -302,7 +313,7 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
   const recomputeStatic = useCallback(() => {
     const base = baseRef.current
     if (!base) return
-    resultRef.current = processFrame(base, landmarksRef.current, paramsRef.current)
+    resultRef.current = processFrame(base, landmarksRef.current, paramsRef.current, !capturedRef.current)
     render()
   }, [render])
 
@@ -404,10 +415,10 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
       render()
       await nextPaint()
       try {
-        // A captured frame falls back on the live tracker's landmarks for
-        // it: tracking keeps hold of a face (half behind the phone, say)
-        // that detecting from scratch on a single frame can miss.
-        landmarksRef.current = (await detectFaceLandmarks(base, liveLandmarks)) ?? liveLandmarks
+        // A captured frame keeps the live tracker's landmarks — the face fit
+        // the viewfinder showed (they're relative to the same crop) — and
+        // only detects afresh if there were none.
+        landmarksRef.current = capturedRef.current && liveLandmarks ? liveLandmarks : ((await detectFaceLandmarks(base, liveLandmarks)) ?? liveLandmarks)
       } catch {
         landmarksRef.current = liveLandmarks
       }
@@ -431,6 +442,8 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
     const base = drawFrame(video, MAX_DIMENSION, crop, mirror)
     const liveLandmarks = landmarksRef.current
     staticBusyRef.current = true
+    capturedRef.current = true
+    setCaptured(true)
     stopLive()
     setLive(false)
     // The last live frame (already retouched at preview quality) stays on
@@ -444,6 +457,8 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
     if (source.kind !== 'image') return
     let cancelled = false
     staticBusyRef.current = true
+    capturedRef.current = false
+    setCaptured(false)
     setLive(false)
     setStatus('loading')
     setStickers([])
@@ -586,6 +601,111 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
     if (id !== null) setStickers((list) => (list[list.length - 1]?.id === id ? list : [...list.filter((s) => s.id !== id), list.find((s) => s.id === id)!]))
   }
 
+  // ---- Video ----
+  const saveVideo = async (blob: Blob, ext: string) => {
+    const name = timestampedName().replace(/\.jpg$/, `.${ext}`)
+    const file = new File([blob], name, { type: blob.type })
+    if (navigator.canShare?.({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file] })
+        return
+      } catch {
+        // dismissed: fall through to a download
+      }
+    }
+    downloadBlob(blob, name)
+    showToast('Video saved')
+  }
+
+  const stopRecording = useCallback(() => {
+    const r = recRef.current
+    if (r && r.rec.state !== 'inactive') r.rec.stop()
+  }, [])
+
+  const startRecording = async () => {
+    const canvas = displayRef.current as (HTMLCanvasElement & { captureStream?: (fps?: number) => MediaStream }) | null
+    if (!canvas?.captureStream || typeof MediaRecorder === 'undefined') {
+      showToast("Video recording isn't supported in this browser")
+      return
+    }
+    setPanel(null)
+    const stream = canvas.captureStream(30)
+    // Sound too, if the microphone is allowed; a silent video otherwise.
+    let audio: MediaStream | null = null
+    try {
+      audio = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
+      audio.getAudioTracks().forEach((t) => stream.addTrack(t))
+    } catch {
+      audio = null
+    }
+    if (!pressHandledRef.current) {
+      // Let go while the microphone was being set up: nothing to record.
+      audio?.getTracks().forEach((t) => t.stop())
+      return
+    }
+    const type = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find((t) => MediaRecorder.isTypeSupported(t))
+    let rec: MediaRecorder
+    try {
+      rec = new MediaRecorder(stream, type ? { mimeType: type, videoBitsPerSecond: 6_000_000 } : undefined)
+    } catch {
+      audio?.getTracks().forEach((t) => t.stop())
+      showToast("Video recording isn't supported in this browser")
+      return
+    }
+    const chunks: Blob[] = []
+    rec.ondataavailable = (e) => e.data.size && chunks.push(e.data)
+    rec.onstop = () => {
+      recRef.current?.audio?.getTracks().forEach((t) => t.stop())
+      recRef.current = null
+      setRecordingSince(null)
+      const mime = rec.mimeType || type || 'video/webm'
+      if (chunks.length) saveVideo(new Blob(chunks, { type: mime }), mime.includes('mp4') ? 'mp4' : 'webm')
+    }
+    recRef.current = { rec, chunks, audio }
+    rec.start(250)
+    navigator.vibrate?.(25)
+    setRecordingSince(Date.now())
+  }
+
+  // Recording timer (and a one-minute cap).
+  useEffect(() => {
+    if (recordingSince === null) return
+    const id = setInterval(() => {
+      setRecordTick((n) => n + 1)
+      if (Date.now() - recordingSince > 60_000) stopRecording()
+    }, 250)
+    return () => clearInterval(id)
+  }, [recordingSince, stopRecording])
+
+  // Leaving the camera ends a recording in progress.
+  useEffect(() => {
+    if (!live) stopRecording()
+  }, [live, stopRecording])
+
+  // Shutter: tap = photo, press and hold = video while held.
+  const onShutterDown = () => {
+    if (countdown !== null || status === 'loading' || status === 'error') return
+    pressHandledRef.current = false
+    pressTimerRef.current = window.setTimeout(() => {
+      pressTimerRef.current = null
+      pressHandledRef.current = true
+      startRecording()
+    }, 400)
+  }
+  const onShutterUp = () => {
+    if (pressTimerRef.current !== null) {
+      clearTimeout(pressTimerRef.current)
+      pressTimerRef.current = null
+      pressHandledRef.current = true
+      handleShutter()
+      return
+    }
+    if (pressHandledRef.current) {
+      pressHandledRef.current = false
+      stopRecording()
+    }
+  }
+
   const handleShutter = () => {
     if (countdown !== null) {
       cancelCountdown()
@@ -614,6 +734,8 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
 
   // ✕ in review: discard and go back to the camera.
   const handleClose = () => {
+    capturedRef.current = false
+    setCaptured(false)
     setPanel(null)
     setStickers([])
     setSelectedSticker(null)
@@ -775,7 +897,7 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
 
   const togglePanel = (p: Panel) => setPanel((v) => (v === p ? null : p))
   const noFace = status === 'no-face'
-  const fullBleed = live && aspect === 'full'
+  const fullBleed = (live || captured) && aspect === 'full'
   const topInset = 'max(0.75rem, env(safe-area-inset-top))'
   // The viewfinder sits below the top controls and clears the shutter that
   // straddles the tray's top edge — except in Full, which fills the screen.
@@ -789,7 +911,7 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
     <div className="fixed inset-0 bg-black overflow-hidden select-none">
       <video ref={videoRef} autoPlay playsInline muted className="hidden" />
 
-      <div ref={previewRef} className={`absolute inset-x-0 flex justify-center ${live && !fullBleed ? 'items-start' : 'items-center'}`} style={previewStyle}>
+      <div ref={previewRef} className={`absolute inset-x-0 flex justify-center ${(live || captured) && !fullBleed ? 'items-start' : 'items-center'}`} style={previewStyle}>
         <div className="relative" style={{ width: fit.width, height: fit.height }}>
           <canvas ref={displayRef} className="block w-full h-full" />
           {grid && live && <GridOverlay />}
@@ -875,6 +997,15 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
         </div>
       </div>
 
+      {recordingSince !== null && (
+        <div data-tick={recordTick} className="absolute left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/60 backdrop-blur-md text-[12px] font-semibold text-white tabular-nums" style={{ top: `calc(${topInset} + 3.25rem)` }}>
+          <span className="w-2 h-2 rounded-full bg-danger animate-pulse" />
+          {(() => {
+            const sec = Math.floor((Date.now() - recordingSince) / 1000)
+            return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`
+          })()}
+        </div>
+      )}
       {(showBefore || processing) && (
         <div className="absolute left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/60 backdrop-blur-md text-[11px] font-semibold text-white" style={{ top: `calc(${topInset} + 3.25rem)` }}>
           {processing && !showBefore && <IconSpinner className="w-3 h-3 animate-spin text-primary" />}
@@ -1005,12 +1136,19 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
           const shutter = (small: boolean) =>
             live ? (
               <button
-                onClick={handleShutter}
+                onPointerDown={onShutterDown}
+                onPointerUp={onShutterUp}
+                onPointerCancel={onShutterUp}
+                onPointerLeave={() => recordingSince === null && pressTimerRef.current !== null && onShutterUp()}
+                onContextMenu={(e) => e.preventDefault()}
+                // Keyboard: Enter / Space take a photo.
+                onClick={(e) => e.detail === 0 && handleShutter()}
                 disabled={status === 'loading' || status === 'error'}
-                aria-label={countdown !== null ? 'Cancel timer' : timer ? `Take photo in ${timer} seconds` : 'Take photo'}
-                className={`${small ? 'w-[50px] h-[50px] border-[3px]' : 'w-[76px] h-[76px] border-[4px]'} rounded-full border-white/95 bg-black/20 flex items-center justify-center shadow-glow-strong transition active:scale-95 disabled:opacity-50`}
+                aria-label={recordingSince !== null ? 'Recording — release to stop' : countdown !== null ? 'Cancel timer' : timer ? `Take photo in ${timer} seconds` : 'Take photo (hold to record video)'}
+                style={{ touchAction: 'none' }}
+                className={`${small ? 'w-[50px] h-[50px] border-[3px]' : 'w-[76px] h-[76px] border-[4px]'} rounded-full ${recordingSince !== null ? 'border-danger scale-110' : 'border-white/95'} bg-black/20 flex items-center justify-center shadow-glow-strong transition active:scale-95 disabled:opacity-50`}
               >
-                <span className={`rounded-full transition-all ${countdown !== null ? 'w-6 h-6 rounded-md bg-danger' : small ? 'w-[38px] h-[38px] bg-primary' : 'w-[60px] h-[60px] bg-primary'}`} />
+                <span className={`rounded-full transition-all ${countdown !== null || recordingSince !== null ? 'w-6 h-6 rounded-md bg-danger' : small ? 'w-[38px] h-[38px] bg-primary' : 'w-[60px] h-[60px] bg-primary'}`} />
               </button>
             ) : (
               <button
