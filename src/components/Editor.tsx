@@ -148,7 +148,17 @@ function TopButton({ label, active, children, ...rest }: { label: string; active
   )
 }
 
-function TrayButton({ icon: Icon, label, onClick, active, dot, toggle }: { icon: ComponentType<SVGProps<SVGSVGElement>>; label: string; onClick: () => void; active?: boolean; dot?: boolean; toggle?: boolean }) {
+function TrayButton({ icon: Icon, label, onClick, active, dot, toggle, compact }: { icon: ComponentType<SVGProps<SVGSVGElement>>; label: string; onClick: () => void; active?: boolean; dot?: boolean; toggle?: boolean; compact?: boolean }) {
+  // Compact: icon only, smaller — the slim bar under an open panel.
+  if (compact)
+    return (
+      <button onClick={onClick} aria-label={label} aria-pressed={toggle ? !!active : undefined} data-panel-toggle={toggle ? '' : undefined} className="text-white/85">
+        <span className={`relative w-9 h-9 rounded-full flex items-center justify-center transition ${active ? 'bg-primary text-black' : 'bg-white/[0.06]'}`}>
+          <Icon className="w-[18px] h-[18px]" />
+          {dot && !active && <span className="absolute top-0 right-0 w-2 h-2 rounded-full bg-primary ring-2 ring-black/60" />}
+        </span>
+      </button>
+    )
   return (
     <button onClick={onClick} aria-label={label} aria-pressed={toggle ? !!active : undefined} data-panel-toggle={toggle ? '' : undefined} className="flex flex-col items-center gap-1.5 w-[3.15rem] text-white/85">
       <span className={`relative w-11 h-11 rounded-full flex items-center justify-center border transition ${active ? 'bg-primary text-black border-primary' : 'bg-white/[0.06] border-white/15'}`}>
@@ -183,7 +193,7 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user')
   const [zoom, setZoom] = useState(1)
   const [zoomRange, setZoomRange] = useState<ZoomRange>(DIGITAL_ZOOM_RANGE)
-  const [aspect, setAspect] = useState<AspectMode>('3:4')
+  const [aspect, setAspect] = useState<AspectMode>('full')
   const [timer, setTimer] = useState<(typeof TIMER_STEPS)[number]>(0)
   const [grid, setGrid] = useState(false)
   const [countdown, setCountdown] = useState<number | null>(null)
@@ -769,7 +779,11 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
   const topInset = 'max(0.75rem, env(safe-area-inset-top))'
   // The viewfinder sits below the top controls and clears the shutter that
   // straddles the tray's top edge — except in Full, which fills the screen.
-  const previewStyle = fullBleed ? { top: 0, bottom: 0 } : { top: `calc(${topInset} + 3.25rem)`, bottom: trayBox.height + 44 }
+  // (Measured with no panel open: opening one overlays the picture rather
+  // than resizing it.)
+  const trayH = useRef(0)
+  if (!panel && trayBox.height) trayH.current = trayBox.height
+  const previewStyle = fullBleed ? { top: 0, bottom: 0 } : { top: `calc(${topInset} + 3.25rem)`, bottom: (trayH.current || trayBox.height) + 44 }
 
   return (
     <div className="fixed inset-0 bg-black overflow-hidden select-none">
@@ -904,7 +918,7 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
         )}
 
         {panel && (
-          <div ref={panelRef} key={panel} className="fg-panel mx-3 mb-12 rounded-2xl bg-black/60 backdrop-blur-2xl border border-white/10 p-4">
+          <div ref={panelRef} key={panel} className="fg-panel rounded-t-[22px] bg-black/45 backdrop-blur-xl border-t border-white/10 px-3.5 pt-3 pb-1">
             {panel === 'looks' && (
               <div>
                 <div className="flex items-center justify-between h-7 mb-3">
@@ -984,49 +998,68 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
 
         {/* Frosted tray with a native-camera-style shutter straddling its
             top edge, centered on its own rather than as part of the icon
-            row (sharing a centered group would pull it off-center). */}
-        <div ref={trayRef} className="relative bg-black/55 backdrop-blur-2xl border-t border-white/10 rounded-t-[28px] px-3 pt-12" style={{ paddingBottom: 'max(1.1rem, env(safe-area-inset-bottom))' }}>
-          <div className="absolute left-1/2 -translate-x-1/2 -top-9">
-            {live ? (
+            row (sharing a centered group would pull it off-center). With a
+            panel open it shrinks to a slim bar right under the panel —
+            icons only and a smaller shutter — so the picture stays in view. */}
+        {(() => {
+          const shutter = (small: boolean) =>
+            live ? (
               <button
                 onClick={handleShutter}
                 disabled={status === 'loading' || status === 'error'}
                 aria-label={countdown !== null ? 'Cancel timer' : timer ? `Take photo in ${timer} seconds` : 'Take photo'}
-                className="w-[76px] h-[76px] rounded-full border-[4px] border-white/95 bg-black/20 flex items-center justify-center shadow-glow-strong transition active:scale-95 disabled:opacity-50"
+                className={`${small ? 'w-[50px] h-[50px] border-[3px]' : 'w-[76px] h-[76px] border-[4px]'} rounded-full border-white/95 bg-black/20 flex items-center justify-center shadow-glow-strong transition active:scale-95 disabled:opacity-50`}
               >
-                <span className={`rounded-full transition-all ${countdown !== null ? 'w-7 h-7 rounded-md bg-danger' : 'w-[60px] h-[60px] bg-primary'}`} />
+                <span className={`rounded-full transition-all ${countdown !== null ? 'w-6 h-6 rounded-md bg-danger' : small ? 'w-[38px] h-[38px] bg-primary' : 'w-[60px] h-[60px] bg-primary'}`} />
               </button>
             ) : (
               <button
                 onClick={handleSave}
                 disabled={status === 'loading' || status === 'error' || processing}
                 aria-label="Save photo"
-                className="w-[76px] h-[76px] rounded-full bg-primary border-[4px] border-white/20 shadow-glow-strong flex items-center justify-center text-black transition active:scale-95 disabled:opacity-50"
+                className={`${small ? 'w-[50px] h-[50px] border-[3px]' : 'w-[76px] h-[76px] border-[4px]'} rounded-full bg-primary border-white/20 shadow-glow-strong flex items-center justify-center text-black transition active:scale-95 disabled:opacity-50`}
               >
-                <IconDownload className="w-7 h-7" />
+                <IconDownload className={small ? 'w-5 h-5' : 'w-7 h-7'} />
               </button>
-            )}
-          </div>
-
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1">
-              <TrayButton icon={IconWand} label="Looks" toggle active={panel === 'looks'} dot={lookId !== null} onClick={() => togglePanel('looks')} />
-              <TrayButton icon={IconSparkle} label="Beauty" toggle active={panel === 'beauty'} dot={changedFrom(BEAUTY_KEYS)} onClick={() => togglePanel('beauty')} />
-              <TrayButton icon={IconFaceOutline} label="Shape" toggle active={panel === 'shape'} dot={changedFrom(SHAPE_KEYS)} onClick={() => togglePanel('shape')} />
-            </div>
-            <div className="flex items-center gap-1">
-              <TrayButton icon={IconPalette} label="Filter" toggle active={panel === 'filter'} dot={params.filterId !== 'none'} onClick={() => togglePanel('filter')} />
-              <TrayButton icon={IconEars} label="Effects" toggle active={panel === 'effects'} dot={params.effectId !== 'none'} onClick={() => togglePanel('effects')} />
+            )
+          const c = !!panel
+          const left = (
+            <>
+              <TrayButton compact={c} icon={IconWand} label="Looks" toggle active={panel === 'looks'} dot={lookId !== null} onClick={() => togglePanel('looks')} />
+              <TrayButton compact={c} icon={IconSparkle} label="Beauty" toggle active={panel === 'beauty'} dot={changedFrom(BEAUTY_KEYS)} onClick={() => togglePanel('beauty')} />
+              <TrayButton compact={c} icon={IconFaceOutline} label="Shape" toggle active={panel === 'shape'} dot={changedFrom(SHAPE_KEYS)} onClick={() => togglePanel('shape')} />
+            </>
+          )
+          const right = (
+            <>
+              <TrayButton compact={c} icon={IconPalette} label="Filter" toggle active={panel === 'filter'} dot={params.filterId !== 'none'} onClick={() => togglePanel('filter')} />
+              <TrayButton compact={c} icon={IconEars} label="Effects" toggle active={panel === 'effects'} dot={params.effectId !== 'none'} onClick={() => togglePanel('effects')} />
               {live ? (
-                <TrayButton icon={IconImage} label="Album" onClick={() => fileInputRef.current?.click()} />
+                <TrayButton compact={c} icon={IconImage} label="Album" onClick={() => fileInputRef.current?.click()} />
               ) : (
-                <TrayButton icon={IconSticker} label="Stickers" toggle active={panel === 'stickers'} dot={stickers.length > 0} onClick={() => togglePanel('stickers')} />
+                <TrayButton compact={c} icon={IconSticker} label="Stickers" toggle active={panel === 'stickers'} dot={stickers.length > 0} onClick={() => togglePanel('stickers')} />
               )}
+            </>
+          )
+          return c ? (
+            <div ref={trayRef} className="bg-black/45 backdrop-blur-xl px-3 pt-1.5" style={{ paddingBottom: 'max(0.6rem, env(safe-area-inset-bottom))' }}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">{left}</div>
+                {shutter(true)}
+                <div className="flex items-center gap-1.5">{right}</div>
+              </div>
             </div>
-          </div>
-        </div>
+          ) : (
+            <div ref={trayRef} className="relative bg-black/55 backdrop-blur-2xl border-t border-white/10 rounded-t-[28px] px-3 pt-12" style={{ paddingBottom: 'max(1.1rem, env(safe-area-inset-bottom))' }}>
+              <div className="absolute left-1/2 -translate-x-1/2 -top-9">{shutter(false)}</div>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1">{left}</div>
+                <div className="flex items-center gap-1">{right}</div>
+              </div>
+            </div>
+          )
+        })()}
       </div>
-
       <input
         ref={customInputRef}
         type="file"

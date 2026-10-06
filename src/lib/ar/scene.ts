@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { FaceLandmarker } from '@mediapipe/tasks-vision'
 import { FACE_TRIANGULATION } from '../faceTriangulation'
 import { connectorsToLoop } from '../landmarks'
-import { compositeAR, readLayer } from './composite'
+import { compositeAR, compositeARFast, readLayer } from './composite'
 import { hideHead } from './hair'
 
 // The 3D layer behind every modeled AR effect (fur ears, masks, glasses,
@@ -303,6 +303,8 @@ function estimateLight(st: State, frame: HTMLCanvasElement, P: THREE.Vector3[], 
   st.hemi.color.copy(band(0, 20)).lerp(new THREE.Color(1, 1, 1), 0.45)
   st.hemi.groundColor.copy(band(44, 64)).multiplyScalar(0.8)
   st.hemi.intensity = 0.55 + mean * 0.9
+  // Exposure follows the scene's: a prop in a dim room is dim too.
+  st.renderer.toneMappingExposure = THREE.MathUtils.clamp(0.72 + mean * 0.66, 0.78, 1.18)
 
   const sc = st.key.shadow.camera
   const r = rig.E * 3.2
@@ -378,7 +380,9 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
   const H = frame.height
   // Rendered a little under full size and scaled up when composited: a
   // phone photo never resolves edges as crisply as a clean render does.
-  const RS = 0.8
+  // Live frames render smaller still: they're on screen for 1/30 s, and
+  // the render is most of a live frame's cost.
+  const RS = live ? 0.6 : 0.8
   const rw = Math.round(W * RS)
   const rh = Math.round(H * RS)
   if (st.renderer.domElement.width !== rw || st.renderer.domElement.height !== rh) st.renderer.setSize(rw, rh, false)
@@ -417,6 +421,16 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
   model.update?.(rig, t)
   st.headParts.forEach((o, i) => (o.visible = model.occludeFace ? i < 2 : !model.fullHead))
 
+  // Shadows land only on the face and head catchers: a model that hides
+  // them (a full head) needs no shadow map at all. Live frames use a
+  // smaller one.
+  st.renderer.shadowMap.autoUpdate = !model.fullHead
+  const shadowSize = live ? 1024 : 2048
+  if (st.key.shadow.mapSize.x !== shadowSize) {
+    st.key.shadow.mapSize.set(shadowSize, shadowSize)
+    st.key.shadow.map?.dispose()
+    ;(st.key.shadow as { map: THREE.WebGLRenderTarget | null }).map = null
+  }
   estimateLight(st, frame, P, rig)
   updateEnvironment(st, frame, !live)
   st.renderer.render(st.scene, st.camera)
@@ -445,6 +459,11 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
     ctx.fillStyle = g
     ctx.fillRect(-1, -1, 2, 2)
     ctx.restore()
+  }
+  // Live and nothing to hide: blend on the GPU, no pixel read-back.
+  if (live && model.hidesHead === undefined) {
+    compositeARFast(frame, st.renderer.domElement, RS, box)
+    return
   }
   const layer = readLayer(st.renderer.domElement, RS, box)
   if (model.hidesHead !== undefined) {

@@ -557,6 +557,14 @@ function crown(): Model {
     const spike = Math.pow((Math.cos(a * 5) + 1) / 2, 4) * 0.42
     p.setY(i, y + spike * Math.pow(k, 1.5))
   }
+  // A touch of perspective (the scene's camera is orthographic): the far
+  // side of the ring drawn a little narrower than the near side.
+  const taper = (v: THREE.Vector3) => v.setX(v.x * (1 + 0.07 * (v.z / 0.64)))
+  const tv = new THREE.Vector3()
+  for (let i = 0; i < p.count; i++) {
+    taper(tv.fromBufferAttribute(p, i))
+    p.setX(i, tv.x)
+  }
   g.computeVertexNormals()
   const goldMat = gold()
   const crownMesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: 0xe8b84a, metalness: 1, roughness: 0.2, side: THREE.DoubleSide }))
@@ -581,8 +589,11 @@ function crown(): Model {
     root,
     update(rig) {
       const a = anchors(rig)
-      grp.position.copy(crownOf(a)).add(V(0, 0.25, 0))
-      grp.rotation.set(-0.12, 0, 0)
+      // Raised clear of the head, so no part of the ring sinks into it,
+      // and tipped toward the camera, so it reads as seen from in front
+      // and a little above — the far rim higher than the near one.
+      grp.position.copy(crownOf(a)).add(V(0, 0.48, 0.05))
+      grp.rotation.set(0.16, 0, 0)
     },
   }
 }

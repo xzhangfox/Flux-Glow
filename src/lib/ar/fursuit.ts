@@ -578,7 +578,15 @@ function furCoat(head: THREE.Mesh, fur: (p: V3) => THREE.Color, nose: V3, lock: 
   const depth = new Float32Array(cards)
   const quad = I.slice(0, SEG * 6)
   const sorted = new Uint32Array(I.length)
+  const indexAttr = new THREE.BufferAttribute(sorted, 1)
+  indexAttr.setUsage(THREE.DynamicDrawUsage)
+  cg.setIndex(indexAttr)
+  // Re-sorted only when the view has turned enough to change the order
+  // (a couple of degrees), not every frame: 3,000 cards is real work.
+  const lastDir = V(0, 0, 0)
   const sort = (toCam: V3) => {
+    if (lastDir.dot(toCam) > 0.9994) return
+    lastDir.copy(toCam)
     for (let i = 0; i < cards; i++) depth[i] = centers[i * 3] * toCam.x + centers[i * 3 + 1] * toCam.y + centers[i * 3 + 2] * toCam.z
     order.sort((x, y) => depth[x] - depth[y])
     let o = 0
@@ -586,7 +594,7 @@ function furCoat(head: THREE.Mesh, fur: (p: V3) => THREE.Color, nose: V3, lock: 
       const base = card * (SEG + 1) * 2
       for (const q of quad) sorted[o++] = base + q
     }
-    cg.setIndex(new THREE.BufferAttribute(sorted, 1))
+    indexAttr.needsUpdate = true
   }
   return { coat, sort }
 }
@@ -739,14 +747,13 @@ function fursuit(spec: SuitSpec): Model {
   const tuft = lock
   const tuftGeo = new THREE.PlaneGeometry(1, 1)
   tuftGeo.translate(0, 0.5, 0)
-  const tuftMat = (color: THREE.Color) => furLit(new THREE.MeshStandardMaterial({ map: tuft, color, transparent: true, depthWrite: false, alphaTest: 0.01, side: THREE.DoubleSide, roughness: 1 }))
-  interface Tuft { mesh: THREE.Mesh; a: number; inset: number; size: number; ruff: boolean; shade: number }
+  // One instanced mesh per layer: hundreds of tufts in three draw calls.
+  const tuftMat = furLit(new THREE.MeshStandardMaterial({ map: tuft, transparent: true, depthWrite: false, alphaTest: 0.01, side: THREE.DoubleSide, roughness: 1 }))
+  interface Tuft { layer: number; slot: number; a: number; inset: number; size: number; ruff: boolean; shade: number }
   const tufts: Tuft[] = []
+  const perLayer = [0, 0, 0]
   const addTuft = (a: number, inset: number, size: number, ruff: boolean, shade: number, layer: number) => {
-    const mesh = new THREE.Mesh(tuftGeo, tuftMat(new THREE.Color()))
-    mesh.renderOrder = 3 + layer
-    root.add(mesh)
-    tufts.push({ mesh, a, inset, size, ruff, shade })
+    tufts.push({ layer, slot: perLayer[layer]++, a, inset, size, ruff, shade })
   }
   // Fur in layers, not one fringe: inner layers sit over the head itself,
   // shorter and a little shaded (the fur under the fur), and the outer
@@ -769,6 +776,19 @@ function fursuit(spec: SuitSpec): Model {
     // …and a ruff under the jaw, joining them.
     for (let i = 0; i < 24; i++) addTuft(-Math.PI / 2 + ((i + rnd()) / 24 - 0.5) * 2.2, L.inset - 0.06, (0.7 + rnd() * 0.6) * L.size, true, L.shade, layer)
   })
+  const tuftMeshes = perLayer.map((n, layer) => {
+    const m = new THREE.InstancedMesh(tuftGeo, tuftMat, n)
+    m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3)
+    m.renderOrder = 3 + layer
+    m.frustumCulled = false
+    root.add(m)
+    return m
+  })
+  const tpos = V(0, 0, 0)
+  const tq = new THREE.Quaternion()
+  const tscale = V(1, 1, 1)
+  const tm = new THREE.Matrix4()
+  const tcol = new THREE.Color()
   const SIL_C = V(0, 0.3, -0.95)
   const SIL_R = V(2.05, 2.15, 1.95)
   const toCam = V(0, 0, 1)
@@ -794,14 +814,20 @@ function fursuit(spec: SuitSpec): Model {
         if (t.ruff) outward.add(V(0, -0.15, 0)).normalize()
         // Rooted inside the rim and brought forward to the visible surface,
         // so they soften the edge while the snout can still pass in front.
-        t.mesh.position.copy(SIL_C).addScaledVector(p, t.inset).addScaledVector(toCam, 0.8)
+        tpos.copy(SIL_C).addScaledVector(p, t.inset).addScaledVector(toCam, 0.8)
         const x = V(0, 0, 0).crossVectors(outward, toCam).normalize()
         const z = V(0, 0, 0).crossVectors(x, outward).normalize()
         m4.makeBasis(x, outward, z)
-        t.mesh.quaternion.setFromRotationMatrix(m4)
+        tq.setFromRotationMatrix(m4)
         const len = t.size * (spec.furLength ?? 1)
-        t.mesh.scale.set(len * 0.6, len, 1)
-        ;(t.mesh.material as THREE.MeshStandardMaterial).color.copy(spec.fur(t.mesh.position)).multiplyScalar(1.1 * t.shade)
+        tscale.set(len * 0.6, len, 1)
+        const mesh = tuftMeshes[t.layer]
+        mesh.setMatrixAt(t.slot, tm.compose(tpos, tq, tscale))
+        mesh.setColorAt(t.slot, tcol.copy(spec.fur(tpos)).multiplyScalar(1.1 * t.shade))
+      }
+      for (const mesh of tuftMeshes) {
+        mesh.instanceMatrix.needsUpdate = true
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
       }
     },
   }
