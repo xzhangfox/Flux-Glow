@@ -41,18 +41,59 @@ interface SuitSpec {
   /** Eyes: pupil size (1 = default) and the decal's tilt (outer corner up). */
   pupil?: number
   eyeTilt?: number
-  /** 'dots': two round brow spots; 'sharp': heavy, angled brows. */
-  brows: { kind: 'dots' | 'sharp'; color: string }
+  /** 'dots': two round brow spots; 'sharp': heavy, angled brows;
+   *  'fluffy': thick brows of standing fur. */
+  brows: { kind: 'dots' | 'sharp' | 'fluffy'; color: string }
   /** A raised brow ridge over the eyes (0 = none). */
   browRidge?: number
   /** Mouth open in a smile, tongue showing. */
   mouthOpen?: boolean
   /** A swept tuft of long hair on the crown (colour). */
   crest?: string
+  /** Snout length (1 = default; < 1 shorter). */
+  muzzle?: number
+  /** Chunky spiked fluff sticking out of the cheeks (colour). */
+  cheekSpikes?: string
 }
 
 // The sculpt's per-design settings, set while a head is being built.
-const cfg = { browRidge: 0, mouthOpen: false }
+interface EarRoot {
+  /** Where the ear meets the head, and the ear's tilt about z. */
+  base: V3
+  theta: number
+  /** Half-width at the top (= the ear's base), height, half-thickness. */
+  wTop: number
+  h: number
+  t: number
+}
+const cfg = { browRidge: 0, mouthOpen: false, muzzle: 1, ears: [] as EarRoot[] }
+// The snout's far ends, scaled by cfg.muzzle (set per head).
+let MUZ_B = V(0, -0.62, 1.62)
+let BRI_B = V(0, -0.42, 1.6)
+let JAW_BB = V(0, -1.02, 1.45)
+let PAD_Z = 1.56
+let WHISK_Z = 1.72
+let CHEEKM_Z = 1.25
+
+/** The root of an ear: a wedge rising out of the skull that widens as it
+ *  goes down into the head, so the head's own contour runs up into the
+ *  ear's edges — the ear grows out of the head, not stuck onto it. */
+function earRoot(p: V3, e: EarRoot) {
+  const qx = p.x - e.base.x
+  const qy = p.y - e.base.y
+  const qz = p.z - e.base.z
+  const c = Math.cos(e.theta)
+  const s = Math.sin(e.theta)
+  const lx = qx * c + qy * s
+  const ly = -qx * s + qy * c
+  // Widening and thickening downward, into the skull; an ellipse in
+  // section, so it's round, not a fin.
+  const down = Math.max(0, e.h - ly)
+  const w = e.wTop + down * 0.25
+  const t = e.t + down * 0.45
+  const sect = Math.hypot(lx / w, qz / t) - 1
+  return Math.max(sect * Math.min(w, t), ly - e.h, -0.5 - ly)
+}
 
 // ---- The sculpt (signed distance field) ---------------------------------------
 
@@ -89,11 +130,9 @@ function cone(p: V3, a: V3, b: V3, ra: number, rb: number, flat: number) {
 // The snout runs from between the eyes, forward and gently down, to a
 // broad nose; the lower jaw sits under it with a mouth line between them.
 const MUZZLE_A = V(0, -0.56, 0.45)
-const MUZZLE_B = V(0, -0.62, 1.62)
+const MUZZLE_B = V(0, -0.62, 1.62) // (the longest snout; see cfg.muzzle)
 const BRIDGE_A = V(0, -0.3, 0.65)
-const BRIDGE_B = V(0, -0.42, 1.6)
 const JAW_A = V(0, -1.0, 0.4)
-const JAW_B = V(0, -1.02, 1.45)
 const JAW_B_OPEN = V(0, -1.16, 1.4)
 const EYE_X = 0.92
 // High enough that the inner corners clear the root of the snout.
@@ -133,14 +172,15 @@ function sdfFace(p: V3) {
 /** Face, jaw and snout, before the mouth is carved in. */
 function sdfShape(p: V3) {
   // The lower jaw grows out of the lower face…
-  let face = smin(sdfFace(p), cone(p, JAW_A, cfg.mouthOpen ? JAW_B_OPEN : JAW_B, 0.52, 0.32, 0.72), 0.45)
+  let face = smin(sdfFace(p), cone(p, JAW_A, cfg.mouthOpen ? JAW_B_OPEN : JAW_BB, 0.52, 0.32, 0.72), 0.45)
+  for (const e of cfg.ears) face = smin(face, earRoot(p, e), 0.35)
   // A brow ridge: a firm ledge over each eye.
   if (cfg.browRidge > 0) for (const s of [-1, 1]) face = smin(face, ellipsoid(p, s * 0.8, EYE_Y + 0.5, 0.36 + 0.1 * cfg.browRidge, 0.46, 0.13 * cfg.browRidge, 0.24), 0.2)
   // …and the snout out of the middle of the face, from a modest root below
   // the eyes (they stay clear): a bridge on top carries the line to the
   // nose, the muzzle under it ends round and blunt in a full pad.
-  const muzzle = smin(cone(p, MUZZLE_A, MUZZLE_B, 0.6, 0.44, 0.88), ellipsoid(p, 0, -0.66, 1.56, 0.52, 0.4, 0.46), 0.25)
-  const snout = smin(muzzle, cone(p, BRIDGE_A, BRIDGE_B, 0.3, 0.3, 1), 0.3)
+  const muzzle = smin(cone(p, MUZZLE_A, MUZ_B, 0.6, 0.44, 0.88), ellipsoid(p, 0, -0.66, PAD_Z, 0.52, 0.4, 0.46), 0.25)
+  const snout = smin(muzzle, cone(p, BRIDGE_A, BRI_B, 0.3, 0.3, 1), 0.3)
   // Blended softly at the root, crisply toward the front, where the seam
   // between snout and jaw is the mouth line.
   const k = 0.4 - 0.32 * ss(p.z, 0.9, 1.55)
@@ -149,8 +189,8 @@ function sdfShape(p: V3) {
   // (the upper lip), which the mouth line runs beneath, and the cheek
   // muscle swelling up from the mouth corners.
   for (const s of [-1, 1]) {
-    d = smin(d, ellipsoid(p, s * 0.21, -0.86, 1.72, 0.25, 0.19, 0.22), 0.12)
-    d = smin(d, ellipsoid(p, s * 0.42, -0.85, 1.25, 0.2, 0.18, 0.32), 0.18)
+    d = smin(d, ellipsoid(p, s * 0.21, -0.86, WHISK_Z, 0.25, 0.19, 0.22), 0.12)
+    d = smin(d, ellipsoid(p, s * 0.42, -0.85, CHEEKM_Z, 0.2, 0.18, 0.32), 0.18)
   }
   return d
 }
@@ -665,6 +705,26 @@ function fursuit(spec: SuitSpec): Model {
   seed = 11
   cfg.browRidge = spec.browRidge ?? 0
   cfg.mouthOpen = !!spec.mouthOpen
+  cfg.muzzle = spec.muzzle ?? 1
+  const mz = (z: number) => 0.45 + (z - 0.45) * cfg.muzzle
+  MUZ_B = V(0, -0.62, mz(1.62))
+  BRI_B = V(0, -0.42 - 0.08 * (1 - cfg.muzzle), mz(1.6))
+  JAW_BB = V(0, -1.02, mz(1.45))
+  PAD_Z = mz(1.56)
+  WHISK_Z = mz(1.72)
+  CHEEKM_Z = mz(1.25)
+  // Ears: where they stand on the head (found on the head without them),
+  // then their roots become part of the sculpt.
+  cfg.ears = []
+  const earX = spec.earX ?? 1.12
+  const earW = spec.ear.cardW * (spec.earWidth ?? 1)
+  const earFrames = [-1, 1].map((side) => {
+    const ex = side * earX
+    const top = surfaceAlong(V(ex, 2.4, -0.85).sub(ORIGIN).normalize())
+    const theta = side * -(0.3 + (earX - 1.12) * 0.5)
+    return { side, base: V(ex, top.y - 0.25, -0.85), theta }
+  })
+  cfg.ears = earFrames.map((f) => ({ base: f.base, theta: f.theta, wTop: earW * 0.44, h: 0.42, t: 0.2 }))
   mouth = buildMouth()
   const root = new THREE.Group()
 
@@ -767,7 +827,7 @@ function fursuit(spec: SuitSpec): Model {
   for (const side of [-1, 1]) decal(side * EYE_X, EYE_Y, EYE_W, EYE_H, side * (spec.eyeTilt ?? 0.1), side < 0, eyeMat, 0.05, true, 0.1)
 
   // ---- Brows ----
-  const browMat = new THREE.MeshStandardMaterial({ map: browTexture(spec.brows.kind, spec.brows.color), transparent: true, depthWrite: false, roughness: 0.9, polygonOffset: true, polygonOffsetFactor: -2 })
+  const browMat = new THREE.MeshStandardMaterial({ map: browTexture(spec.brows.kind === 'dots' ? 'dots' : 'sharp', spec.brows.color), transparent: true, depthWrite: false, roughness: 0.9, polygonOffset: true, polygonOffsetFactor: -2 })
   for (const side of [-1, 1]) {
     const b = spec.brows.kind === 'dots' ? decal(side * 0.56, EYE_Y + 0.72, 0.32, 0.26, 0, side < 0, browMat, 0.06) : decal(side * 0.86, EYE_Y + 0.66, 0.8, 0.38, side * 0.26, side < 0, browMat, 0.07)
     b.renderOrder = 4
@@ -816,15 +876,14 @@ function fursuit(spec: SuitSpec): Model {
   // Set into the head (the base sinks below the surface), with a ring of
   // fur round each base joining ear and head.
   const earCard = plushCard(spec.ear)
-  const earX = spec.earX ?? 1.12
   const ears: THREE.Object3D[] = []
-  for (const side of [-1, 1]) {
+  for (const f of earFrames) {
     const ear = earCard.clone()
-    const ex = side * earX
-    const top = surfaceAlong(V(ex, 2.4, -0.85).sub(ORIGIN).normalize())
-    ear.position.set(ex, top.y - 0.22, -0.85)
-    ear.rotation.set(-0.06, side * -0.25, side * -(0.3 + (earX - 1.12) * 0.5))
-    ear.scale.set(side * (spec.earWidth ?? 1), spec.earLength ?? 1, 1)
+    // On top of its root, the card's base sunk a little into it.
+    const up = V(-Math.sin(f.theta), Math.cos(f.theta), 0)
+    ear.position.copy(f.base).addScaledVector(up, 0.42 - 0.12)
+    ear.rotation.set(-0.06, f.side * -0.25, f.theta)
+    ear.scale.set(f.side * (spec.earWidth ?? 1), spec.earLength ?? 1, 1)
     root.add(ear)
     ears.push(ear)
   }
@@ -840,8 +899,8 @@ function fursuit(spec: SuitSpec): Model {
     const side = k ? 1 : -1
     ear.updateMatrix()
     const half = spec.ear.cardW * (spec.earWidth ?? 1) * 0.5
-    for (let i = 0; i < 34; i++) {
-      const t = (i + rnd()) / 34
+    for (let i = 0; i < 26; i++) {
+      const t = (i + rnd()) / 26
       // Along the base, front and back of the card.
       const local = V((t - 0.5) * 2 * half * 0.95, 0.04, (rnd() - 0.5) * 0.24)
       const at = local.clone().applyMatrix4(ear.matrix)
@@ -862,6 +921,29 @@ function fursuit(spec: SuitSpec): Model {
       const dir = V(x * 0.55 + (rnd() - 0.5) * 0.2, 1, 0.45 + rnd() * 0.25).normalize()
       locks.push({ root: at.addScaledVector(dir, -0.1), dir, len: 0.75 + rnd() * 0.45 - back * 0.3, width: 0.3, side: V(1, 0, -x * 0.3), color: C(spec.crest).multiplyScalar(0.95 + rnd() * 0.06), droop: -0.35 })
     }
+  }
+  if (spec.brows.kind === 'fluffy') {
+    // Thick, fluffy brows: a row of short locks over each eye, rising from
+    // the inner end to the outer, standing out of the coat.
+    for (const side of [-1, 1])
+      for (let i = 0; i < 16; i++) {
+        const t = (i + rnd()) / 16
+        const x = side * (0.42 + t * 0.62)
+        const y = EYE_Y + 0.6 + t * 0.2
+        const at = hitFront(x, y)
+        const dir = V(side * (0.55 + t * 0.4), 0.85, 0.35).normalize()
+        locks.push({ root: at.addScaledVector(dir, -0.04), dir, len: 0.26 + (1 - Math.abs(t - 0.35)) * 0.16 + rnd() * 0.06, width: 0.17, color: C(spec.brows.color).multiplyScalar(0.96 + rnd() * 0.05), droop: 0.1, side: V(0.25 * side, -0.55, 1) })
+      }
+  }
+  if (spec.cheekSpikes) {
+    // A few chunky points of fluff out of each cheek, swept back.
+    for (const side of [-1, 1])
+      for (let i = 0; i < 4; i++) {
+        const y = -0.35 - i * 0.28
+        const at = surfaceAlong(V(side * 2, y, -0.1).sub(ORIGIN).normalize())
+        const dir = V(side, 0.25 - i * 0.18, -0.35).normalize()
+        locks.push({ root: at.addScaledVector(dir, -0.15), dir, len: 0.55 + (i === 1 ? 0.15 : 0) + rnd() * 0.1, width: 0.42, color: C(spec.cheekSpikes), droop: 0.05, side: V(0, 1, 0.2) })
+      }
   }
   if (locks.length) root.add(lockMesh(locks, lock))
 
@@ -1081,7 +1163,7 @@ function huskyFur(p: V3) {
   const grey = C('#666b75').lerp(C('#40444c'), ss(p.y, 0.5, 2) * 0.6)
   // Huskies' white mask reaches up round the eyes too.
   const ax = Math.abs(p.x)
-  const mask = ss(0.7 - p.y, -0.05, 0.05) * ss(ax, 0.2, 0.36) * ss(p.z, -0.6, 0)
+  const mask = ss(0.12 - p.y, -0.04, 0.04) * ss(ax, 0.2, 0.36) * ss(p.z, -0.6, 0)
   return grey.lerp(C('#f6f6f4'), Math.max(whiteFace(p), mask))
 }
 
@@ -1118,12 +1200,16 @@ export function huskyHead(): Model {
     },
     // Deep blue irises with big pupils, outer corners swept up; heavy,
     // sharp brows on a raised brow ridge; an open, smiling mouth.
-    iris: ['#050d24', '#1b3c8c', '#4f86d8'],
+    // Bright, saturated light-blue irises with big pupils, outer corners
+    // swept up; thick, fluffy white brows over a raised brow ridge; a
+    // short, wedge-shaped muzzle with a closed smile.
+    iris: ['#0b4fb8', '#2f9bff', '#8fe2ff'],
     pupil: 1.35,
     eyeTilt: 0.24,
-    brows: { kind: 'sharp', color: '#23262c' },
+    brows: { kind: 'fluffy', color: '#f6f6f4' },
     browRidge: 1,
-    mouthOpen: true,
+    muzzle: 0.78,
+    cheekSpikes: '#9ea3ab',
     // A husky's coat is short and dense; its ears short, broad and set
     // wide, with white fur round their outer bases; white hair on top.
     furLength: 0.68,
