@@ -57,7 +57,7 @@ export const EFFECTS: EffectDef[] = [
   { id: 'square', label: 'Square' },
   { id: 'oval', label: 'Oval' },
   { id: 'crown', label: 'Crown' },
-  { id: 'devil', label: 'Devil' },
+  { id: 'faun', label: 'Faun' },
   { id: 'angel', label: 'Angel' },
   { id: 'stars', label: 'Stars' },
   { id: 'custom', label: 'Custom' },
@@ -235,7 +235,7 @@ function sparkle(ctx: CanvasRenderingContext2D, c: Pt, r: number, color: string)
 }
 
 
-const THREE_D = new Set(['foxhead', 'huskyhead', 'kitty', 'fox', 'bunny', 'bear', 'spider', 'bat', 'square', 'oval', 'crown', 'devil', 'angel', 'stars', 'custom'])
+const THREE_D = new Set(['foxhead', 'huskyhead', 'kitty', 'fox', 'bunny', 'bear', 'spider', 'bat', 'square', 'oval', 'crown', 'faun', 'angel', 'stars', 'custom'])
 
 // The Custom effect's picture: a square the user cropped from their own
 // photo, worn in front of the face. Bumped version = a new picture.
@@ -254,8 +254,6 @@ export function drawEffect(canvas: HTMLCanvasElement, P: P3[], effectId: string,
   const f = faceGeometry(P)
   ctx.save()
   // Paint under the 3D layer.
-  if (effectId === 'kitty' || effectId === 'bear' || effectId === 'fox') blush(ctx, f)
-  if (effectId === 'bunny') blush(ctx, f, 'rgba(255,130,160,0.3)')
   if (effectId === 'doll') doll(ctx, f)
   ctx.restore()
 

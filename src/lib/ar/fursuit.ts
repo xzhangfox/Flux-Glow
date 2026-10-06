@@ -737,22 +737,35 @@ function fursuit(spec: SuitSpec): Model {
   const tuftGeo = new THREE.PlaneGeometry(1, 1)
   tuftGeo.translate(0, 0.5, 0)
   const tuftMat = (color: THREE.Color) => furLit(new THREE.MeshStandardMaterial({ map: tuft, color, transparent: true, depthWrite: false, alphaTest: 0.01, side: THREE.DoubleSide, roughness: 1 }))
-  interface Tuft { mesh: THREE.Mesh; a: number; inset: number; size: number; ruff: boolean }
+  interface Tuft { mesh: THREE.Mesh; a: number; inset: number; size: number; ruff: boolean; shade: number }
   const tufts: Tuft[] = []
-  const addTuft = (a: number, inset: number, size: number, ruff: boolean) => {
+  const addTuft = (a: number, inset: number, size: number, ruff: boolean, shade: number, layer: number) => {
     const mesh = new THREE.Mesh(tuftGeo, tuftMat(new THREE.Color()))
-    mesh.renderOrder = 3
+    mesh.renderOrder = 3 + layer
     root.add(mesh)
-    tufts.push({ mesh, a, inset, size, ruff })
+    tufts.push({ mesh, a, inset, size, ruff, shade })
   }
-  for (let i = 0; i < 90; i++) addTuft((i / 90) * Math.PI * 2 + rnd() * 0.05, 0.95, 0.45 + rnd() * 0.35, false)
-  // Big white cheek fluff, sweeping out sideways from the cheeks (angle
-  // 0 = the head's left in view, π = its right; a little below level).
-  for (let i = 0; i < 22; i++) {
-    const t = i / 21
-    addTuft(-0.02 - t * 0.6, 0.86, 0.9 + rnd() * 0.9, true)
-    addTuft(Math.PI + 0.02 + t * 0.6, 0.86, 0.9 + rnd() * 0.9, true)
-  }
+  // Fur in layers, not one fringe: inner layers sit over the head itself,
+  // shorter and a little shaded (the fur under the fur), and the outer
+  // ones reach past it — so the outline has depth and grows out of the
+  // coat instead of ringing it.
+  const LAYERS = [
+    { inset: 0.78, size: 0.7, shade: 0.88 },
+    { inset: 0.88, size: 0.85, shade: 0.94 },
+    { inset: 0.97, size: 1, shade: 1 },
+  ]
+  LAYERS.forEach((L, layer) => {
+    for (let i = 0; i < 60; i++) addTuft(((i + rnd()) / 60) * Math.PI * 2, L.inset, (0.45 + rnd() * 0.35) * L.size, false, L.shade, layer)
+    // Big cheek fluff, sweeping out sideways from the cheeks (angle 0 =
+    // the head's left in view, π = its right; a little below level)…
+    for (let i = 0; i < 16; i++) {
+      const t = (i + rnd()) / 16
+      addTuft(-0.02 - t * 0.6, L.inset - 0.08, (0.9 + rnd() * 0.9) * L.size, true, L.shade, layer)
+      addTuft(Math.PI + 0.02 + t * 0.6, L.inset - 0.08, (0.9 + rnd() * 0.9) * L.size, true, L.shade, layer)
+    }
+    // …and a ruff under the jaw, joining them.
+    for (let i = 0; i < 24; i++) addTuft(-Math.PI / 2 + ((i + rnd()) / 24 - 0.5) * 2.2, L.inset - 0.06, (0.7 + rnd() * 0.6) * L.size, true, L.shade, layer)
+  })
   const SIL_C = V(0, 0.3, -0.95)
   const SIL_R = V(2.05, 2.15, 1.95)
   const toCam = V(0, 0, 1)
@@ -784,7 +797,7 @@ function fursuit(spec: SuitSpec): Model {
         m4.makeBasis(x, outward, z)
         t.mesh.quaternion.setFromRotationMatrix(m4)
         t.mesh.scale.set(t.size * 0.6, t.size, 1)
-        ;(t.mesh.material as THREE.MeshStandardMaterial).color.copy(spec.fur(t.mesh.position)).multiplyScalar(1.1)
+        ;(t.mesh.material as THREE.MeshStandardMaterial).color.copy(spec.fur(t.mesh.position)).multiplyScalar(1.1 * t.shade)
       }
     },
   }

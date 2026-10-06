@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { plushCard, smooth, type PlushSpec } from './plush'
+import { FACE_TRIANGULATION } from '../faceTriangulation'
 import type { Model, Rig } from './scene'
 
 // Every 3D effect, modeled procedurally in the head rig's units (1 = the
@@ -555,25 +556,210 @@ function crown(): Model {
   }
 }
 
-function devil(): Model {
-  const mat = physical({ color: 0xc8141f, roughness: 0.28, clearcoat: 1, clearcoatRoughness: 0.1, sheen: 0.3, sheenColor: new THREE.Color(0xff6040) })
-  const horn = (side: number) => {
-    const m = new THREE.Mesh(taperTube([V(0, 0, 0), V(side * 0.05, 0.25, 0.03), V(side * 0.18, 0.5, 0.06), V(side * 0.38, 0.68, 0.02)], 0.12, 0.004, 24, 64), mat)
+// ---- Faun (after Pan's Labyrinth) ------------------------------------------------
+
+/** Ram's horn as a ridged tube along a curling path, in rig units: rising
+ *  from the top of the head, arching up and out over the side, down past
+ *  the ear and curling back under, the tip turning out — a big loop each
+ *  side of the head, seen from the front, as on the faun. */
+function ramHorn(side: number) {
+  const C = V(1.55, 0.75, -0.95)
+  const N = 260
+  const R = 20
+  const at = (t: number) => {
+    // Angle round the loop's centre (in the face's plane), from pointing at
+    // the top of the head, over the top and down the outside, to under it.
+    const psi = THREE.MathUtils.lerp(2.9, -2.65, t)
+    const r = THREE.MathUtils.lerp(1.12, 0.45, t)
+    return V(side * (C.x + r * Math.cos(psi)), C.y + r * Math.sin(psi), C.z + 0.55 * Math.cos(t * Math.PI * 1.6) - 0.15 + 0.35 * t * t)
+  }
+  const curve = new THREE.CatmullRomCurve3(Array.from({ length: 40 }, (_, k) => at(k / 39)))
+  const frames = curve.computeFrenetFrames(N, false)
+  const pos: number[] = []
+  const col: number[] = []
+  const idx: number[] = []
+  const base = new THREE.Color('#5a4630')
+  const tip = new THREE.Color('#a8906a')
+  for (let i = 0; i <= N; i++) {
+    const t = i / N
+    const p = curve.getPointAt(t)
+    // Thick at the root, tapering; ringed with growth ridges all along.
+    const radius = THREE.MathUtils.lerp(0.34, 0.04, t ** 0.85) * (1 + 0.07 * Math.sin(t * 110) ** 2)
+    const c = base.clone().lerp(tip, t ** 1.4).multiplyScalar(0.82 + 0.18 * Math.sin(t * 110) ** 2)
+    for (let j = 0; j <= R; j++) {
+      const a = (j / R) * Math.PI * 2
+      // A slightly flattened, keeled cross-section, like a ram's.
+      const ca = Math.cos(a)
+      const sa = Math.sin(a) * 0.78
+      const n = frames.normals[i].clone().multiplyScalar(ca).add(frames.binormals[i].clone().multiplyScalar(sa))
+      pos.push(p.x + n.x * radius, p.y + n.y * radius, p.z + n.z * radius)
+      col.push(c.r, c.g, c.b)
+    }
+  }
+  for (let i = 0; i < N; i++)
+    for (let j = 0; j < R; j++) {
+      const a = i * (R + 1) + j
+      const b = a + R + 1
+      idx.push(a, b, a + 1, a + 1, b, b + 1)
+    }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3))
+  g.setIndex(side > 0 ? idx : idx.map((_, k) => idx[k - (k % 3) + [0, 2, 1][k % 3]]))
+  g.computeVertexNormals()
+  return g
+}
+
+/** A faun's long goat ear: a leaf-shaped, cupped pad with a rolled rim,
+ *  pointing out sideways. Local frame: x along the ear, z out of its face. */
+function faunEarGeometry() {
+  const g = new THREE.SphereGeometry(1, 64, 40)
+  const p = g.getAttribute('position') as THREE.BufferAttribute
+  const col: number[] = []
+  const v = new THREE.Vector3()
+  const outer = new THREE.Color(0x8e6c48)
+  const inner = new THREE.Color(0x5e3d2c)
+  for (let i = 0; i < p.count; i++) {
+    v.fromBufferAttribute(p, i)
+    // Leaf outline: widest a third of the way out, pointed at the tip.
+    const t = (v.x + 1) / 2
+    const w = Math.sin(Math.PI * Math.min(1, t * 1.15)) ** 0.8 * (1 - 0.35 * t)
+    // A thick pad with a rolled rim; its front hollowed into a deep cup.
+    const hollow = v.z > 0 ? (1 - v.y * v.y) ** 1.5 * w : 0
+    p.setXYZ(i, t * 1.25, v.y * 0.42 * w, (v.z * 0.16 - hollow * 0.22) * (0.35 + w))
+    // The cup's inside darker and warmer, the rim and back lighter.
+    const c = outer.clone().lerp(inner, Math.min(1, hollow * 1.6))
+    col.push(c.r, c.g, c.b)
+  }
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3))
+  g.computeVertexNormals()
+  return g
+}
+
+/** The faun's forehead: whorls carved in the brow — two big spirals over
+ *  the eyes, a small one between them, lines running up to the hairline
+ *  and down the bridge of the nose. Drawn as grooves with a lit edge, on a
+ *  map laid over the face (u, v from the face's own x, y). */
+function faunPattern() {
+  const S = 512
+  const c = document.createElement('canvas')
+  c.width = c.height = S
+  const ctx = c.getContext('2d')!
+  // Rig (x, y) → canvas: x ∈ [-0.9, 0.9], y ∈ [-0.45, 1.35].
+  const X = (x: number) => (0.5 + x / 1.8) * S
+  const Y = (y: number) => (1 - (0.5 + (y - 0.45) / 1.8)) * S
+  const path = (pts: [number, number][]) => {
+    ctx.beginPath()
+    pts.forEach(([x, y], k) => (k ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))))
+  }
+  const spiral = (cx: number, cy: number, r: number, turns: number, dir: number, rot = 0) => {
+    const pts: [number, number][] = []
+    for (let k = 0; k <= 160; k++) {
+      const t = k / 160
+      const a = rot + dir * t * turns * Math.PI * 2
+      pts.push([cx + Math.cos(a) * r * t, cy + Math.sin(a) * r * t * 0.9])
+    }
+    return pts
+  }
+  const strokes: [number, number][][] = [
+    spiral(-0.36, 0.5, 0.24, 2.4, 1, 0.3),
+    spiral(0.36, 0.5, 0.24, 2.4, -1, Math.PI - 0.3),
+    spiral(0, 0.66, 0.13, 2, 1, -Math.PI / 2),
+    // Up from the outer whorls toward the hairline.
+    [[-0.52, 0.6], [-0.5, 0.78], [-0.4, 0.92]],
+    [[0.52, 0.6], [0.5, 0.78], [0.4, 0.92]],
+    // Down the bridge from the small whorl.
+    [[-0.04, 0.52], [-0.05, 0.3], [-0.03, 0.08], [0, -0.1]],
+    [[0.04, 0.52], [0.05, 0.3], [0.03, 0.08], [0, -0.1]],
+  ]
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+  // Lit upper edge, then the groove itself, then its shadowed floor.
+  for (const [dx, dy, color, width] of [
+    [-2, -2.5, 'rgba(255,236,205,0.5)', 12],
+    [0, 0, 'rgba(96,62,36,0.6)', 10],
+    [1.2, 1.8, 'rgba(48,28,14,0.5)', 5],
+  ] as const) {
+    ctx.save()
+    ctx.translate(dx, dy)
+    ctx.strokeStyle = color
+    ctx.lineWidth = width
+    for (const s of strokes) {
+      path(s)
+      ctx.stroke()
+    }
+    ctx.restore()
+  }
+  // Fade out toward the brows and the hairline.
+  ctx.globalCompositeOperation = 'destination-in'
+  const g = ctx.createLinearGradient(0, Y(1.0), 0, Y(-0.15))
+  g.addColorStop(0, 'rgba(0,0,0,0)')
+  g.addColorStop(0.12, 'rgba(0,0,0,1)')
+  g.addColorStop(0.92, 'rgba(0,0,0,1)')
+  g.addColorStop(1, 'rgba(0,0,0,0)')
+  ctx.fillStyle = g
+  ctx.fillRect(0, 0, S, S)
+  const tex = new THREE.CanvasTexture(c)
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.anisotropy = 8
+  return tex
+}
+
+function faun(): Model {
+  const hornMat = physical({ vertexColors: true, roughness: 0.62, clearcoat: 0.25, clearcoatRoughness: 0.5, sheen: 0.2 })
+  const horns = [-1, 1].map((side) => {
+    const m = new THREE.Mesh(ramHorn(side), hornMat)
     m.castShadow = true
     return m
-  }
-  const L = horn(-1)
-  const R = horn(1)
+  })
+  // Bark-brown skin, like the faun's; leathery, with a soft sheen.
+  const earMat = physical({ vertexColors: true, roughness: 0.7, sheen: 0.5, sheenColor: new THREE.Color(0xd8b48a), side: THREE.DoubleSide })
+  const earGeo = faunEarGeometry()
+  const ears = [-1, 1].map((side) => {
+    const m = new THREE.Mesh(earGeo, earMat)
+    m.scale.set(side, 1, 1)
+    m.castShadow = true
+    return m
+  })
+  // The forehead pattern, laid on the live face mesh.
+  const N = 468
+  const decalGeo = new THREE.BufferGeometry()
+  decalGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3))
+  decalGeo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(N * 2), 2))
+  decalGeo.setIndex(Array.from(FACE_TRIANGULATION))
+  const decal = new THREE.Mesh(
+    decalGeo,
+    new THREE.MeshStandardMaterial({ map: faunPattern(), transparent: true, roughness: 0.8, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8, side: THREE.DoubleSide }),
+  )
+  decal.frustumCulled = false
+  decal.renderOrder = 4
   const root = new THREE.Group()
-  root.add(L, R)
+  root.add(...horns, ...ears, decal)
   return {
     root,
     update(rig) {
       const a = anchors(rig)
-      L.position.copy(a.top).lerp(a.templeL, 0.48).add(V(0, 0.12, -0.12))
-      R.position.copy(a.top).lerp(a.templeR, 0.48).add(V(0, 0.12, -0.12))
-      L.rotation.set(-0.15, 0, 0.12)
-      R.rotation.set(-0.15, 0, -0.12)
+      // The horns' paths start from a forehead top at (0, 0.8, -0.14);
+      // shift them onto this one.
+      for (const h of horns) h.position.set(0, a.top.y - 0.8, a.top.z + 0.14)
+      // Ears stand out from the sides of the head, below the horns.
+      ears.forEach((e, k) => {
+        const side = k ? 1 : -1
+        const temple = side < 0 ? a.templeL : a.templeR
+        e.position.set(temple.x + side * 0.02, temple.y - 0.3, temple.z - 0.4)
+        e.rotation.set(0, side * 0.45, side * -0.3)
+      })
+      const pos = decalGeo.getAttribute('position') as THREE.BufferAttribute
+      const uv = decalGeo.getAttribute('uv') as THREE.BufferAttribute
+      for (let i = 0; i < N; i++) {
+        const p = rig.local(i)
+        pos.setXYZ(i, p.x, p.y, p.z + 0.008)
+        uv.setXY(i, 0.5 + p.x / 1.8, 0.5 + (p.y - 0.45) / 1.8)
+      }
+      pos.needsUpdate = true
+      uv.needsUpdate = true
+      decalGeo.computeVertexNormals()
+      decalGeo.computeBoundingSphere()
     },
   }
 }
@@ -697,7 +883,7 @@ export function buildModel(id: string): Model {
     case 'square': return eyewear('square')
     case 'oval': return eyewear('oval')
     case 'crown': return crown()
-    case 'devil': return devil()
+    case 'faun': return faun()
     case 'angel': return angel()
     case 'stars': return stars()
     default: return { root: new THREE.Group() }

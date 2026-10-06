@@ -231,9 +231,10 @@ export function plushCard(spec: PlushSpec) {
   const aspect = spec.h / spec.w
   const cw = spec.cardW
   const chh = cw * aspect
-  const SEG = 36
+  const SEG = 56
   // Thickness at each point of the card: rising from the outline inward.
-  const T = 0.26 * cw
+  // (Capped: on a fursuit's big ears full depth would be a slab.)
+  const T = Math.min(0.26 * cw, 0.16)
   const ramp = spec.w * 0.3
   const toCanvas = (x: number, y: number): XY => [(x / cw + 0.5) * spec.w, (0.5 - y / chh) * spec.h]
   const thick = (x: number, y: number) => {
