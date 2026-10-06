@@ -558,41 +558,51 @@ function crown(): Model {
 
 // ---- Faun (after Pan's Labyrinth) ------------------------------------------------
 
-/** Ram's horn as a ridged tube along a curling path, in rig units: rising
- *  from the top of the head, arching up and out over the side, down past
- *  the ear and curling back under, the tip turning out — a big loop each
- *  side of the head, seen from the front, as on the faun. */
+/** A ram's horn, after the faun's: thick from a broad root, it arches up
+ *  and out over the head, sweeps down the outside to the cheek, and hooks
+ *  out and up at the tip — an open curl, not a closed loop. A rounded-
+ *  triangular section, ringed all along with deep, close, slightly wavy
+ *  growth ridges (dark in the grooves, pale on the crests), smoothing out
+ *  toward the tip. Rig units, right side (mirrored for the left). */
 function ramHorn(side: number) {
-  const C = V(1.55, 0.75, -0.95)
-  const N = 260
-  const R = 20
-  const at = (t: number) => {
-    // Angle round the loop's centre (in the face's plane), from pointing at
-    // the top of the head, over the top and down the outside, to under it.
-    const psi = THREE.MathUtils.lerp(2.9, -2.65, t)
-    const r = THREE.MathUtils.lerp(1.12, 0.45, t)
-    return V(side * (C.x + r * Math.cos(psi)), C.y + r * Math.sin(psi), C.z + 0.55 * Math.cos(t * Math.PI * 1.6) - 0.15 + 0.35 * t * t)
-  }
-  const curve = new THREE.CatmullRomCurve3(Array.from({ length: 40 }, (_, k) => at(k / 39)))
+  const path = [
+    [0.5, 0.9, -0.45],
+    [0.8, 1.4, -0.6],
+    [1.25, 1.7, -0.75],
+    [1.82, 1.45, -0.85],
+    [2.12, 0.85, -0.72],
+    [2.0, 0.25, -0.45],
+    [2.2, -0.08, -0.2],
+    [2.55, 0.1, -0.02],
+  ].map(([x, y, z]) => V(side * x, y, z))
+  const curve = new THREE.CatmullRomCurve3(path, false, 'centripetal')
+  const N = 520
+  const R = 28
   const frames = curve.computeFrenetFrames(N, false)
   const pos: number[] = []
   const col: number[] = []
   const idx: number[] = []
-  const base = new THREE.Color('#5a4630')
-  const tip = new THREE.Color('#a8906a')
+  const groove = new THREE.Color('#2e241a')
+  const crest = new THREE.Color('#8b7558')
+  const tipCol = new THREE.Color('#b9a582')
+  const RINGS = 58
   for (let i = 0; i <= N; i++) {
     const t = i / N
     const p = curve.getPointAt(t)
-    // Thick at the root, tapering; ringed with growth ridges all along.
-    const radius = THREE.MathUtils.lerp(0.34, 0.04, t ** 0.85) * (1 + 0.07 * Math.sin(t * 110) ** 2)
-    const c = base.clone().lerp(tip, t ** 1.4).multiplyScalar(0.82 + 0.18 * Math.sin(t * 110) ** 2)
+    const radius = 0.36 * (1 - t) ** 0.55 + 0.03
+    // Growth rings fade out over the last stretch, to a smooth tip.
+    const ringAmt = 1 - THREE.MathUtils.smoothstep(t, 0.8, 0.97)
     for (let j = 0; j <= R; j++) {
       const a = (j / R) * Math.PI * 2
-      // A slightly flattened, keeled cross-section, like a ram's.
-      const ca = Math.cos(a)
-      const sa = Math.sin(a) * 0.78
-      const n = frames.normals[i].clone().multiplyScalar(ca).add(frames.binormals[i].clone().multiplyScalar(sa))
-      pos.push(p.x + n.x * radius, p.y + n.y * radius, p.z + n.z * radius)
+      // Wavy rings: each one's phase drifts a little round the horn.
+      // Uneven spacing along the horn, and each ring wavering round it.
+      const ph = t * RINGS + 2.2 * Math.sin(t * 9) + 0.9 * Math.sin(t * 23 + 1) + 0.45 * Math.sin(a * 2 + t * 17) + 0.25 * Math.sin(a * 5 + t * 40)
+      const ridge = Math.pow(0.5 + 0.5 * Math.cos(ph * Math.PI * 2), 2.5)
+      const tri = 1 + 0.12 * Math.cos(3 * a + 0.4)
+      const r = radius * tri * (1 - 0.13 * ringAmt * (1 - ridge))
+      const n = frames.normals[i].clone().multiplyScalar(Math.cos(a)).add(frames.binormals[i].clone().multiplyScalar(Math.sin(a)))
+      pos.push(p.x + n.x * r, p.y + n.y * r, p.z + n.z * r)
+      const c = groove.clone().lerp(crest, 0.25 + 0.75 * ridge * ringAmt + (1 - ringAmt) * 0.5).lerp(tipCol, THREE.MathUtils.smoothstep(t, 0.6, 1) * 0.8)
       col.push(c.r, c.g, c.b)
     }
   }
@@ -617,8 +627,8 @@ function faunEarGeometry() {
   const p = g.getAttribute('position') as THREE.BufferAttribute
   const col: number[] = []
   const v = new THREE.Vector3()
-  const outer = new THREE.Color(0x8e6c48)
-  const inner = new THREE.Color(0x5e3d2c)
+  const outer = new THREE.Color(0x7d6650)
+  const inner = new THREE.Color(0x4e3628)
   for (let i = 0; i < p.count; i++) {
     v.fromBufferAttribute(p, i)
     // Leaf outline: widest a third of the way out, pointed at the tip.
@@ -636,69 +646,82 @@ function faunEarGeometry() {
   return g
 }
 
-/** The faun's forehead: whorls carved in the brow — two big spirals over
- *  the eyes, a small one between them, lines running up to the hairline
- *  and down the bridge of the nose. Drawn as grooves with a lit edge, on a
- *  map laid over the face (u, v from the face's own x, y). */
+/** The faun's forehead: whorls in relief — broad raised coils, two big
+ *  ones over the brows and a smaller one between and below them, with
+ *  sweeping ridges joining them — in the skin itself, so they show only by
+ *  their light and shade. Painted as a height map, then lit from above:
+ *  highlights on the upper slopes, shadow under each coil. Laid on the
+ *  face (u, v from the face's own x, y). */
 function faunPattern() {
   const S = 512
-  const c = document.createElement('canvas')
-  c.width = c.height = S
-  const ctx = c.getContext('2d')!
   // Rig (x, y) → canvas: x ∈ [-0.9, 0.9], y ∈ [-0.45, 1.35].
   const X = (x: number) => (0.5 + x / 1.8) * S
   const Y = (y: number) => (1 - (0.5 + (y - 0.45) / 1.8)) * S
-  const path = (pts: [number, number][]) => {
-    ctx.beginPath()
-    pts.forEach(([x, y], k) => (k ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))))
+  const h = document.createElement('canvas')
+  h.width = h.height = S
+  const hx = h.getContext('2d')!
+  hx.fillStyle = '#000'
+  hx.fillRect(0, 0, S, S)
+  hx.lineCap = 'round'
+  hx.lineJoin = 'round'
+  const stroke = (pts: [number, number][], w: number) => {
+    hx.lineWidth = w
+    hx.beginPath()
+    pts.forEach(([x, y], k) => (k ? hx.lineTo(X(x), Y(y)) : hx.moveTo(X(x), Y(y))))
+    hx.stroke()
   }
-  const spiral = (cx: number, cy: number, r: number, turns: number, dir: number, rot = 0) => {
+  const coil = (cx: number, cy: number, r: number, turns: number, dir: number, rot: number) => {
     const pts: [number, number][] = []
-    for (let k = 0; k <= 160; k++) {
-      const t = k / 160
+    for (let k = 0; k <= 240; k++) {
+      const t = k / 240
       const a = rot + dir * t * turns * Math.PI * 2
-      pts.push([cx + Math.cos(a) * r * t, cy + Math.sin(a) * r * t * 0.9])
+      pts.push([cx + Math.cos(a) * r * (0.12 + 0.88 * t), cy + Math.sin(a) * r * (0.12 + 0.88 * t)])
     }
     return pts
   }
-  const strokes: [number, number][][] = [
-    spiral(-0.36, 0.5, 0.24, 2.4, 1, 0.3),
-    spiral(0.36, 0.5, 0.24, 2.4, -1, Math.PI - 0.3),
-    spiral(0, 0.66, 0.13, 2, 1, -Math.PI / 2),
-    // Up from the outer whorls toward the hairline.
-    [[-0.52, 0.6], [-0.5, 0.78], [-0.4, 0.92]],
-    [[0.52, 0.6], [0.5, 0.78], [0.4, 0.92]],
-    // Down the bridge from the small whorl.
-    [[-0.04, 0.52], [-0.05, 0.3], [-0.03, 0.08], [0, -0.1]],
-    [[0.04, 0.52], [0.05, 0.3], [0.03, 0.08], [0, -0.1]],
-  ]
-  ctx.lineCap = 'round'
-  ctx.lineJoin = 'round'
-  // Lit upper edge, then the groove itself, then its shadowed floor.
-  for (const [dx, dy, color, width] of [
-    [-2, -2.5, 'rgba(255,236,205,0.5)', 12],
-    [0, 0, 'rgba(96,62,36,0.6)', 10],
-    [1.2, 1.8, 'rgba(48,28,14,0.5)', 5],
-  ] as const) {
-    ctx.save()
-    ctx.translate(dx, dy)
-    ctx.strokeStyle = color
-    ctx.lineWidth = width
-    for (const s of strokes) {
-      path(s)
-      ctx.stroke()
+  hx.filter = 'blur(5px)'
+  hx.strokeStyle = '#fff'
+  const W = 15
+  stroke(coil(-0.3, 0.58, 0.27, 2.6, 1, -0.4), W)
+  stroke(coil(0.3, 0.58, 0.27, 2.6, -1, Math.PI + 0.4), W)
+  stroke(coil(0, 0.3, 0.13, 1.8, 1, Math.PI / 2), W * 0.85)
+  // Ridges sweeping from the whorls up toward the hairline, and in over
+  // the brows.
+  stroke([[-0.57, 0.62], [-0.6, 0.82], [-0.48, 1.0]], W)
+  stroke([[0.57, 0.62], [0.6, 0.82], [0.48, 1.0]], W)
+  stroke([[-0.12, 0.3], [-0.2, 0.2], [-0.42, 0.22]], W * 0.8)
+  stroke([[0.12, 0.3], [0.2, 0.2], [0.42, 0.22]], W * 0.8)
+  const H = hx.getImageData(0, 0, S, S).data
+  const c = document.createElement('canvas')
+  c.width = c.height = S
+  const cx = c.getContext('2d')!
+  const out = cx.createImageData(S, S)
+  const at = (x: number, y: number) => H[(Math.min(S - 1, Math.max(0, y)) * S + Math.min(S - 1, Math.max(0, x))) * 4] / 255
+  for (let y = 0; y < S; y++)
+    for (let x = 0; x < S; x++) {
+      // Slope facing up (toward a light above) brightens; facing down darkens.
+      const dy = at(x, y + 2) - at(x, y - 2)
+      const dx = at(x + 2, y) - at(x - 2, y)
+      const lit = dy * 1.6 + dx * 0.4
+      const k = (y * S + x) * 4
+      // Fade out at the hairline and below the brows.
+      const v = 1 - y / S
+      const fade = THREE.MathUtils.smoothstep(v, 0.2, 0.3) * (1 - THREE.MathUtils.smoothstep(v, 0.78, 0.86))
+      // Only the coils' real slopes: no haze from the blur's faint tails.
+      const m = Math.max(0, Math.abs(lit) - 0.035)
+      if (lit > 0) {
+        out.data[k] = 255
+        out.data[k + 1] = 242
+        out.data[k + 2] = 225
+        out.data[k + 3] = Math.min(220, m * 380 * fade)
+      } else {
+        out.data[k] = 60
+        out.data[k + 1] = 36
+        out.data[k + 2] = 22
+        out.data[k + 3] = Math.min(230, m * 360 * fade)
+      }
     }
-    ctx.restore()
-  }
-  // Fade out toward the brows and the hairline.
-  ctx.globalCompositeOperation = 'destination-in'
-  const g = ctx.createLinearGradient(0, Y(1.0), 0, Y(-0.15))
-  g.addColorStop(0, 'rgba(0,0,0,0)')
-  g.addColorStop(0.12, 'rgba(0,0,0,1)')
-  g.addColorStop(0.92, 'rgba(0,0,0,1)')
-  g.addColorStop(1, 'rgba(0,0,0,0)')
-  ctx.fillStyle = g
-  ctx.fillRect(0, 0, S, S)
+  cx.putImageData(out, 0, 0)
   const tex = new THREE.CanvasTexture(c)
   tex.colorSpace = THREE.SRGBColorSpace
   tex.anisotropy = 8
@@ -706,7 +729,7 @@ function faunPattern() {
 }
 
 function faun(): Model {
-  const hornMat = physical({ vertexColors: true, roughness: 0.62, clearcoat: 0.25, clearcoatRoughness: 0.5, sheen: 0.2 })
+  const hornMat = physical({ vertexColors: true, roughness: 0.68, clearcoat: 0.15, clearcoatRoughness: 0.6 })
   const horns = [-1, 1].map((side) => {
     const m = new THREE.Mesh(ramHorn(side), hornMat)
     m.castShadow = true
@@ -746,8 +769,9 @@ function faun(): Model {
       ears.forEach((e, k) => {
         const side = k ? 1 : -1
         const temple = side < 0 ? a.templeL : a.templeR
-        e.position.set(temple.x + side * 0.02, temple.y - 0.3, temple.z - 0.4)
-        e.rotation.set(0, side * 0.45, side * -0.3)
+        // Tucked up under the horns, sticking straight out to the side.
+        e.position.set(temple.x - side * 0.05, temple.y - 0.05, temple.z - 0.45)
+        e.rotation.set(0, side * 0.35, side * -0.12)
       })
       const pos = decalGeo.getAttribute('position') as THREE.BufferAttribute
       const uv = decalGeo.getAttribute('uv') as THREE.BufferAttribute
