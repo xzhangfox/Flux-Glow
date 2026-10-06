@@ -849,12 +849,95 @@ vec3 bumpNormal(vec3 n, vec3 p) {
 }
 `
 
+// The cowl is hard plastic, so unlike Spider's fabric it doesn't follow
+// the face: it's a rigid moulding, built once from flat facets (as the
+// reference's are) with slightly rounded edges, then sized to each face
+// and carried by the head rig. The facets' offsets were set to clear a
+// face with room to spare; the face itself hides the cowl's inside.
+
+type Facet = { n: V3; d: number }
+/** [normal x, y, z, offset] or [normal x, y, z, point x, y, z]. */
+const facets = (raw: number[][]): Facet[] =>
+  raw.map((r) => {
+    const n = V(r[0], r[1], r[2]).normalize()
+    return { n, d: r.length > 4 ? n.dot(V(r[3], r[4], r[5])) : r[3] }
+  })
+// For the right half (x ≥ 0), mirrored for the left; the centre line,
+// where the two halves meet, becomes a ridge.
+const BAT_HEAD = facets([
+  [0.32, 0.28, 1, 0.22], // forehead, either side of the centre ridge
+  [0.18, 0.75, 0.65, 0.66], // forehead turning to the top
+  [0, 1, -0.12, 1.5], // top, falling away to the back
+  [0.75, 0.75, 0.1, 1.34], // top corners
+  [1, 0.4, 0.2, 1.18], // upper sides, tapering to the top
+  [1, 0.08, 0.32, 0.96], // temples
+  [1, 0.05, -0.4, 1.1, 0.2, -1.8], // sides, behind
+  [0.35, 0.4, -1, 0, 0.4, -2.5], // back
+  [0.4, -0.2, 1, 0.38], // cheeks
+  [1, -0.35, 0.4, 1.0], // cheek pieces, narrowing toward the jaw
+  [0, -1, -0.25, 0, -1.55, -1.2], // underneath
+])
+// The nose guard: a wedge from the brow down to the tip.
+const BAT_NOSE = facets([
+  [0.9, 0.15, 0.6, 0.27], // flanks
+  [0, 0.3, 1, 0.31], // front
+  [0, 1, 0.3, 0, 0.2, 0], // top, into the brow
+  [0, -1, 0, 0, -0.76, 0], // bottom
+  [0, 0, -1, 0, 0, -0.4], // back
+])
+const BAT_ORIGIN = V(0, -0.1, -1.0)
+
+function smaxk(a: number, b: number, k: number) {
+  const h = Math.max(k - Math.abs(a - b), 0) / k
+  return Math.max(a, b) + h * h * k * 0.25
+}
+function facetSdf(f: Facet[], x: number, y: number, z: number) {
+  let d = f[0].n.x * x + f[0].n.y * y + f[0].n.z * z - f[0].d
+  for (let i = 1; i < f.length; i++) d = smaxk(d, f[i].n.x * x + f[i].n.y * y + f[i].n.z * z - f[i].d, 0.05)
+  return d
+}
+function batSdf(x: number, y: number, z: number) {
+  const ax = Math.abs(x)
+  return smin(facetSdf(BAT_HEAD, ax, y, z), facetSdf(BAT_NOSE, ax, y, z), 0.05)
+}
+
+function traceBat(dir: V3, out: V3) {
+  let t = 5
+  for (let i = 0; i < 90; i++) {
+    const d = batSdf(BAT_ORIGIN.x + dir.x * t, BAT_ORIGIN.y + dir.y * t, BAT_ORIGIN.z + dir.z * t)
+    if (Math.abs(d) < 5e-4) break
+    t -= d
+  }
+  return out.copy(dir).multiplyScalar(t).add(BAT_ORIGIN)
+}
+
+/** The moulding, meshed: a dense sphere's directions traced onto it, with
+ *  normals from the distance field (flat on facets, rounded at edges). */
+function batGeometry() {
+  const g = new THREE.SphereGeometry(1, 200, 150)
+  const pos = g.getAttribute('position') as THREE.BufferAttribute
+  const nrm = g.getAttribute('normal') as THREE.BufferAttribute
+  const d = new THREE.Vector3()
+  const p = new THREE.Vector3()
+  const e = 0.003
+  for (let i = 0; i < pos.count; i++) {
+    traceBat(d.fromBufferAttribute(pos, i).normalize(), p)
+    pos.setXYZ(i, p.x, p.y, p.z)
+    const n = V(batSdf(p.x + e, p.y, p.z) - batSdf(p.x - e, p.y, p.z), batSdf(p.x, p.y + e, p.z) - batSdf(p.x, p.y - e, p.z), batSdf(p.x, p.y, p.z + e) - batSdf(p.x, p.y, p.z - e)).normalize()
+    nrm.setXYZ(i, n.x, n.y, n.z)
+  }
+  // The cut and the moulded lines are laid out on the moulding itself.
+  g.setAttribute('aLocal', pos.clone())
+  g.computeBoundingSphere()
+  return g
+}
+
 export function batCowl(): Model {
-  const geo = hoodGeometry()
+  const geo = batGeometry()
   const uniforms = { uEyeA: { value: new THREE.Vector4() }, uEyeB: { value: new THREE.Vector4() }, uRigView: { value: new THREE.Matrix3() } }
   // Moulded, polished black: broad soft highlights, like the reference's
   // plastic, rather than a pin-point CG glint.
-  const shell = () => new THREE.MeshPhysicalMaterial({ color: 0x0c0d10, roughness: 0.4, metalness: 0, clearcoat: 0.6, clearcoatRoughness: 0.28, envMapIntensity: 0.55 })
+  const shell = () => new THREE.MeshPhysicalMaterial({ color: 0x0c0d10, roughness: 0.36, metalness: 0, clearcoat: 0.6, clearcoatRoughness: 0.25, envMapIntensity: 0.55 })
   const material = shell()
   material.side = THREE.DoubleSide
   material.alphaToCoverage = true
@@ -872,38 +955,22 @@ export function batCowl(): Model {
   const mesh = new THREE.Mesh(geo, material)
   mesh.frustumCulled = false
 
-  // The ears: tall, angular, standing straight up off the top of the head.
+  // The ears stand up off the top corners.
   const earMat = shell()
-  const ears = [-1, 1].map(() => {
-    const m = new THREE.Mesh(batEar(), earMat)
-    m.frustumCulled = false
-    return m
-  })
-  const root = new THREE.Group()
-  root.add(mesh, ...ears)
-
-  const shape: MaskShape = {
-    // A rigid shell: heavily smoothed, standing off the face, with a heavy
-    // brow over the eyes.
-    faceLift: (p) => {
-      const ax = Math.abs(p.x)
-      const brow = 0.06 * Math.exp(-(((p.y - (0.2 + 0.18 * ax)) / 0.12) ** 2)) * ss(ax, 0.06, 0.2) * (1 - ss(ax, 0.75, 1))
-      // The nose guard: the hollows beside the bridge filled in, so it's a
-      // straight wedge from the brow down to the tip.
-      const guard = 0.08 * Math.exp(-((ax / 0.15) ** 2)) * ss(p.y, -0.62, -0.4) * (1 - ss(p.y, -0.15, 0.1))
-      return 0.06 + brow + guard
-    },
-    smooth: 7,
-    lift: 0.05,
-    jaw: 0.9,
-    ears: 0.06,
-    // Tall and round on top, but close at the temples.
-    // Proportioned on the reference: the dome tops out about 1.5 eye
-    // spacings above the eyes, the face plate as wide as the face.
-    skull: { y: 0.3, z: -1.35, rx: 1.06, ry: 1.26, front: 1.24, back: 1.5 },
-  }
-  const dir = new THREE.Vector3()
+  const cowl = new THREE.Group()
+  cowl.add(mesh)
   const base = new THREE.Vector3()
+  for (const side of [-1, 1]) {
+    const ear = new THREE.Mesh(batEar(), earMat)
+    ear.frustumCulled = false
+    traceBat(V(side * 0.72, 1.6, 0.5).normalize(), base)
+    ear.position.copy(base).add(V(0, -0.1, 0))
+    ear.scale.set(side, 1, 1)
+    cowl.add(ear)
+  }
+  const root = new THREE.Group()
+  root.add(cowl)
+  const scale = new THREE.Vector3(1, 1, 1)
   return {
     root,
     // Worn on the face: the face hides the inside of the cowl, which
@@ -912,25 +979,24 @@ export function batCowl(): Model {
     // Ears and the sides of the head, down to the cowl's lower edge.
     hidesHead: -1.25,
     update(rig) {
-      const fit = fitMask(geo, rig, shape)
+      const L = Array.from({ length: N }, (_, i) => rig.local(i))
+      // Sized to this face: its width at the cheeks, its eye-to-chin length
+      // (the moulding's own are those of the face it was made round).
+      const eyeY = (eyeCentres(L)[0].y + eyeCentres(L)[1].y) / 2
+      const sx = THREE.MathUtils.clamp(Math.abs(L[454].x - L[234].x) / 2 / 1.06, 0.85, 1.25)
+      const sy = THREE.MathUtils.clamp((eyeY - L[152].y) / 1.71, 0.85, 1.25)
+      scale.set(sx, sy, sx)
+      cowl.scale.copy(scale)
       // The camera looks straight down -z, so view space turns like world
       // space: the rig's own rotation, unscaled.
       uniforms.uRigView.value.setFromMatrix4(rig.matrix).multiplyScalar(1 / rig.E)
+      // Eye holes over this face's eyes, in the moulding's own space.
       const eyes = [LEFT_EYE, RIGHT_EYE].map((loop) => {
-        const xs = loop.map((i) => fit.L[i].x)
-        return { c: loop.reduce((s, i) => s.add(fit.L[i]), new THREE.Vector3()).divideScalar(loop.length), rx: (Math.max(...xs) - Math.min(...xs)) * 0.8 }
+        const xs = loop.map((i) => L[i].x)
+        return { c: loop.reduce((s, i) => s.add(L[i]), new THREE.Vector3()).divideScalar(loop.length), rx: (Math.max(...xs) - Math.min(...xs)) * 0.8 }
       })
       eyes.sort((a, b) => a.c.x - b.c.x)
-      eyes.forEach((e, k) => (k ? uniforms.uEyeB : uniforms.uEyeA).value.set(e.c.x, e.c.y + 0.02, e.rx, e.rx * 0.56))
-      // Ears sit on the head, a little in from its sides.
-      ears.forEach((ear, k) => {
-        const side = k ? 1 : -1
-        dir.set(side * 0.8, 1.3, -0.3).sub(ORIGIN).normalize()
-        trace(dir, shape, base)
-        ear.position.copy(base).add(V(0, -0.08, 0))
-        ear.scale.set(side * 1.2, 1.2, 1.2)
-        ear.rotation.set(0, 0, 0)
-      })
+      eyes.forEach((e, k) => (k ? uniforms.uEyeB : uniforms.uEyeA).value.set(e.c.x / sx, e.c.y / sy + 0.02, e.rx / sx, (e.rx * 0.56) / sy))
     },
   }
 }
