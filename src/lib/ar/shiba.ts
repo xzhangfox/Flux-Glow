@@ -79,10 +79,11 @@ interface Ear {
 }
 
 function makeEar(side: number): Ear {
-  const base = V(side * 0.56, 0.62, -0.48)
-  // Upright at the root; it sweeps back as it rises (see earLocal).
-  const u = V(side * 0.4, 1, -0.05).normalize()
-  const f0 = V(side * 0.22, 0, 1).normalize()
+  const base = V(side * 0.56, 0.62, -0.4)
+  // Seen from the side it leans a little forward (see earLocal too).
+  const u = V(side * 0.36, 1, 0.16).normalize()
+  // Facing forward and out, so the hollow shows from the front and side.
+  const f0 = V(side * 0.75, 0, 1).normalize()
   const r = new THREE.Vector3().crossVectors(u, f0).normalize()
   const f = new THREE.Vector3().crossVectors(r, u).normalize()
   return { base, u, r, f, h: 0.94, w: 0.39, t: 0.42 }
@@ -99,8 +100,9 @@ function earLocal(e: Ear, x: number, y: number, z: number) {
   return {
     a,
     s: qx * e.r.x + qy * e.r.y + qz * e.r.z,
-    // The ear curves back: its section slides back as it rises.
-    t: qx * e.f.x + qy * e.f.y + qz * e.f.z + 0.3 * e.h * k * k,
+    // The ear curves a little forward: its section slides forward as it
+    // rises, the back of it bowed.
+    t: qx * e.f.x + qy * e.f.y + qz * e.f.z - 0.1 * e.h * k * k,
   }
 }
 
@@ -443,19 +445,20 @@ function canvasTexture(W: number, H: number, draw: (g: CanvasRenderingContext2D)
 }
 
 /** The eye's outline in a unit box (x right, y down), for the wearer's
- *  right eye (on the viewer's left), as on the sheet: a big round curve on
- *  the outer side, the top drawn across, a near-upright inner side the
- *  iris runs into, and a round bottom. */
+ *  right eye (on the viewer's left), traced off the sheet: an egg, taller
+ *  than wide, its top highest toward the nose and its outer side fuller
+ *  and lower. */
 const EYE_PTS: [number, number][] = [
-  [0.86, 0.13], [0.6, 0.06], [0.32, 0.12], [0.12, 0.32], [0.06, 0.58], [0.14, 0.84],
-  [0.36, 0.98], [0.62, 0.99], [0.84, 0.88], [0.94, 0.62], [0.94, 0.34],
+  [0.07, 0.21], [0.26, 0.08], [0.59, 0.01], [0.85, 0.06], [0.96, 0.23], [0.99, 0.47],
+  [0.93, 0.75], [0.8, 0.94], [0.5, 1.0], [0.2, 0.9], [0.04, 0.7], [0.0, 0.45],
 ]
 const EYE_MARGIN = 0.12
 
-/** A smooth closed curve through EYE_PTS (midpoint quadratics). */
-function eyePath(g: CanvasRenderingContext2D, W: number, H: number) {
+/** A smooth closed curve through EYE_PTS (midpoint quadratics), scaled by
+ *  `grow` about the eye's middle and shifted by (dx, dy). */
+function eyePath(g: CanvasRenderingContext2D, W: number, H: number, grow = 0, dx = 0, dy = 0) {
   const k = 1 - 2 * EYE_MARGIN
-  const P = ([x, y]: [number, number]): [number, number] => [W * (EYE_MARGIN + x * k), H * (EYE_MARGIN + y * k)]
+  const P = ([x, y]: [number, number]): [number, number] => [W * (EYE_MARGIN + (0.5 + (x - 0.5) * (1 + grow) + dx) * k), H * (EYE_MARGIN + (0.5 + (y - 0.5) * (1 + grow) + dy) * k)]
   const n = EYE_PTS.length
   const mid = (i: number): [number, number] => {
     const a = EYE_PTS[i % n]
@@ -468,10 +471,11 @@ function eyePath(g: CanvasRenderingContext2D, W: number, H: number) {
   g.closePath()
 }
 
-/** A cartoon eye after the sheet: white, a big blue iris and a bigger navy
- *  pupil both run into the inner corner; a heavy dark lid line over the
- *  top and down the outer side, none below; a catch-light on the outer
- *  side of the iris. */
+/** A cartoon eye after the sheet: white on the outer side; a big blue iris
+ *  and a big navy pupil set toward the nose, cut off by the eye's inner
+ *  edge; a heavy lid line over the top and down the outer side, thickest
+ *  at the upper outer corner, none on the inner side; a catch-light on the
+ *  upper outer edge of the pupil. */
 function eyeTexture(right: boolean) {
   const W = 256
   const H = 256
@@ -483,61 +487,58 @@ function eyeTexture(right: boolean) {
       g.translate(W, 0)
       g.scale(-1, 1)
     }
+    // The lid line: the outline grown up and out, clipped to the top and
+    // the outer side.
+    g.save()
+    g.beginPath()
+    g.moveTo(X(1.2), Y(-0.2))
+    g.lineTo(X(1.0), Y(0.22))
+    g.lineTo(X(0.5), Y(0.5))
+    g.lineTo(X(0.15), Y(1.2))
+    g.lineTo(X(-0.3), Y(1.2))
+    g.lineTo(X(-0.3), Y(-0.2))
+    g.closePath()
+    g.clip()
+    g.fillStyle = '#121216'
+    eyePath(g, W, H, 0.07, -0.035, -0.04)
+    g.fill()
+    g.restore()
     g.save()
     eyePath(g, W, H)
     g.clip()
-    // Sclera, a touch grey toward the outer corner and under the lid.
     const sc = g.createLinearGradient(X(0), 0, X(0.6), 0)
-    sc.addColorStop(0, '#e6e6ea')
+    sc.addColorStop(0, '#e9e9ee')
     sc.addColorStop(1, '#fbfbf9')
     g.fillStyle = sc
     g.fillRect(0, 0, W, H)
-    // Iris: big, its inner side cut by the corner; a lighter outer ring.
-    g.fillStyle = '#4b8edb'
+    // Iris, a lighter rim round a deeper middle.
+    g.fillStyle = '#3f86d6'
     g.beginPath()
-    g.ellipse(X(0.69), Y(0.555), W * 0.285 * k, H * 0.42 * k, 0, 0, Math.PI * 2)
+    g.ellipse(X(0.74), Y(0.55), W * 0.33 * k, H * 0.46 * k, 0, 0, Math.PI * 2)
     g.fill()
-    const ir = g.createLinearGradient(0, Y(0.1), 0, Y(0.95))
-    ir.addColorStop(0, '#173f80')
-    ir.addColorStop(0.55, '#2c66b3')
-    ir.addColorStop(1, '#3a7ccc')
+    const ir = g.createLinearGradient(0, Y(0.1), 0, Y(1))
+    ir.addColorStop(0, '#163c7c')
+    ir.addColorStop(0.6, '#2a63b0')
+    ir.addColorStop(1, '#3478c8')
     g.fillStyle = ir
     g.beginPath()
-    g.ellipse(X(0.69), Y(0.55), W * 0.265 * k, H * 0.4 * k, 0, 0, Math.PI * 2)
+    g.ellipse(X(0.75), Y(0.55), W * 0.29 * k, H * 0.42 * k, 0, 0, Math.PI * 2)
     g.fill()
-    // Pupil: very big, deep navy, also into the corner.
-    g.fillStyle = '#0c1630'
+    g.fillStyle = '#0b1530'
     g.beginPath()
-    g.ellipse(X(0.77), Y(0.54), W * 0.185 * k, H * 0.33 * k, 0, 0, Math.PI * 2)
+    g.ellipse(X(0.8), Y(0.52), W * 0.17 * k, H * 0.32 * k, 0, 0, Math.PI * 2)
     g.fill()
-    // The lid's shadow across the top.
-    const sh = g.createLinearGradient(0, Y(0.04), 0, Y(0.3))
-    sh.addColorStop(0, 'rgba(12,20,40,0.45)')
+    // The lid's soft shadow across the top.
+    const sh = g.createLinearGradient(0, Y(0), 0, Y(0.25))
+    sh.addColorStop(0, 'rgba(12,20,40,0.4)')
     sh.addColorStop(1, 'rgba(12,20,40,0)')
     g.fillStyle = sh
     g.fillRect(0, 0, W, H)
-    // Catch-light, up on the outer side of the iris.
     g.fillStyle = '#ffffff'
     g.beginPath()
-    g.arc(X(0.47), Y(0.36), W * 0.062 * k, 0, Math.PI * 2)
+    g.arc(X(0.57), Y(0.39), W * 0.07 * k, 0, Math.PI * 2)
     g.fill()
     g.restore()
-    // The lid line: heavy over the top and round the outer side, tapering
-    // off at both ends, following the eye's edge.
-    g.fillStyle = '#121216'
-    const n = 60
-    for (let i = 0; i <= n; i++) {
-      // From the inner corner, over the top, down the outer side: thin at
-      // the inner end, heavy over the top and outside, tapering off low.
-      const u = i / n
-      const ang = Math.PI * (0.16 + 1.1 * u)
-      const cx = 0.52 + 0.46 * Math.cos(ang)
-      const cy = 0.53 - 0.47 * Math.sin(ang)
-      const w = 0.03 + 0.07 * ss(u, 0, 0.3) * (1 - ss(u, 0.75, 1))
-      g.beginPath()
-      g.arc(X(cx), Y(cy), W * w * k * 0.5 + 0.5, 0, Math.PI * 2)
-      g.fill()
-    }
   })
 }
 
@@ -697,13 +698,13 @@ export function shibaHead(): Model {
   const paint = new THREE.MeshStandardMaterial({ map: paintTexture(), transparent: true, roughness: 0.65, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 })
   sculpt.add(decal(0, 0, 2 * PAINT, 2 * PAINT, paint, 0.003, 40, true))
 
-  // Eyes: big, glossy, a little inset under the brow.
+  // Eyes: big, a little inset under the brow.
   for (const s of [-1, 1]) {
     const eyeMat = new THREE.MeshStandardMaterial({ map: eyeTexture(s < 0), transparent: true, alphaTest: 0.4, roughness: 0.7 })
-    sculpt.add(decal(s * 0.47, -0.02, 0.8, 0.9, eyeMat, 0.006))
+    sculpt.add(decal(s * 0.48, -0.02, 0.68, 0.76, eyeMat, 0.006))
   }
 
-  // Nose: a glossy rounded triangle, broad on top, on the tip of the muzzle.
+  // Nose: a matte rounded triangle, broad on top, on the tip of the muzzle.
   const tip = onFront(0, -0.38)
   const ng = new THREE.SphereGeometry(1, 40, 28)
   const np = ng.getAttribute('position') as THREE.BufferAttribute
@@ -713,7 +714,7 @@ export function shibaHead(): Model {
     np.setZ(i, np.getZ(i) * (1 - 0.15 * Math.max(0, -y)))
   }
   ng.computeVertexNormals()
-  const nose = new THREE.Mesh(ng, new THREE.MeshPhysicalMaterial({ color: 0x141214, roughness: 0.28, clearcoat: 1, clearcoatRoughness: 0.08 }))
+  const nose = new THREE.Mesh(ng, new THREE.MeshStandardMaterial({ color: 0x1a1718, roughness: 0.85 }))
   nose.scale.set(0.23, 0.13, 0.12)
   nose.position.set(0, tip.y, tip.z - 0.02)
   nose.rotation.x = -0.25
