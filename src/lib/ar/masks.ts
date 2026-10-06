@@ -59,7 +59,9 @@ const NECK = { z: -1.35, rx: 0.82, rz: 0.74, bottom: -4.2 }
 // The hood's paths end a little below the hem, which is then cut clean
 // (antialiased) in the shader.
 const HEM_Y = -3.05
-const SPIDER_HEM = -2.85
+// Spider ends at the jaw, leaving the wearer's own neck: just under the
+// chin at the front, rising round under the ears to the nape.
+const SPIDER_HEM = 'vLocal.y - (-1.98 + 0.63 * (1.0 - smoothstep(-1.8, -0.3, vLocal.z)))'
 
 interface HoodSpec {
   /** The cranium under the mask: an egg, rounder at the forehead. Masks
@@ -70,6 +72,8 @@ interface HoodSpec {
   lift: number
   /** How far the ears under the mask push it out. */
   ears: number
+  /** Half-width of the jaw behind the face (default 0.98). */
+  jaw?: number
 }
 
 function headSdf(x: number, y: number, z: number, spec: HoodSpec) {
@@ -77,7 +81,7 @@ function headSdf(x: number, y: number, z: number, spec: HoodSpec) {
   const zs = z - S.z
   let d = ellipsoid(x, y - S.y, zs, S.rx, S.ry, zs > 0 ? S.front : S.back)
   // Jaw and the underside of the head, behind the face.
-  d = smin(d, ellipsoid(x, y + 0.85, z + 1.05, 0.98, 0.92, 0.95), 0.45)
+  d = smin(d, ellipsoid(x, y + 0.85, z + 1.05, spec.jaw ?? 0.98, 0.92, 0.95), 0.45)
   // Neck (an elliptic column), stopping well below the hem.
   const neck = Math.max((Math.hypot(x / NECK.rx, (z - NECK.z) / NECK.rz) - 1) * NECK.rz, NECK.bottom - y, y + 0.3)
   d = smin(d, neck, 0.55)
@@ -708,7 +712,7 @@ export function spiderMask(): Model {
     shader.fragmentShader =
       'varying vec3 vLocal;\n' +
       shader.fragmentShader
-        .replace('void main() {', `void main() {\n  float keepV = vLocal.y - (${SPIDER_HEM.toFixed(2)});\n  float cutA = clamp(keepV / max(fwidth(keepV), 1e-5) + 0.5, 0.0, 1.0);\n  if (cutA <= 0.0) discard;`)
+        .replace('void main() {', `void main() {\n  float keepV = ${SPIDER_HEM};\n  float cutA = clamp(keepV / max(fwidth(keepV), 1e-5) + 0.5, 0.0, 1.0);\n  if (cutA <= 0.0) discard;`)
         .replace('#include <dithering_fragment>', '#include <dithering_fragment>\n  gl_FragColor.a *= cutA;')
   }
   fabric.customProgramCacheKey = () => 'spider-hood'
@@ -750,9 +754,8 @@ export function spiderMask(): Model {
   return {
     root,
     fullHead: true,
-    // Ears and a neck wider than the hood's go too, down to the hem.
-    hidesHead: SPIDER_HEM + 0.35,
-    reach: -SPIDER_HEM,
+    // Ears and the sides of the head showing past the hood go too.
+    hidesHead: -1.3,
     update(rig) {
       const fit = fitMask(geo, rig, shape)
       for (const l of lenses) l.update(fit)
@@ -859,10 +862,11 @@ export function batCowl(): Model {
       return 0.06 + brow + guard
     },
     smooth: 7,
-    lift: 0.07,
+    lift: 0.05,
+    jaw: 0.9,
     ears: 0.06,
     // Tall and round on top, but close at the temples.
-    skull: { y: 0.5, z: -1.35, rx: 1.16, ry: 1.58, front: 1.28, back: 1.62 },
+    skull: { y: 0.42, z: -1.35, rx: 1.06, ry: 1.46, front: 1.24, back: 1.54 },
   }
   const dir = new THREE.Vector3()
   const base = new THREE.Vector3()
