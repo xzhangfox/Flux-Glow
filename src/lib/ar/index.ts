@@ -3,6 +3,5 @@
 export { renderAR } from './scene'
 export { buildModel, faceSticker } from './models'
 export { spiderMask, batCowl } from './masks'
-export { foxHead, huskyHead } from './fursuit'
-export { shibaHead } from './shiba'
+export { foxHead, huskyHead, shibaHead } from './shiba'
 export { preloadHair } from './hair'

@@ -1,12 +1,14 @@
 import * as THREE from 'three'
 import type { Model, Rig } from './scene'
 
-// A stylised Shiba head, after a toy-like reference model (front, 3/4, side,
-// back, top and bottom views): smooth and matte, not furry — a round head
-// with full cheeks, chunky conical spikes of "fur" round the cheeks, the
-// back and the crown, big thick triangular ears with cream hollows, a short
-// cream muzzle, cream dot brows, big blue cartoon eyes, a black nose and a
-// wide smiling mouth line.
+// Stylised animal heads after a toy-like Shiba reference model (front, 3/4,
+// side, back, top and bottom views): smooth and matte, not furry — a round
+// head with full cheeks, chunky conical spikes of "fur" round the cheeks,
+// the back and the crown, big thick triangular ears with pale hollows, a
+// short muzzle, dot brows, big cartoon eyes, a nose and a smiling mouth.
+// The Shiba is the reference; the fox and the husky are derived from it,
+// changing the ears, fur, eyes, muzzle, mouth, markings and colours (see
+// DESIGNS).
 //
 // Built as one signed distance field (ears and spikes included, blended
 // in), meshed with surface nets on a grid — which, unlike casting rays from
@@ -32,6 +34,84 @@ function ellipsoid(x: number, y: number, z: number, rx: number, ry: number, rz: 
   return k1 > 0 ? (k0 * (k0 - 1)) / k1 : -Math.min(rx, ry, rz)
 }
 
+// ---- Designs ------------------------------------------------------------------
+
+type Markings = 'shiba' | 'fox' | 'husky'
+
+interface Design {
+  id: string
+  /** Muzzle: extra length forward, and width (1 = the Shiba's). */
+  muzzle: { len: number; width: number }
+  /** Ear root (x, y, z), lean out (u.x) and forward (u.z), how far it turns
+   *  out (f.x), and its height, half-width and half-thickness. */
+  ear: { x: number; y: number; z: number; lean: number; fwd: number; out: number; h: number; w: number; t: number }
+  /** Fur clumps: length and girth scale, spacing round the head (degrees),
+   *  and big pale tufts sweeping out of the cheeks (the fox's ruff). */
+  fur: { len: number; girth: number; step: number; cheekTufts: boolean }
+  markings: Markings
+  colors: { main: string; deep: string; crown: string; cream: string; earIn: string; earTip?: string; brow: string }
+  /** Brows: centre, half-axes, tilt (outer end up). */
+  brow: { x: number; y: number; rx: number; ry: number; tilt: number }
+  /** The Shiba's brown marks beside the nose. */
+  noseMarks: boolean
+  /** Eyes: size (1 = the Shiba's), outer corner raised (radians), iris
+   *  colours (rim, top, middle, bottom) and pupil. */
+  eye: { size: number; tilt: number; rim: string; top: string; mid: string; bottom: string; pupil: string }
+  nose: { y: number; scale: number }
+  mouth: 'closed' | 'open'
+}
+
+const DESIGNS: Record<string, Design> = {
+  shiba: {
+    id: 'shiba',
+    muzzle: { len: 0, width: 1 },
+    ear: { x: 0.56, y: 0.62, z: -0.4, lean: 0.36, fwd: 0.16, out: 0.75, h: 0.94, w: 0.39, t: 0.42 },
+    fur: { len: 1, girth: 1, step: 23, cheekTufts: false },
+    markings: 'shiba',
+    colors: { main: '#d6803c', deep: '#c46e2e', crown: '#e9a062', cream: '#f1e3cf', earIn: '#f6eee2', brow: '#f5e9d6' },
+    brow: { x: 0.32, y: 0.42, rx: 0.135, ry: 0.082, tilt: 0.42 },
+    noseMarks: true,
+    eye: { size: 1, tilt: 0, rim: '#3f86d6', top: '#163c7c', mid: '#2a63b0', bottom: '#3478c8', pupil: '#0b1530' },
+    nose: { y: -0.38, scale: 1 },
+    mouth: 'closed',
+  },
+  // A red fox: taller ears with dark backs and tips, a longer, narrower
+  // muzzle, longer fur with a white ruff sweeping out of the cheeks, round
+  // dot brows, amber-orange eyes tipped up at the outer corners, mouth shut.
+  fox: {
+    id: 'fox',
+    muzzle: { len: 0.13, width: 0.86 },
+    ear: { x: 0.54, y: 0.62, z: -0.4, lean: 0.4, fwd: 0.16, out: 0.75, h: 1.12, w: 0.43, t: 0.42 },
+    fur: { len: 1.22, girth: 0.95, step: 22, cheekTufts: true },
+    markings: 'fox',
+    colors: { main: '#d8662a', deep: '#bb5220', crown: '#e7823f', cream: '#f5eee4', earIn: '#f7f1e8', earTip: '#2e211c', brow: '#f6efe4' },
+    brow: { x: 0.3, y: 0.42, rx: 0.085, ry: 0.075, tilt: 0 },
+    noseMarks: false,
+    eye: { size: 0.97, tilt: 0.08, rim: '#f08a3a', top: '#7a2c10', mid: '#c9521c', bottom: '#e9792f', pupil: '#24100a' },
+    nose: { y: -0.4, scale: 0.9 },
+    mouth: 'closed',
+  },
+  // A husky: grey cap and back over a white face, a dark stripe down the
+  // forehead, white fluffy brows, shorter, broader ears set wide, shorter,
+  // denser fur, bright pale-blue eyes tipped up, and an open smile.
+  husky: {
+    id: 'husky',
+    muzzle: { len: 0.06, width: 1.02 },
+    ear: { x: 0.62, y: 0.6, z: -0.42, lean: 0.46, fwd: 0.12, out: 0.75, h: 0.8, w: 0.44, t: 0.42 },
+    fur: { len: 0.82, girth: 0.92, step: 19, cheekTufts: false },
+    markings: 'husky',
+    colors: { main: '#62666d', deep: '#474a50', crown: '#6c7077', cream: '#f2f1ee', earIn: '#f4f2ef', brow: '#f7f6f3' },
+    brow: { x: 0.31, y: 0.43, rx: 0.15, ry: 0.07, tilt: 0.38 },
+    noseMarks: false,
+    eye: { size: 0.98, tilt: 0.12, rim: '#7fdcff', top: '#1677c2', mid: '#2fa3ea', bottom: '#6ad3ff', pupil: '#0b2340' },
+    nose: { y: -0.4, scale: 1.02 },
+    mouth: 'open',
+  },
+}
+
+/** The design being built. */
+let D: Design = DESIGNS.shiba
+
 // ---- The sculpt ---------------------------------------------------------------
 //
 // Modelled in the reference sheet's own units: 1 = the distance between the
@@ -55,15 +135,18 @@ function headBody(x: number, y: number, z: number) {
   d = smin(d, ellipsoid(x, y + 0.45, z + 0.12, 0.56, 0.34, 0.48), 0.25)
   // A short, round muzzle that the nose sits on, puffed out either side
   // where the mouth curls up, and the chin under it.
-  d = smin(d, ellipsoid(x, y + 0.4, z - 0.26, 0.3, 0.24, 0.3), 0.18)
-  for (const s of [-1, 1]) d = smin(d, ellipsoid(x - s * 0.24, y + 0.5, z - 0.14, 0.26, 0.21, 0.26), 0.14)
+  const ml = D.muzzle.len
+  const mw = D.muzzle.width
+  const xm = x / mw
+  d = smin(d, ellipsoid(xm, y + 0.4, z - 0.26 - ml, 0.3, 0.24, 0.3 + ml * 0.5), 0.18)
+  for (const s of [-1, 1]) d = smin(d, ellipsoid(xm - s * 0.24, y + 0.5, z - 0.14 - ml * 0.6, 0.26, 0.21, 0.26), 0.14)
   // Round, puffed cheeks below the eyes.
   for (const s of [-1, 1]) d = smin(d, ellipsoid(x - s * 0.46, y + 0.38, z - 0.0, 0.36, 0.32, 0.3), 0.2)
-  d = smin(d, ellipsoid(x, y + 0.7, z - 0.06, 0.26, 0.14, 0.24), 0.14)
+  d = smin(d, ellipsoid(xm, y + 0.7, z - 0.06 - ml * 0.5, 0.26, 0.14, 0.24), 0.14)
   // The two round pads under the nose that the mouth curls round.
-  for (const s of [-1, 1]) d = smin(d, ellipsoid(x - s * 0.135, y + 0.565, z - 0.4, 0.17, 0.14, 0.16), 0.035)
+  for (const s of [-1, 1]) d = smin(d, ellipsoid(xm - s * 0.135, y + 0.565, z - 0.4 - ml, 0.17, 0.14, 0.16), 0.035)
   // ...with a shallow groove down between them from the nose.
-  d = smax(d, -(Math.hypot(x / 0.5, (z - 0.58) / 0.5) * 0.5 - 0.018 + Math.max(0, y + 0.47) * 2 + Math.max(0, -0.68 - y) * 2), 0.02)
+  d = smax(d, -(Math.hypot(x / 0.5, (z - 0.58 - ml) / 0.5) * 0.5 - 0.018 + Math.max(0, y + 0.47) * 2 + Math.max(0, -0.68 - y) * 2), 0.02)
   // A short neck at the back.
   d = smin(d, ellipsoid(x, y + 0.34, z + 0.52, 0.45, 0.3, 0.38), 0.3)
   return d
@@ -81,16 +164,17 @@ interface Ear {
 }
 
 function makeEar(side: number): Ear {
-  const base = V(side * 0.56, 0.62, -0.4)
+  const E = D.ear
+  const base = V(side * E.x, E.y, E.z)
   // Seen from the side it leans a little forward (see earLocal too).
-  const u = V(side * 0.36, 1, 0.16).normalize()
+  const u = V(side * E.lean, 1, E.fwd).normalize()
   // Facing forward and out, so the hollow shows from the front and side.
-  const f0 = V(side * 0.75, 0, 1).normalize()
+  const f0 = V(side * E.out, 0, 1).normalize()
   const r = new THREE.Vector3().crossVectors(u, f0).normalize()
   const f = new THREE.Vector3().crossVectors(r, u).normalize()
-  return { base, u, r, f, h: 0.94, w: 0.39, t: 0.42 }
+  return { base, u, r, f, h: E.h, w: E.w, t: E.t }
 }
-const EARS = [makeEar(-1), makeEar(1)]
+let EARS: Ear[] = []
 
 /** Ear-local coordinates: a (up), s (across), t (out of the face). */
 function earLocal(e: Ear, x: number, y: number, z: number) {
@@ -155,7 +239,7 @@ interface Spike {
   reach: number
   cream: boolean
 }
-const spikes: Spike[] = []
+let spikes: Spike[] = []
 const CENTRE = V(0, -0.05, -0.4)
 
 /** The head's surface along a direction from its centre. */
@@ -203,8 +287,9 @@ let srnd = 11
 const sr = () => (srnd = (srnd * 16807) % 2147483647) / 2147483647
 
 function buildSpikes() {
-  if (spikes.length) return
+  spikes = []
   srnd = 11
+  const F = D.fur
   // The ruff: crisp cones of fur in staggered columns, starting at the
   // edge of the face (just ahead of the ears) and running back round the
   // sides and the edge of the back. High up they point back and up, at
@@ -222,7 +307,7 @@ function buildSpikes() {
   ]
   for (const s of [-1, 1])
     rows.forEach(([y, from, to], row) => {
-      const step = 23
+      const step = F.step
       for (let ang = from + (row % 2) * step * 0.5; ang <= to + 0.1; ang += step) {
         if (ang > 179 && s > 0) continue
         const phi = THREE.MathUtils.degToRad(ang + (sr() - 0.5) * 5)
@@ -235,9 +320,18 @@ function buildSpikes() {
         const out = n.clone().multiplyScalar(1.35).add(flowDir).normalize()
         const big = 1 + 0.15 * ss(-y, -0.2, 0.5)
         const cream = creamAt(p) > 0.5 && ang < 120
-        pushSpike(p, out, (0.24 + sr() * 0.04) * big, (0.13 + sr() * 0.015) * big, cream)
+        pushSpike(p, out, (0.24 + sr() * 0.04) * big * F.len, (0.13 + sr() * 0.015) * big * F.girth, cream)
       }
     })
+  // The fox's ruff: big pale tufts sweeping out and down from the cheeks.
+  if (F.cheekTufts)
+    for (const s of [-1, 1])
+      for (const [y, z, len, ra, oy] of [
+        [-0.32, -0.05, 0.36, 0.15, -0.35],
+        [-0.5, -0.15, 0.4, 0.16, -0.6],
+        [-0.15, -0.2, 0.3, 0.13, -0.15],
+      ])
+        pushSpike(surfaceDir(V(s * 0.95, y, z - CENTRE.z).normalize()), V(s, oy, -0.35).normalize(), len, ra, true)
   // The nape: a point hanging down at the back, and cream fluff in a V
   // down the throat.
   pushSpike(surfaceDir(V(0, -0.8, -0.75).normalize()), V(0, -1, -0.45).normalize(), 0.32, 0.16, false)
@@ -283,10 +377,6 @@ function sdf(x: number, y: number, z: number) {
 
 // ---- Colour ---------------------------------------------------------------------
 
-const ORANGE = new THREE.Color('#d6803c')
-const ORANGE_DEEP = new THREE.Color('#c46e2e')
-const CREAM = new THREE.Color('#f1e3cf')
-const EAR_CREAM = new THREE.Color('#f6eee2')
 
 function nearSpike(p: V3) {
   let best: Spike | null = null
@@ -301,8 +391,25 @@ function nearSpike(p: V3) {
   return best
 }
 
-/** How cream a point of the head is (0 orange .. 1 cream). */
+/** How cream a point of the head is (0 coat .. 1 cream). */
 function creamAt(p: V3) {
+  return D.markings === 'husky' ? huskyMask(p) : shibaMask(p)
+}
+
+/** The husky's white face: everything in front below a line just over the
+ *  eyes, but for a dark stripe down the middle of the forehead narrowing
+ *  between the eyes; round the sides and down the throat as on the Shiba. */
+function huskyMask(p: V3) {
+  const ax = Math.abs(p.x)
+  const stripe = 0.07 + 0.2 * ss(p.y, -0.12, 0.3)
+  // (arching up over each eye, dipping to the stripe and down the sides)
+  const line = 0.3 - 0.4 * ss(ax, 0.62, 1.0) - 0.1 * ss(0.3, 0.1, ax)
+  let c = ss(line - p.y, -0.02, 0.02) * (1 - ss(stripe - ax, -0.015, 0.015) * ss(p.y, -0.2, -0.12))
+  c *= ss(p.z, -0.65 - 0.3 * ss(-p.y, 0.1, 0.6), -0.42 - 0.3 * ss(-p.y, 0.1, 0.6))
+  return Math.max(c, shibaMask(p))
+}
+
+function shibaMask(p: V3) {
   const ax = Math.abs(p.x)
   // The face: cream from just under the eyes down, the orange of the nose
   // bridge running down in a soft point to the nose.
@@ -318,11 +425,20 @@ function creamAt(p: V3) {
 }
 
 function colorAt(p: V3): THREE.Color {
+  const C = D.colors
+  const CREAM = new THREE.Color(C.cream)
+  const EAR_CREAM = new THREE.Color(C.earIn)
   const sp = nearSpike(p)
-  if (sp?.cream) return CREAM.clone()
-  const c = ORANGE.clone().lerp(ORANGE_DEEP, ss(-p.z, 0.3, 1.2) * 0.6)
+  if (sp?.cream) return CREAM
+  const c = new THREE.Color(C.main).lerp(new THREE.Color(C.deep), ss(-p.z, 0.3, 1.2) * 0.6)
   // A paler, sunlit crown and forehead.
-  c.lerp(new THREE.Color('#e9a062'), ss(p.y, 0.3, 0.9) * ss(p.z, -0.6, 0.1) * 0.4)
+  c.lerp(new THREE.Color(C.crown), ss(p.y, 0.3, 0.9) * ss(p.z, -0.6, 0.1) * 0.4)
+  // The fox's ears: dark on the back and toward the tip.
+  if (C.earTip)
+    for (const e of EARS) {
+      const { a, t } = earLocal(e, p.x, p.y, p.z)
+      if (a > 0) c.lerp(new THREE.Color(C.earTip), Math.max(ss(a, e.h * 0.5, e.h * 0.7), ss(-t, 0.0, 0.06) * ss(a, 0.1, 0.3)) * (earSdf(e, p.x, p.y, p.z) < 0.01 ? 1 : 0))
+    }
   c.lerp(CREAM, creamAt(p))
   // The ears' hollows: cream, a little deeper toward their roots.
   for (const e of EARS) {
@@ -484,11 +600,16 @@ function eyeTexture(right: boolean) {
   const k = 1 - 2 * EYE_MARGIN
   const X = (x: number) => W * (EYE_MARGIN + x * k)
   const Y = (y: number) => H * (EYE_MARGIN + y * k)
+  const E = D.eye
   return canvasTexture(W, H, (g) => {
     if (!right) {
       g.translate(W, 0)
       g.scale(-1, 1)
     }
+    // Tip the outer corner (the left, here) up.
+    g.translate(W / 2, H / 2)
+    g.rotate(E.tilt)
+    g.translate(-W / 2, -H / 2)
     // The lid line: the outline grown up and out, clipped to the top and
     // the outer side.
     g.save()
@@ -514,19 +635,19 @@ function eyeTexture(right: boolean) {
     g.fillStyle = sc
     g.fillRect(0, 0, W, H)
     // Iris, a lighter rim round a deeper middle.
-    g.fillStyle = '#3f86d6'
+    g.fillStyle = E.rim
     g.beginPath()
     g.ellipse(X(0.74), Y(0.55), W * 0.33 * k, H * 0.46 * k, 0, 0, Math.PI * 2)
     g.fill()
     const ir = g.createLinearGradient(0, Y(0.1), 0, Y(1))
-    ir.addColorStop(0, '#163c7c')
-    ir.addColorStop(0.6, '#2a63b0')
-    ir.addColorStop(1, '#3478c8')
+    ir.addColorStop(0, E.top)
+    ir.addColorStop(0.6, E.mid)
+    ir.addColorStop(1, E.bottom)
     g.fillStyle = ir
     g.beginPath()
     g.ellipse(X(0.75), Y(0.55), W * 0.29 * k, H * 0.42 * k, 0, 0, Math.PI * 2)
     g.fill()
-    g.fillStyle = '#0b1530'
+    g.fillStyle = E.pupil
     g.beginPath()
     g.ellipse(X(0.8), Y(0.52), W * 0.17 * k, H * 0.32 * k, 0, 0, Math.PI * 2)
     g.fill()
@@ -544,8 +665,9 @@ function eyeTexture(right: boolean) {
   })
 }
 
-/** Face paint over the front: the cream dot brows and the little brown
- *  marks at the inner corners of the eyes. Covers x, y in [-0.8, 0.8]. */
+/** Face paint over the front: the dot brows, the Shiba's little brown
+ *  marks beside the nose, lash ticks, and the husky's open mouth. Covers
+ *  x, y in [-0.8, 0.8]. */
 const PAINT = 0.8
 function paintTexture() {
   const W = 512
@@ -553,20 +675,36 @@ function paintTexture() {
   const py = (y: number) => ((PAINT - y) / (2 * PAINT)) * W
   const k = W / (2 * PAINT)
   return canvasTexture(W, W, (g) => {
+    const B = D.brow
+    if (D.mouth === 'open') {
+      // The open smile: dark, deepest at the back, between the lips.
+      const m = g.createLinearGradient(0, py(-0.64), 0, py(-0.76))
+      m.addColorStop(0, '#1c0d0d')
+      m.addColorStop(1, '#4a2024')
+      g.fillStyle = m
+      g.beginPath()
+      const [upper, lower] = openMouth()
+      const pts = [...upper.slice().reverse(), ...upper.map(([x, y]) => [-x, y] as [number, number]).slice(1), ...lower.slice().reverse()]
+      pts.forEach(([x, y], i) => (i ? g.lineTo(px(x), py(y + D.nose.y + 0.38)) : g.moveTo(px(x), py(y + D.nose.y + 0.38))))
+      g.closePath()
+      g.fill()
+    }
     for (const s of [-1, 1]) {
-      g.fillStyle = '#f5e9d6'
+      g.fillStyle = D.colors.brow
       g.beginPath()
       // (tilted, the outer end raised)
-      g.ellipse(px(s * 0.32), py(0.42), 0.135 * k, 0.082 * k, -s * 0.42, 0, Math.PI * 2)
+      g.ellipse(px(s * B.x), py(B.y), B.rx * k, B.ry * k, -s * B.tilt, 0, Math.PI * 2)
       g.fill()
       g.lineCap = 'round'
-      // The brown marks beside the bridge of the nose, slanting out.
-      g.strokeStyle = 'rgba(122,62,28,0.9)'
-      g.lineWidth = 0.03 * k
-      g.beginPath()
-      g.moveTo(px(s * 0.215), py(-0.2))
-      g.lineTo(px(s * 0.33), py(-0.295))
-      g.stroke()
+      if (D.noseMarks) {
+        // The brown marks beside the bridge of the nose, slanting out.
+        g.strokeStyle = 'rgba(122,62,28,0.9)'
+        g.lineWidth = 0.03 * k
+        g.beginPath()
+        g.moveTo(px(s * 0.215), py(-0.2))
+        g.lineTo(px(s * 0.33), py(-0.295))
+        g.stroke()
+      }
       // A little lash tick over each eye.
       g.strokeStyle = 'rgba(70,36,16,0.85)'
       g.lineWidth = 0.012 * k
@@ -576,6 +714,14 @@ function paintTexture() {
       g.stroke()
     }
   })
+}
+
+/** The open mouth's lips: the upper lip's left half (from the middle out to
+ *  its corner) and the lower lip (corner to corner). */
+function openMouth(): [[number, number][], [number, number][]] {
+  const upper: [number, number][] = [[0, -0.645], [-0.07, -0.672], [-0.14, -0.682], [-0.21, -0.665], [-0.27, -0.62], [-0.3, -0.57]]
+  const lower: [number, number][] = [[-0.27, -0.62], [-0.22, -0.69], [-0.13, -0.735], [0, -0.75], [0.13, -0.735], [0.22, -0.69], [0.27, -0.62]]
+  return [upper, lower]
 }
 
 /** The surface point marching in from `from` along `dir`. */
@@ -631,11 +777,18 @@ function decal(cx: number, cy: number, w: number, h: number, mat: THREE.Material
 
 // ---- The model ------------------------------------------------------------------
 
-let built: { geo: THREE.BufferGeometry } | null = null
+const built = new Map<string, THREE.BufferGeometry>()
+
+/** Make `d` the design being built (the field, ears and fur follow it). */
+function selectDesign(d: Design) {
+  D = d
+  EARS = [makeEar(-1), makeEar(1)]
+  buildSpikes()
+}
 
 function headGeometry() {
-  if (built) return built.geo
-  buildSpikes()
+  const cached = built.get(D.id)
+  if (cached) return cached
   const { pos, index } = surfaceNets(sdf, V(-1.45, -1.15, -1.55), V(1.45, 1.75, 0.85), 0.021)
   const geo = new THREE.BufferGeometry()
   const n = pos.length / 3
@@ -675,7 +828,7 @@ function headGeometry() {
   geo.setAttribute('color', new THREE.BufferAttribute(col, 3))
   geo.setIndex(index)
   geo.computeBoundingSphere()
-  built = { geo }
+  built.set(D.id, geo)
   return geo
 }
 
@@ -684,7 +837,12 @@ function headGeometry() {
 export const SHIBA_SCALE = 2.15
 export const SHIBA_OFFSET = new THREE.Vector3(0, -0.3, 0.3)
 
-export function shibaHead(): Model {
+export const shibaHead = () => animalHead(DESIGNS.shiba)
+export const foxHead = () => animalHead(DESIGNS.fox)
+export const huskyHead = () => animalHead(DESIGNS.husky)
+
+function animalHead(design: Design): Model {
+  selectDesign(design)
   const root = new THREE.Group()
   const sculpt = new THREE.Group()
   sculpt.scale.setScalar(SHIBA_SCALE)
@@ -703,11 +861,11 @@ export function shibaHead(): Model {
   // Eyes: big, a little inset under the brow.
   for (const s of [-1, 1]) {
     const eyeMat = new THREE.MeshStandardMaterial({ map: eyeTexture(s < 0), transparent: true, alphaTest: 0.4, roughness: 0.7 })
-    sculpt.add(decal(s * 0.48, -0.02, 0.68, 0.76, eyeMat, 0.006))
+    sculpt.add(decal(s * 0.48, -0.02, 0.68 * D.eye.size, 0.76 * D.eye.size, eyeMat, 0.006))
   }
 
   // Nose: a matte rounded triangle, broad on top, on the tip of the muzzle.
-  const tip = onFront(0, -0.38)
+  const tip = onFront(0, D.nose.y)
   const ng = new THREE.SphereGeometry(1, 40, 28)
   const np = ng.getAttribute('position') as THREE.BufferAttribute
   for (let i = 0; i < np.count; i++) {
@@ -717,7 +875,7 @@ export function shibaHead(): Model {
   }
   ng.computeVertexNormals()
   const nose = new THREE.Mesh(ng, new THREE.MeshStandardMaterial({ color: 0x1a1718, roughness: 0.85 }))
-  nose.scale.set(0.23, 0.13, 0.12)
+  nose.scale.set(0.23, 0.13, 0.12).multiplyScalar(D.nose.scale)
   nose.position.set(0, tip.y, tip.z - 0.02)
   nose.rotation.x = -0.25
   sculpt.add(nose)
@@ -725,11 +883,24 @@ export function shibaHead(): Model {
   // The mouth: a line down from the nose into a wide, smiling "ω" whose
   // ends hook up into the cheeks.
   const line = new THREE.MeshStandardMaterial({ color: 0x24160f, roughness: 0.6 })
-  const strokes: [number, number][][] = [
-    [[0, -0.5], [0, -0.64]],
-    [[0, -0.64], [-0.06, -0.69], [-0.16, -0.715], [-0.26, -0.69], [-0.33, -0.61], [-0.365, -0.52], [-0.35, -0.48]],
-    [[0, -0.64], [0.06, -0.69], [0.16, -0.715], [0.26, -0.69], [0.33, -0.61], [0.365, -0.52], [0.35, -0.48]],
-  ]
+  const dy = D.nose.y + 0.38
+  const mw = D.muzzle.width
+  const strokes: [number, number][][] = (
+    D.mouth === 'open'
+      ? [
+          // The upper lip over the open mouth, its corners curling up, and
+          // the lower lip round under it.
+          [[0, -0.5], [0, -0.645]],
+          openMouth()[0],
+          openMouth()[0].map(([x, y]): [number, number] => [-x, y]),
+          openMouth()[1],
+        ]
+      : [
+          [[0, -0.5], [0, -0.64]],
+          [[0, -0.64], [-0.06, -0.69], [-0.16, -0.715], [-0.26, -0.69], [-0.33, -0.61], [-0.365, -0.52], [-0.35, -0.48]],
+          [[0, -0.64], [0.06, -0.69], [0.16, -0.715], [0.26, -0.69], [0.33, -0.61], [0.365, -0.52], [0.35, -0.48]],
+        ]
+  ).map((st) => st.map(([x, y]): [number, number] => [x * mw, y + dy]))
   for (const st of strokes) {
     const pts = st.map(([x, y]) => onFront(x, y).add(V(0, 0, 0.004)))
     sculpt.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 48, 0.0085, 8, false), line))
