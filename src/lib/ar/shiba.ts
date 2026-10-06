@@ -32,18 +32,6 @@ function ellipsoid(x: number, y: number, z: number, rx: number, ry: number, rz: 
   return k1 > 0 ? (k0 * (k0 - 1)) / k1 : -Math.min(rx, ry, rz)
 }
 
-/** Tapered capsule from a (radius ra) to b (radius rb). */
-function cone(px: number, py: number, pz: number, a: V3, b: V3, ra: number, rb: number) {
-  const abx = b.x - a.x
-  const aby = b.y - a.y
-  const abz = b.z - a.z
-  const t = Math.min(1, Math.max(0, ((px - a.x) * abx + (py - a.y) * aby + (pz - a.z) * abz) / (abx * abx + aby * aby + abz * abz)))
-  const dx = px - (a.x + abx * t)
-  const dy = py - (a.y + aby * t)
-  const dz = pz - (a.z + abz * t)
-  return Math.sqrt(dx * dx + dy * dy + dz * dz) - (ra + (rb - ra) * t)
-}
-
 // ---- The sculpt ---------------------------------------------------------------
 //
 // Modelled in the reference sheet's own units: 1 = the distance between the
@@ -136,9 +124,10 @@ function earSdf(e: Ear, x: number, y: number, z: number) {
   // ear so its floor curves and a thick rim rolls round it.
   const kc = Math.min(1, Math.max(0, (a - 0.02) / (e.h * 0.86)))
   // (closing over at the bottom, so the hollow's floor curves into the head)
-  const wc = (e.w * 0.64 * (1 - kc) ** 0.6 + 0.005) * Math.sqrt(ss(a, -0.06, 0.22)) + 1e-3
-  const dc = th * 1.05 + 0.01
-  const cav = Math.max((Math.hypot(s / wc, (t - th * 0.85) / dc) - 1) * Math.min(wc, dc), 0.02 - a, a - e.h * 0.86)
+  // (closing up smoothly short of the tip, so it leaves no seam there)
+  const wc = (e.w * 0.6 * (1 - kc) ** 0.6 + 0.005) * Math.sqrt(ss(a, -0.06, 0.22)) * (1 - ss(a, e.h * 0.55, e.h * 0.8)) + 1e-3
+  const dc = th * 1.2 + 0.01
+  const cav = Math.max((Math.hypot(s / wc, (t - th * 0.85) / dc) - 1) * Math.min(wc, dc), 0.02 - a)
   d = smax(d, -cav, 0.04)
   return d
 }
@@ -147,8 +136,8 @@ function earSdf(e: Ear, x: number, y: number, z: number) {
 function earHollow(e: Ear, p: V3) {
   const { a, s, t } = earLocal(e, p.x, p.y, p.z)
   const kc = Math.min(1, Math.max(0, (a - 0.02) / (e.h * 0.86)))
-  const wc = e.w * 0.5 * (1 - kc) ** 0.6 + 0.005
-  return ss(wc - Math.abs(s), -0.012, 0.012) * ss(a, 0.0, 0.04) * ss(t, -earSection(e, a).th * 0.6, -earSection(e, a).th * 0.3)
+  const wc = e.w * 0.58 * (1 - kc) ** 0.6 + 0.005
+  return ss(wc - Math.abs(s), -0.012, 0.012) * ss(a, 0.0, 0.04) * ss(e.h * 0.76 - a, -0.01, 0.03) * ss(t, -earSection(e, a).th * 0.6, -earSection(e, a).th * 0.3)
 }
 
 interface Spike {
@@ -175,10 +164,33 @@ function surfaceDir(dir: V3) {
   return CENTRE.clone().addScaledVector(dir, t)
 }
 
+function surfaceNormal(p: V3) {
+  const e = 0.004
+  return V(headBody(p.x + e, p.y, p.z) - headBody(p.x - e, p.y, p.z), headBody(p.x, p.y + e, p.z) - headBody(p.x, p.y - e, p.z), headBody(p.x, p.y, p.z + e) - headBody(p.x, p.y, p.z - e)).normalize()
+}
+
 function pushSpike(a: V3, out: V3, len: number, ra: number, cream: boolean) {
+  // Rooted a little below the surface, so the cone's full base shows.
+  const a0 = a.clone().addScaledVector(out, -0.05)
   const b = a.clone().addScaledVector(out, len)
-  const a0 = a.clone().addScaledVector(out, -0.03)
-  spikes.push({ a: a0, b, ra, c: a0.clone().lerp(b, 0.5), reach: len / 2 + ra + 0.12, cream })
+  spikes.push({ a: a0, b, ra, c: a0.clone().lerp(b, 0.5), reach: (len + 0.05) / 2 + ra + 0.08, cream })
+}
+
+/** A cone of fur: full at the base, its sides bowed out a little, to a
+ *  softly rounded point. */
+function spikeSdf(px: number, py: number, pz: number, s: Spike) {
+  const abx = s.b.x - s.a.x
+  const aby = s.b.y - s.a.y
+  const abz = s.b.z - s.a.z
+  const l2 = abx * abx + aby * aby + abz * abz
+  const h = ((px - s.a.x) * abx + (py - s.a.y) * aby + (pz - s.a.z) * abz) / l2
+  const t = Math.min(1, Math.max(0, h))
+  const dx = px - (s.a.x + abx * t)
+  const dy = py - (s.a.y + aby * t)
+  const dz = pz - (s.a.z + abz * t)
+  const r = 0.012 + (s.ra - 0.012) * (1 - t) ** 0.8
+  // (a cone's distance is under-estimated by its slope; good enough here)
+  return (Math.sqrt(dx * dx + dy * dy + dz * dz) - r) * 0.85 + Math.max(0, h - 1) * Math.sqrt(l2) * 0.15
 }
 
 let srnd = 11
@@ -187,38 +199,37 @@ const sr = () => (srnd = (srnd * 16807) % 2147483647) / 2147483647
 function buildSpikes() {
   if (spikes.length) return
   srnd = 11
-  // The ruff: tiers of chunky clumps round the jowls and the sides and
-  // the edge of the back, lying back and down; the face, the crown and the
-  // middle of the back stay smooth.
-  const tiers: [number, number, number, number][] = [
-    // height, from angle, to angle (0 = straight out of the face, 180 = the
-    // back), clump size
-    [0.55, 118, 145, 0.75],
-    [0.32, 96, 148, 0.85],
-    [0.05, 90, 140, 1],
-    [-0.22, 88, 145, 1.1],
-    [-0.45, 86, 180, 1.15],
-    [-0.62, 72, 180, 1.05],
+  // The ruff: crisp cones of fur in staggered columns, starting at the
+  // edge of the face (just ahead of the ears) and running back round the
+  // sides and the edge of the back. High up they point back and up, at
+  // the middle straight back, low down back and down; each stands well off
+  // the head. The face, the crown and the middle of the back stay smooth.
+  const rows: [number, number, number][] = [
+    // height (of the direction from the head's centre), first and last
+    // angle round from the front (180 = the middle of the back)
+    [0.6, 104, 140],
+    [0.32, 96, 145],
+    [0.04, 92, 150],
+    [-0.24, 88, 155],
+    [-0.5, 82, 165],
+    [-0.7, 74, 180],
   ]
   for (const s of [-1, 1])
-    tiers.forEach(([y, from, to, size], row) => {
-      const step = 30 - row
-      for (let ang = from + (row % 2) * step * 0.5; ang <= to; ang += step) {
-        // Each side covers its half of the back; the middle once.
+    rows.forEach(([y, from, to], row) => {
+      const step = 23
+      for (let ang = from + (row % 2) * step * 0.5; ang <= to + 0.1; ang += step) {
         if (ang > 179 && s > 0) continue
-        const phi = THREE.MathUtils.degToRad(ang + (sr() - 0.5) * 8)
-        const yy = y + (sr() - 0.5) * 0.08
-        const dir = V(s * Math.sin(phi), yy, Math.cos(phi)).normalize()
-        const p = surfaceDir(dir)
-        // (at the sides, straight out; further back, sweeping back)
-        // Lying back along the head and down, the tips lifting off it.
-        const n = p.clone().sub(CENTRE).normalize()
-        const flowDir = V(0, -0.5 - 0.3 * ss(-y, 0, 0.6), -0.85 * ss(ang, 85, 110))
+        const phi = THREE.MathUtils.degToRad(ang + (sr() - 0.5) * 5)
+        const yy = y + (sr() - 0.5) * 0.05
+        const p = surfaceDir(V(s * Math.sin(phi), yy, Math.cos(phi)).normalize())
+        const n = surfaceNormal(p)
+        // The lie: back along the head, lifting up high and drooping low.
+        const flowDir = V(0, 0.55 * y - 0.15, -1)
         flowDir.addScaledVector(n, -flowDir.dot(n)).normalize()
-        const out = n.multiplyScalar(1.05).add(flowDir).normalize()
-        const len = (0.27 + sr() * 0.08) * size
+        const out = n.clone().multiplyScalar(1.35).add(flowDir).normalize()
+        const big = 1 + 0.15 * ss(-y, -0.2, 0.5)
         const cream = creamAt(p) > 0.5 && ang < 120
-        pushSpike(p, out, len, (0.17 + sr() * 0.03) * size, cream)
+        pushSpike(p, out, (0.24 + sr() * 0.04) * big, (0.13 + sr() * 0.015) * big, cream)
       }
     })
   // The nape: a point hanging down at the back, and cream fluff in a V
@@ -237,17 +248,17 @@ function buildSpikes() {
   for (const s of [-1, 1]) {
     // Points up the sides of the head, in front of each ear's base.
     for (const [x, y, z, len, ra] of [
-      [0.42, 0.84, -0.12, 0.2, 0.08],
-      [0.66, 0.62, -0.18, 0.22, 0.085],
-      [0.86, 0.36, -0.3, 0.22, 0.09],
+      [0.42, 0.84, -0.12, 0.22, 0.1],
+      [0.66, 0.62, -0.18, 0.22, 0.1],
+      [0.86, 0.36, -0.3, 0.22, 0.105],
     ])
       pushSpike(surfaceDir(V(s * x, y, z).sub(CENTRE).normalize()), V(s * 0.55, 0.75, 0.3).normalize(), len, ra, false)
     // A pale tuft out of each ear's hollow, at its outer base, poking out
     // past the rim.
     const e = EARS[s < 0 ? 0 : 1]
     const out = e.r.clone().multiplyScalar(Math.sign(e.r.x * s))
-    const a = e.base.clone().addScaledVector(e.u, 0.12).addScaledVector(out, e.w * 0.28).addScaledVector(e.f, 0.08)
-    pushSpike(a, out.clone().multiplyScalar(0.4).addScaledVector(e.u, 0.8).addScaledVector(e.f, 0.45).normalize(), 0.24, 0.07, true)
+    const a = e.base.clone().addScaledVector(e.u, 0.1).addScaledVector(out, e.w * 0.45).addScaledVector(e.f, 0.1)
+    pushSpike(a, out.clone().multiplyScalar(0.7).addScaledVector(e.u, 0.4).addScaledVector(e.f, 0.6).normalize(), 0.2, 0.08, true)
   }
 }
 
@@ -259,7 +270,7 @@ function sdf(x: number, y: number, z: number) {
     const dy = y - s.c.y
     const dz = z - s.c.z
     if (dx * dx + dy * dy + dz * dz > s.reach * s.reach) continue
-    d = smin(d, cone(x, y, z, s.a, s.b, s.ra, 0.015), 0.07)
+    d = smin(d, spikeSdf(x, y, z, s), 0.035)
   }
   return d
 }
@@ -269,13 +280,13 @@ function sdf(x: number, y: number, z: number) {
 const ORANGE = new THREE.Color('#d6803c')
 const ORANGE_DEEP = new THREE.Color('#c46e2e')
 const CREAM = new THREE.Color('#f1e3cf')
-const EAR_CREAM = new THREE.Color('#eee0cc')
+const EAR_CREAM = new THREE.Color('#f6eee2')
 
 function nearSpike(p: V3) {
   let best: Spike | null = null
   let bd = 0.02
   for (const s of spikes) {
-    const d = cone(p.x, p.y, p.z, s.a, s.b, s.ra, 0.015)
+    const d = spikeSdf(p.x, p.y, p.z, s)
     if (d < bd) {
       bd = d
       best = s
@@ -307,12 +318,12 @@ function colorAt(p: V3): THREE.Color {
   // A paler, sunlit crown and forehead.
   c.lerp(new THREE.Color('#e9a062'), ss(p.y, 0.3, 0.9) * ss(p.z, -0.6, 0.1) * 0.4)
   c.lerp(CREAM, creamAt(p))
-  // The ears' hollows: cream, shaded deeper toward their roots and floor.
+  // The ears' hollows: cream, a little deeper toward their roots.
   for (const e of EARS) {
     const h = earHollow(e, p)
     if (h <= 0) continue
-    const { a, t } = earLocal(e, p.x, p.y, p.z)
-    const shade = 0.78 + 0.22 * ss(a, 0.05, 0.6) * ss(t, -0.05, 0.08)
+    const { a } = earLocal(e, p.x, p.y, p.z)
+    const shade = 0.93 + 0.07 * ss(a, 0.02, 0.4)
     c.lerp(EAR_CREAM.clone().multiplyScalar(shade), h)
   }
   return c
@@ -430,72 +441,101 @@ function canvasTexture(W: number, H: number, draw: (g: CanvasRenderingContext2D)
 }
 
 /** The eye's outline in a unit box (x right, y down), for the wearer's
- *  right eye (on the viewer's left): round on the outside, its top drawn
- *  across flatter, a soft corner toward the nose. Grown by `grow` and
- *  shifted by (dx, dy); drawn with a margin round it. */
-function eyePath(g: CanvasRenderingContext2D, W: number, H: number, grow: number, dx = 0, dy = 0) {
-  const k = 0.74 * (1 + grow)
-  const P = (x: number, y: number): [number, number] => [W * (0.5 + dx + (x - 0.5) * k), H * (0.5 + dy + (y - 0.5) * k)]
+ *  right eye (on the viewer's left), as on the sheet: a big round curve on
+ *  the outer side, the top drawn across, a near-upright inner side the
+ *  iris runs into, and a round bottom. */
+const EYE_PTS: [number, number][] = [
+  [0.86, 0.13], [0.6, 0.06], [0.32, 0.12], [0.12, 0.32], [0.06, 0.58], [0.14, 0.84],
+  [0.36, 0.98], [0.62, 0.99], [0.84, 0.88], [0.94, 0.62], [0.94, 0.34],
+]
+const EYE_MARGIN = 0.12
+
+/** A smooth closed curve through EYE_PTS (midpoint quadratics). */
+function eyePath(g: CanvasRenderingContext2D, W: number, H: number) {
+  const k = 1 - 2 * EYE_MARGIN
+  const P = ([x, y]: [number, number]): [number, number] => [W * (EYE_MARGIN + x * k), H * (EYE_MARGIN + y * k)]
+  const n = EYE_PTS.length
+  const mid = (i: number): [number, number] => {
+    const a = EYE_PTS[i % n]
+    const b = EYE_PTS[(i + 1) % n]
+    return P([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2])
+  }
   g.beginPath()
-  g.moveTo(...P(0.86, 0.14))
-  g.bezierCurveTo(...P(0.62, 0.0), ...P(0.24, 0.02), ...P(0.08, 0.28))
-  g.bezierCurveTo(...P(-0.04, 0.5), ...P(0.02, 0.86), ...P(0.3, 0.96))
-  g.bezierCurveTo(...P(0.55, 1.03), ...P(0.86, 0.94), ...P(0.96, 0.66))
-  g.bezierCurveTo(...P(1.03, 0.45), ...P(0.99, 0.26), ...P(0.86, 0.14))
+  g.moveTo(...mid(0))
+  for (let i = 1; i <= n; i++) g.quadraticCurveTo(...P(EYE_PTS[i % n]), ...mid(i))
   g.closePath()
 }
 
-/** A cartoon eye: a dark lid line, heavy over the top and round the outer
- *  side and fine below, white sclera, a big blue iris looking a little
- *  inward, a navy pupil and a catch-light on the iris's outer side. */
+/** A cartoon eye after the sheet: white, a big blue iris and a bigger navy
+ *  pupil both run into the inner corner; a heavy dark lid line over the
+ *  top and down the outer side, none below; a catch-light on the outer
+ *  side of the iris. */
 function eyeTexture(right: boolean) {
   const W = 256
   const H = 256
+  const k = 1 - 2 * EYE_MARGIN
+  const X = (x: number) => W * (EYE_MARGIN + x * k)
+  const Y = (y: number) => H * (EYE_MARGIN + y * k)
   return canvasTexture(W, H, (g) => {
     if (!right) {
       g.translate(W, 0)
       g.scale(-1, 1)
     }
-    g.fillStyle = '#121218'
-    eyePath(g, W, H, 0.04)
-    g.fill()
-    eyePath(g, W, H, 0.09, -0.025, -0.03)
-    g.fill()
     g.save()
-    eyePath(g, W, H, -0.02)
+    eyePath(g, W, H)
     g.clip()
-    g.fillStyle = '#fbfbf8'
+    // Sclera, a touch grey toward the outer corner and under the lid.
+    const sc = g.createLinearGradient(X(0), 0, X(0.6), 0)
+    sc.addColorStop(0, '#e6e6ea')
+    sc.addColorStop(1, '#fbfbf9')
+    g.fillStyle = sc
     g.fillRect(0, 0, W, H)
-    // Iris: toward the nose, a little low; dark at the top, bright below.
-    const ix = W * 0.6
-    const iy = H * 0.55
-    const ir = g.createLinearGradient(0, iy - H * 0.3, 0, iy + H * 0.3)
-    ir.addColorStop(0, '#163a74')
-    ir.addColorStop(0.5, '#2a5fa6')
-    ir.addColorStop(1, '#5a96d2')
+    // Iris: big, its inner side cut by the corner; a lighter outer ring.
+    g.fillStyle = '#4b8edb'
+    g.beginPath()
+    g.ellipse(X(0.69), Y(0.555), W * 0.285 * k, H * 0.42 * k, 0, 0, Math.PI * 2)
+    g.fill()
+    const ir = g.createLinearGradient(0, Y(0.1), 0, Y(0.95))
+    ir.addColorStop(0, '#173f80')
+    ir.addColorStop(0.55, '#2c66b3')
+    ir.addColorStop(1, '#3a7ccc')
     g.fillStyle = ir
     g.beginPath()
-    g.ellipse(ix, iy, W * 0.24, H * 0.31, 0, 0, Math.PI * 2)
+    g.ellipse(X(0.69), Y(0.55), W * 0.265 * k, H * 0.4 * k, 0, 0, Math.PI * 2)
     g.fill()
-    g.strokeStyle = '#0f2850'
-    g.lineWidth = 4
-    g.stroke()
-    g.fillStyle = '#0a1430'
+    // Pupil: very big, deep navy, also into the corner.
+    g.fillStyle = '#0c1630'
     g.beginPath()
-    g.ellipse(ix + W * 0.01, iy, W * 0.15, H * 0.2, 0, 0, Math.PI * 2)
+    g.ellipse(X(0.77), Y(0.54), W * 0.185 * k, H * 0.33 * k, 0, 0, Math.PI * 2)
     g.fill()
-    // The lid's shadow across the top of the eyeball.
-    const sh = g.createLinearGradient(0, H * 0.1, 0, H * 0.32)
-    sh.addColorStop(0, 'rgba(10,20,40,0.4)')
-    sh.addColorStop(1, 'rgba(10,20,40,0)')
+    // The lid's shadow across the top.
+    const sh = g.createLinearGradient(0, Y(0.04), 0, Y(0.3))
+    sh.addColorStop(0, 'rgba(12,20,40,0.45)')
+    sh.addColorStop(1, 'rgba(12,20,40,0)')
     g.fillStyle = sh
     g.fillRect(0, 0, W, H)
-    // Catch-light.
+    // Catch-light, up on the outer side of the iris.
     g.fillStyle = '#ffffff'
     g.beginPath()
-    g.arc(ix - W * 0.08, iy - H * 0.1, W * 0.045, 0, Math.PI * 2)
+    g.arc(X(0.47), Y(0.36), W * 0.062 * k, 0, Math.PI * 2)
     g.fill()
     g.restore()
+    // The lid line: heavy over the top and round the outer side, tapering
+    // off at both ends, following the eye's edge.
+    g.fillStyle = '#121216'
+    const n = 60
+    for (let i = 0; i <= n; i++) {
+      // From the inner corner, over the top, down the outer side: thin at
+      // the inner end, heavy over the top and outside, tapering off low.
+      const u = i / n
+      const ang = Math.PI * (0.16 + 1.1 * u)
+      const cx = 0.52 + 0.46 * Math.cos(ang)
+      const cy = 0.53 - 0.47 * Math.sin(ang)
+      const w = 0.03 + 0.07 * ss(u, 0, 0.3) * (1 - ss(u, 0.75, 1))
+      g.beginPath()
+      g.arc(X(cx), Y(cy), W * w * k * 0.5 + 0.5, 0, Math.PI * 2)
+      g.fill()
+    }
   })
 }
 
@@ -657,7 +697,7 @@ export function shibaHead(): Model {
   // Eyes: big, glossy, a little inset under the brow.
   for (const s of [-1, 1]) {
     const eyeMat = new THREE.MeshStandardMaterial({ map: eyeTexture(s < 0), transparent: true, alphaTest: 0.4, roughness: 0.7 })
-    sculpt.add(decal(s * 0.5, -0.01, 0.68, 0.78, eyeMat, 0.006))
+    sculpt.add(decal(s * 0.47, -0.02, 0.8, 0.9, eyeMat, 0.006))
   }
 
   // Nose: a glossy rounded triangle, broad on top, on the tip of the muzzle.
