@@ -28,6 +28,9 @@ interface SuitSpec {
   fur: (p: V3) => THREE.Color
   ear: PlushSpec
   iris: [string, string, string]
+  /** Fur and ear length (default 1). */
+  furLength?: number
+  earLength?: number
 }
 
 // ---- The sculpt (signed distance field) ---------------------------------------
@@ -460,7 +463,7 @@ function eyeTexture(iris: [string, string, string]) {
  *  chin), down the back of the head — short round the eyes and muzzle,
  *  long and swept sideways on the cheeks. All lit with the head's own
  *  normals, as one coat. */
-function furCoat(head: THREE.Mesh, fur: (p: V3) => THREE.Color, nose: V3, lock: THREE.Texture) {
+function furCoat(head: THREE.Mesh, fur: (p: V3) => THREE.Color, nose: V3, lock: THREE.Texture, furLength: number) {
   const g = head.geometry
   const pos = g.getAttribute('position') as THREE.BufferAttribute
   const index = g.getIndex()!
@@ -529,7 +532,7 @@ function furCoat(head: THREE.Mesh, fur: (p: V3) => THREE.Color, nose: V3, lock: 
     const nearFace = p.z > 0.1 ? Math.exp(-((p.distanceTo(nose) / 0.9) ** 2)) : 0
     let len = THREE.MathUtils.lerp(0.55, 0.24, nearFace)
     len = THREE.MathUtils.lerp(len, 0.85, cheek)
-    len *= 0.8 + rnd() * 0.4
+    len *= (0.8 + rnd() * 0.4) * furLength
     const lift = THREE.MathUtils.lerp(0.28, 0.5, cheek) + (rnd() - 0.5) * 0.12
     // Narrow locks, many of them: broad cards overlap into a pattern of
     // scallops, like feathers.
@@ -723,13 +726,13 @@ function fursuit(spec: SuitSpec): Model {
     const ear = earCard.clone()
     ear.position.set(side * 1.12, 1.95, -0.85)
     ear.rotation.set(-0.06, side * -0.25, side * -0.3)
-    ear.scale.set(side, 1, 1)
+    ear.scale.set(side, spec.earLength ?? 1, 1)
     root.add(ear)
   }
 
   // ---- Fur coat: locks of long-pile fur rooted all over the head ----
   const lock = lockTexture()
-  const coat = furCoat(head, spec.fur, nose.position, lock)
+  const coat = furCoat(head, spec.fur, nose.position, lock, spec.furLength ?? 1)
   root.add(coat.coat)
 
   // ---- Silhouette fluff and cheek locks, aimed at the camera ----
@@ -796,7 +799,8 @@ function fursuit(spec: SuitSpec): Model {
         const z = V(0, 0, 0).crossVectors(x, outward).normalize()
         m4.makeBasis(x, outward, z)
         t.mesh.quaternion.setFromRotationMatrix(m4)
-        t.mesh.scale.set(t.size * 0.6, t.size, 1)
+        const len = t.size * (spec.furLength ?? 1)
+        t.mesh.scale.set(len * 0.6, len, 1)
         ;(t.mesh.material as THREE.MeshStandardMaterial).color.copy(spec.fur(t.mesh.position)).multiplyScalar(1.1 * t.shade)
       }
     },
@@ -869,5 +873,8 @@ export function huskyHead(): Model {
       strand: [28, 70],
     },
     iris: ['#0b2440', '#2e78c0', '#a8e4ff'],
+    // A husky's coat is short and dense, its ears short and upright.
+    furLength: 0.68,
+    earLength: 0.74,
   })
 }
