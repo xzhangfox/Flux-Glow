@@ -54,8 +54,8 @@ export const EFFECTS: EffectDef[] = [
   { id: 'huskyhead', label: 'Husky Head' },
   { id: 'spider', label: 'Spider' },
   { id: 'bat', label: 'Bat' },
-  { id: 'square', label: 'Square' },
-  { id: 'oval', label: 'Oval' },
+  { id: 'sport', label: 'Sport' },
+  { id: 'wayfarer', label: 'Wayfarer' },
   { id: 'crown', label: 'Crown' },
   { id: 'faun', label: 'Faun' },
   { id: 'angel', label: 'Angel' },
@@ -235,7 +235,7 @@ function sparkle(ctx: CanvasRenderingContext2D, c: Pt, r: number, color: string)
 }
 
 
-const THREE_D = new Set(['foxhead', 'huskyhead', 'kitty', 'fox', 'bunny', 'bear', 'spider', 'bat', 'square', 'oval', 'crown', 'faun', 'angel', 'stars', 'custom'])
+const THREE_D = new Set(['foxhead', 'huskyhead', 'kitty', 'fox', 'bunny', 'bear', 'spider', 'bat', 'sport', 'wayfarer', 'crown', 'faun', 'angel', 'stars', 'custom'])
 
 // The Custom effect's picture: a square the user cropped from their own
 // photo, worn in front of the face. Bumped version = a new picture.
