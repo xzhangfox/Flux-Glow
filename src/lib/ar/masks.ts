@@ -774,38 +774,70 @@ varying vec3 vLocal;
 uniform vec4 uEyeA;
 uniform vec4 uEyeB;
 uniform mat3 uRigView;
-// Eye opening (x, y, rx, ry): an almond, its top cut flat and angled down
-// toward the nose — the scowl.
+// Eye opening (x, y, rx, ry), after the reference: a level almond whose
+// inner corner dips toward the nose.
 float eyeHole(vec3 p, vec4 e) {
   float side = e.x < 0.0 ? -1.0 : 1.0;
   vec2 d = p.xy - e.xy;
   float u = d.x * side;
-  float almond = pow(abs(u - 0.02) / (e.z * 1.25), 1.6) + pow(abs(d.y + 0.02 + 0.1 * u) / (e.w * 1.5), 2.0) - 1.0;
-  float brow = d.y - (0.06 + 0.2 * (u / e.z));
-  return max(almond * e.z * 0.5, brow);
+  float hw = e.z * 0.98;
+  float hh = e.z * 0.6;
+  float dip = 0.07 * max(0.0, -u) / hw;
+  float almond = pow(abs(u) / hw, 1.7) + pow(abs(d.y + dip - 0.01) / hh, 2.0) - 1.0;
+  return almond * hh;
 }
 float batKeep(vec3 p) {
   float ax = abs(p.x);
-  // The mouth-and-chin opening: under the nose guard, widening to the
-  // inner edges of the cheek pieces, which come to points by the jaw.
-  float inner = 0.15 + 0.46 * (1.0 - smoothstep(-1.0, -0.66, p.y)) + 0.3 * (1.0 - smoothstep(-1.46, -1.0, p.y));
-  float opening = min(-0.65 - p.y, inner - ax);
+  // The mouth-and-chin opening: square-shouldered under the nose guard,
+  // out to the inner edges of the cheek pieces, which run down to the jaw.
+  float inner = 0.25 + 0.48 * (1.0 - smoothstep(-0.92, -0.72, p.y)) + 0.08 * (1.0 - smoothstep(-1.44, -0.92, p.y));
+  float opening = min(-0.71 - p.y, inner - ax);
   // Lower edge round the back: from the cheek points back under the ears.
   float hem = p.y - (-1.44 + 0.2 * (1.0 - smoothstep(-1.9, -0.7, p.z)));
   float keep = min(-opening, hem);
   return min(keep, min(eyeHole(p, uEyeA), eyeHole(p, uEyeB)));
 }
-// Creases moulded into the shell (rig units): a sharp ridge up the middle
-// of the forehead, and a scowling groove sweeping up from each brow.
+float segDist(vec2 q, vec2 a, vec2 b) {
+  vec2 ab = b - a;
+  float t = clamp(dot(q - a, ab) / dot(ab, ab), 0.0, 1.0);
+  return length(q - a - ab * t);
+}
+// Signed side of q against the line a→b (positive to its right).
+float side2(vec2 q, vec2 a, vec2 b) {
+  vec2 ab = normalize(b - a);
+  return (q.x - a.x) * ab.y - (q.y - a.y) * ab.x;
+}
+// The moulding of the reference mask (rig units, on the front of the
+// face), as a height over the shell. Sharp, angular profiles — blades,
+// V-grooves and stepped planes — so every line catches the light:
+// • a blade ridge up the middle of the forehead;
+// • two grooves sweeping up from the inner brows, bowing outward;
+// • the brow: a raised plane over each eye, its edge angled down to the nose;
+// • the nose guard: a raised, flat-fronted trapezoid;
+// • the face plate's bevels: a vertical edge at each temple and a line
+//   down each cheekbone, where the front plane turns to the side.
 float batHeight(vec3 p) {
+  float front = smoothstep(-0.75, -0.25, p.z);
   float ax = abs(p.x);
-  float ridge = exp(-pow(p.x / 0.09, 2.0)) * smoothstep(0.12, 0.4, p.y) * (1.0 - smoothstep(0.9, 1.5, p.y));
-  vec2 g0 = vec2(0.1, 0.16);
-  vec2 g1 = vec2(0.62, 0.86);
-  vec2 gd = g1 - g0;
-  float t = clamp(dot(vec2(ax, p.y) - g0, gd) / dot(gd, gd), 0.0, 1.0);
-  float groove = exp(-pow(length(vec2(ax, p.y) - (g0 + gd * t)) / 0.07, 2.0)) * (1.0 - t * 0.7) * smoothstep(-0.5, -0.2, p.z);
-  return 0.03 * ridge - 0.02 * groove;
+  vec2 q = vec2(ax, p.y);
+  float h = 0.0;
+  // Blade.
+  h += 0.028 * max(0.0, 1.0 - ax / 0.065) * smoothstep(0.25, 0.45, p.y) * (1.0 - smoothstep(1.15, 1.45, p.y));
+  // Bowed grooves: two segments, inner brow → mid-forehead → top.
+  float g = min(segDist(q, vec2(0.17, 0.34), vec2(0.33, 0.78)), segDist(q, vec2(0.33, 0.78), vec2(0.4, 1.3)));
+  h -= 0.02 * max(0.0, 1.0 - g / 0.05);
+  // Brow plane: a step up above a line from the nose bridge (low) to the
+  // outer temple (higher).
+  float browLine = 0.14 + 0.16 * ax;
+  h += 0.024 * smoothstep(-0.025, 0.025, p.y - browLine) * (1.0 - smoothstep(0.9, 1.05, ax)) * (1.0 - smoothstep(0.9, 1.3, p.y));
+  // Nose guard: raised between edges that splay from the bridge to the tip.
+  float t = clamp((0.15 - p.y) / 0.86, 0.0, 1.0);
+  float nw = 0.1 + 0.15 * t;
+  h += 0.022 * (1.0 - smoothstep(nw - 0.02, nw + 0.02, ax)) * smoothstep(-0.74, -0.68, p.y) * (1.0 - smoothstep(0.1, 0.25, p.y));
+  // Temple bevel and cheekbone line: the front plane steps down to the sides.
+  h -= 0.022 * smoothstep(0.78, 0.92, ax) * (1.0 - smoothstep(0.6, 1.1, p.y));
+  h -= 0.02 * smoothstep(-0.03, 0.05, side2(q, vec2(0.6, -0.22), vec2(0.86, -1.3))) * (1.0 - smoothstep(-0.24, -0.14, p.y)) * (1.0 - smoothstep(0.78, 0.92, ax));
+  return h * front;
 }
 // Tilts the shading normal by the creases' slope (their gradient, taken
 // in rig space and turned into view space), smooth at any resolution.
@@ -866,7 +898,9 @@ export function batCowl(): Model {
     jaw: 0.9,
     ears: 0.06,
     // Tall and round on top, but close at the temples.
-    skull: { y: 0.42, z: -1.35, rx: 1.06, ry: 1.46, front: 1.24, back: 1.54 },
+    // Proportioned on the reference: the dome tops out about 1.5 eye
+    // spacings above the eyes, the face plate as wide as the face.
+    skull: { y: 0.3, z: -1.35, rx: 1.06, ry: 1.26, front: 1.24, back: 1.5 },
   }
   const dir = new THREE.Vector3()
   const base = new THREE.Vector3()
@@ -891,10 +925,10 @@ export function batCowl(): Model {
       // Ears sit on the head, a little in from its sides.
       ears.forEach((ear, k) => {
         const side = k ? 1 : -1
-        dir.set(side * 0.68, 2.0, -0.55).sub(ORIGIN).normalize()
+        dir.set(side * 0.8, 1.3, -0.3).sub(ORIGIN).normalize()
         trace(dir, shape, base)
         ear.position.copy(base).add(V(0, -0.08, 0))
-        ear.scale.set(side, 1, 1)
+        ear.scale.set(side * 1.2, 1.2, 1.2)
         ear.rotation.set(0, 0, 0)
       })
     },
@@ -933,7 +967,7 @@ function batEar() {
       const z = a[1] + (b[1] - a[1]) * s
       // The tip sits over the outer half, so the outer edge stays near
       // upright and the inner one slopes.
-      pos.push(x * k + 0.13 * Math.max(0, y), y, z * k - 0.03 * Math.max(0, y))
+      pos.push(x * k - 0.02 * Math.max(0, y), y, z * k - 0.03 * Math.max(0, y))
     }
   }
   for (let l = 0; l < levels; l++)
