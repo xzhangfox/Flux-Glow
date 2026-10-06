@@ -850,10 +850,11 @@ vec3 bumpNormal(vec3 n, vec3 p) {
 `
 
 // The cowl is hard plastic, so unlike Spider's fabric it doesn't follow
-// the face: it's a rigid moulding, built once from flat facets (as the
-// reference's are) with slightly rounded edges, then sized to each face
-// and carried by the head rig. The facets' offsets were set to clear a
-// face with room to spare; the face itself hides the cowl's inside.
+// the face: it's one fixed moulding after the reference — a domed shell
+// with upright sides, its front cut into flat facets with crisp edges —
+// built once, scaled as a whole to the size of the face and carried by
+// the head rig. It clears a face with room to spare; the face itself
+// hides the cowl's inside.
 
 type Facet = { n: V3; d: number }
 /** [normal x, y, z, offset] or [normal x, y, z, point x, y, z]. */
@@ -862,20 +863,12 @@ const facets = (raw: number[][]): Facet[] =>
     const n = V(r[0], r[1], r[2]).normalize()
     return { n, d: r.length > 4 ? n.dot(V(r[3], r[4], r[5])) : r[3] }
   })
-// For the right half (x ≥ 0), mirrored for the left; the centre line,
-// where the two halves meet, becomes a ridge.
-const BAT_HEAD = facets([
+// The front's facets, for the right half (x ≥ 0), mirrored for the left;
+// the centre line, where the two halves meet, becomes a ridge.
+const BAT_FRONT = facets([
   [0.32, 0.28, 1, 0.22], // forehead, either side of the centre ridge
-  [0.18, 0.75, 0.65, 0.66], // forehead turning to the top
-  [0, 1, -0.12, 1.5], // top, falling away to the back
-  [0.75, 0.75, 0.1, 1.34], // top corners
-  [1, 0.4, 0.2, 1.18], // upper sides, tapering to the top
-  [1, 0.08, 0.32, 0.96], // temples
-  [1, 0.05, -0.4, 1.1, 0.2, -1.8], // sides, behind
-  [0.35, 0.4, -1, 0, 0.4, -2.5], // back
   [0.4, -0.2, 1, 0.38], // cheeks
-  [1, -0.35, 0.4, 1.0], // cheek pieces, narrowing toward the jaw
-  [0, -1, -0.25, 0, -1.55, -1.2], // underneath
+  [1, -0.28, 0.3, 1.08], // cheek pieces, tapering in toward the jaw
 ])
 // The nose guard: a wedge from the brow down to the tip.
 const BAT_NOSE = facets([
@@ -896,9 +889,19 @@ function facetSdf(f: Facet[], x: number, y: number, z: number) {
   for (let i = 1; i < f.length; i++) d = smaxk(d, f[i].n.x * x + f[i].n.y * y + f[i].n.z * z - f[i].d, 0.05)
   return d
 }
+// The shell behind the facets: a box with big rounded edges — a domed top
+// between the ears, upright sides, a rounded back.
+function batShell(x: number, y: number, z: number) {
+  const r = 0.72
+  const qx = Math.abs(x) - (1.14 - r)
+  const qy = Math.abs(y - 0.02) - (1.58 - r)
+  const qz = Math.abs(z + 1.0) - (1.3 - r)
+  return Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qy, qz), 0) - r
+}
 function batSdf(x: number, y: number, z: number) {
   const ax = Math.abs(x)
-  return smin(facetSdf(BAT_HEAD, ax, y, z), facetSdf(BAT_NOSE, ax, y, z), 0.05)
+  const body = smaxk(batShell(ax, y, z), facetSdf(BAT_FRONT, ax, y, z), 0.05)
+  return smin(body, facetSdf(BAT_NOSE, ax, y, z), 0.05)
 }
 
 function traceBat(dir: V3, out: V3) {
@@ -963,14 +966,13 @@ export function batCowl(): Model {
   for (const side of [-1, 1]) {
     const ear = new THREE.Mesh(batEar(), earMat)
     ear.frustumCulled = false
-    traceBat(V(side * 0.72, 1.6, 0.5).normalize(), base)
+    traceBat(V(side * 0.8, 1.45, 0.75).normalize(), base)
     ear.position.copy(base).add(V(0, -0.1, 0))
     ear.scale.set(side, 1, 1)
     cowl.add(ear)
   }
   const root = new THREE.Group()
   root.add(cowl)
-  const scale = new THREE.Vector3(1, 1, 1)
   return {
     root,
     // Worn on the face: the face hides the inside of the cowl, which
@@ -980,13 +982,11 @@ export function batCowl(): Model {
     hidesHead: -1.25,
     update(rig) {
       const L = Array.from({ length: N }, (_, i) => rig.local(i))
-      // Sized to this face: its width at the cheeks, its eye-to-chin length
-      // (the moulding's own are those of the face it was made round).
-      const eyeY = (eyeCentres(L)[0].y + eyeCentres(L)[1].y) / 2
-      const sx = THREE.MathUtils.clamp(Math.abs(L[454].x - L[234].x) / 2 / 1.06, 0.85, 1.25)
-      const sy = THREE.MathUtils.clamp((eyeY - L[152].y) / 1.71, 0.85, 1.25)
-      scale.set(sx, sy, sx)
-      cowl.scale.copy(scale)
+      // One size, scaled as a whole to the face (its width at the cheeks;
+      // the moulding was made round a face 2.12 eye spacings wide).
+      const sx = THREE.MathUtils.clamp(Math.abs(L[454].x - L[234].x) / 2 / 1.06, 0.9, 1.15)
+      const sy = sx
+      cowl.scale.setScalar(sx)
       // The camera looks straight down -z, so view space turns like world
       // space: the rig's own rotation, unscaled.
       uniforms.uRigView.value.setFromMatrix4(rig.matrix).multiplyScalar(1 / rig.E)
