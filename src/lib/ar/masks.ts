@@ -794,7 +794,10 @@ float batKeep(vec3 p) {
   float opening = min(-0.71 - p.y, inner - ax);
   // Lower edge round the back: from the cheek points back under the ears.
   float hem = p.y - (-1.44 + 0.2 * (1.0 - smoothstep(-1.9, -0.7, p.z)));
-  float keep = min(-opening, hem);
+  // Only the front: the shell is cut away a little behind the face, so
+  // just a thin band wraps round where the front turns to the sides.
+  float front = p.z + 0.42 + 0.12 * smoothstep(0.6, 1.4, p.y);
+  float keep = min(min(-opening, hem), front);
   return min(keep, min(eyeHole(p, uEyeA), eyeHole(p, uEyeB)));
 }
 float segDist(vec2 q, vec2 a, vec2 b) {
@@ -978,8 +981,6 @@ export function batCowl(): Model {
     // Worn on the face: the face hides the inside of the cowl, which
     // otherwise shows through the eye holes and round the mouth.
     occludeFace: true,
-    // Ears and the sides of the head, down to the cowl's lower edge.
-    hidesHead: -1.25,
     update(rig) {
       const L = Array.from({ length: N }, (_, i) => rig.local(i))
       // One size, scaled as a whole to the face (its width at the cheeks;
