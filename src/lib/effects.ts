@@ -52,6 +52,7 @@ export const EFFECTS: EffectDef[] = [
   { id: 'doll', label: 'Doll', boost: { ...BABY, eyes: 0.45, eyeHeight: 0.3, chin: -0.4, whitening: 0.25 } },
   { id: 'foxhead', label: 'Fox Head' },
   { id: 'huskyhead', label: 'Husky Head' },
+  { id: 'shibahead', label: 'Shiba Head' },
   { id: 'spider', label: 'Spider' },
   { id: 'bat', label: 'Bat' },
   { id: 'sport', label: 'Sport' },
@@ -235,7 +236,7 @@ function sparkle(ctx: CanvasRenderingContext2D, c: Pt, r: number, color: string)
 }
 
 
-const THREE_D = new Set(['foxhead', 'huskyhead', 'kitty', 'fox', 'bunny', 'bear', 'spider', 'bat', 'sport', 'wayfarer', 'crown', 'faun', 'angel', 'stars', 'custom'])
+const THREE_D = new Set(['foxhead', 'huskyhead', 'shibahead', 'kitty', 'fox', 'bunny', 'bear', 'spider', 'bat', 'sport', 'wayfarer', 'crown', 'faun', 'angel', 'stars', 'custom'])
 
 // The Custom effect's picture: a square the user cropped from their own
 // photo, worn in front of the face. Bumped version = a new picture.
@@ -263,8 +264,8 @@ export function drawEffect(canvas: HTMLCanvasElement, P: P3[], effectId: string,
       preloadAR()
       return
     }
-    const { renderAR, spiderMask, batCowl, foxHead, huskyHead, faceSticker, buildModel } = ar
-    const special: Record<string, () => import('./ar/scene').Model> = { spider: spiderMask, bat: batCowl, foxhead: foxHead, huskyhead: huskyHead, custom: () => faceSticker(() => custom) }
+    const { renderAR, spiderMask, batCowl, foxHead, huskyHead, shibaHead, faceSticker, buildModel } = ar
+    const special: Record<string, () => import('./ar/scene').Model> = { spider: spiderMask, bat: batCowl, foxhead: foxHead, huskyhead: huskyHead, shibahead: shibaHead, custom: () => faceSticker(() => custom) }
     const build = special[effectId] ?? (() => buildModel(effectId))
     try {
       renderAR(canvas, P, effectId, build, t, live)
