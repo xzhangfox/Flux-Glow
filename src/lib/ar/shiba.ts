@@ -47,7 +47,7 @@ interface Design {
   ear: { x: number; y: number; z: number; lean: number; fwd: number; out: number; h: number; w: number; t: number }
   /** Fur clumps: length and girth scale, spacing round the head (degrees),
    *  and big pale tufts sweeping out of the cheeks (the fox's ruff). */
-  fur: { len: number; girth: number; step: number; cheekTufts: boolean }
+  fur: { len: number; girth: number; step: number; cheekTufts: boolean; earRootTufts: boolean }
   markings: Markings
   colors: { main: string; deep: string; crown: string; cream: string; earIn: string; earTip?: string; brow: string }
   /** Brows: centre, half-axes, tilt (outer end up). */
@@ -56,7 +56,23 @@ interface Design {
   noseMarks: boolean
   /** Eyes: size (1 = the Shiba's), outer corner raised (radians), iris
    *  colours (rim, top, middle, bottom) and pupil. */
-  eye: { size: number; tilt: number; rim: string; top: string; mid: string; bottom: string; pupil: string }
+  eye: {
+    size: number
+    tilt: number
+    rim: string
+    top: string
+    mid: string
+    bottom: string
+    pupil: string
+    /** Pupil width and height (1 = the Shiba's round, open look). */
+    pupilW: number
+    pupilH: number
+    catchLight: number
+    /** An upper lid in the face's colour drawn down over the eye: how far
+     *  down its edge sits at the eye's middle (0 = none, 0..1 of the eye's
+     *  height) and how much it drops toward the nose. */
+    lid: { cover: number; slope: number } | null
+  }
   nose: { y: number; scale: number }
   mouth: 'closed' | 'open'
 }
@@ -66,12 +82,12 @@ const DESIGNS: Record<string, Design> = {
     id: 'shiba',
     muzzle: { len: 0, width: 1 },
     ear: { x: 0.56, y: 0.62, z: -0.4, lean: 0.36, fwd: 0.16, out: 0.75, h: 0.94, w: 0.39, t: 0.42 },
-    fur: { len: 1, girth: 1, step: 23, cheekTufts: false },
+    fur: { len: 1, girth: 1, step: 23, cheekTufts: false, earRootTufts: false },
     markings: 'shiba',
     colors: { main: '#d6803c', deep: '#c46e2e', crown: '#e9a062', cream: '#f1e3cf', earIn: '#f6eee2', brow: '#f5e9d6' },
     brow: { x: 0.32, y: 0.42, rx: 0.135, ry: 0.082, tilt: 0.42 },
     noseMarks: true,
-    eye: { size: 1, tilt: 0, rim: '#3f86d6', top: '#163c7c', mid: '#2a63b0', bottom: '#3478c8', pupil: '#0b1530' },
+    eye: { size: 1, tilt: 0, rim: '#3f86d6', top: '#163c7c', mid: '#2a63b0', bottom: '#3478c8', pupil: '#0b1530', pupilW: 1, pupilH: 1, catchLight: 1, lid: null },
     nose: { y: -0.38, scale: 1 },
     mouth: 'closed',
   },
@@ -82,12 +98,12 @@ const DESIGNS: Record<string, Design> = {
     id: 'fox',
     muzzle: { len: 0.13, width: 0.86 },
     ear: { x: 0.54, y: 0.62, z: -0.4, lean: 0.4, fwd: 0.16, out: 0.75, h: 1.12, w: 0.43, t: 0.42 },
-    fur: { len: 1.22, girth: 0.95, step: 22, cheekTufts: true },
+    fur: { len: 1.22, girth: 0.95, step: 22, cheekTufts: true, earRootTufts: false },
     markings: 'fox',
     colors: { main: '#d8662a', deep: '#bb5220', crown: '#e7823f', cream: '#f5eee4', earIn: '#f7f1e8', earTip: '#2e211c', brow: '#f6efe4' },
     brow: { x: 0.3, y: 0.42, rx: 0.085, ry: 0.075, tilt: 0 },
     noseMarks: false,
-    eye: { size: 0.97, tilt: 0.08, rim: '#f08a3a', top: '#7a2c10', mid: '#c9521c', bottom: '#e9792f', pupil: '#24100a' },
+    eye: { size: 0.97, tilt: 0.08, rim: '#f08a3a', top: '#7a2c10', mid: '#c9521c', bottom: '#e9792f', pupil: '#24100a', pupilW: 0.62, pupilH: 0.95, catchLight: 0.8, lid: { cover: 0.34, slope: -0.08 } },
     nose: { y: -0.4, scale: 0.9 },
     mouth: 'closed',
   },
@@ -98,12 +114,12 @@ const DESIGNS: Record<string, Design> = {
     id: 'husky',
     muzzle: { len: 0.06, width: 1.02 },
     ear: { x: 0.62, y: 0.6, z: -0.42, lean: 0.46, fwd: 0.12, out: 0.75, h: 0.8, w: 0.44, t: 0.42 },
-    fur: { len: 0.82, girth: 0.92, step: 19, cheekTufts: false },
+    fur: { len: 0.82, girth: 0.92, step: 19, cheekTufts: false, earRootTufts: true },
     markings: 'husky',
     colors: { main: '#62666d', deep: '#474a50', crown: '#6c7077', cream: '#f2f1ee', earIn: '#f4f2ef', brow: '#f7f6f3' },
-    brow: { x: 0.31, y: 0.43, rx: 0.15, ry: 0.07, tilt: 0.38 },
+    brow: { x: 0.31, y: 0.56, rx: 0.14, ry: 0.065, tilt: 0.38 },
     noseMarks: false,
-    eye: { size: 0.98, tilt: 0.12, rim: '#7fdcff', top: '#1677c2', mid: '#2fa3ea', bottom: '#6ad3ff', pupil: '#0b2340' },
+    eye: { size: 0.98, tilt: 0.12, rim: '#7fdcff', top: '#1677c2', mid: '#2fa3ea', bottom: '#6ad3ff', pupil: '#0b2340', pupilW: 0.62, pupilH: 0.6, catchLight: 1.1, lid: { cover: 0.2, slope: 0.12 } },
     nose: { y: -0.4, scale: 1.02 },
     mouth: 'open',
   },
@@ -238,6 +254,8 @@ interface Spike {
   c: V3
   reach: number
   cream: boolean
+  /** Tip radius: small for a crisp point, larger for a soft, rounded lock. */
+  rb: number
 }
 let spikes: Spike[] = []
 const CENTRE = V(0, -0.05, -0.4)
@@ -259,11 +277,11 @@ function surfaceNormal(p: V3) {
   return V(headBody(p.x + e, p.y, p.z) - headBody(p.x - e, p.y, p.z), headBody(p.x, p.y + e, p.z) - headBody(p.x, p.y - e, p.z), headBody(p.x, p.y, p.z + e) - headBody(p.x, p.y, p.z - e)).normalize()
 }
 
-function pushSpike(a: V3, out: V3, len: number, ra: number, cream: boolean) {
+function pushSpike(a: V3, out: V3, len: number, ra: number, cream: boolean, rb = 0.012) {
   // Rooted a little below the surface, so the cone's full base shows.
   const a0 = a.clone().addScaledVector(out, -0.05)
   const b = a.clone().addScaledVector(out, len)
-  spikes.push({ a: a0, b, ra, c: a0.clone().lerp(b, 0.5), reach: (len + 0.05) / 2 + ra + 0.08, cream })
+  spikes.push({ a: a0, b, ra, c: a0.clone().lerp(b, 0.5), reach: (len + 0.05) / 2 + ra + 0.08, cream, rb })
 }
 
 /** A cone of fur: full at the base, its sides bowed out a little, to a
@@ -278,7 +296,7 @@ function spikeSdf(px: number, py: number, pz: number, s: Spike) {
   const dx = px - (s.a.x + abx * t)
   const dy = py - (s.a.y + aby * t)
   const dz = pz - (s.a.z + abz * t)
-  const r = 0.012 + (s.ra - 0.012) * (1 - t) ** 0.8
+  const r = s.rb + (s.ra - s.rb) * (1 - t) ** 0.8
   // (a cone's distance is under-estimated by its slope; good enough here)
   return (Math.sqrt(dx * dx + dy * dy + dz * dz) - r) * 0.85 + Math.max(0, h - 1) * Math.sqrt(l2) * 0.15
 }
@@ -326,12 +344,16 @@ function buildSpikes() {
   // The fox's ruff: big pale tufts sweeping out and down from the cheeks.
   if (F.cheekTufts)
     for (const s of [-1, 1])
+      // Soft, rounded locks in two layers, the outer ones longer.
       for (const [y, z, len, ra, oy] of [
-        [-0.32, -0.05, 0.36, 0.15, -0.35],
-        [-0.5, -0.15, 0.4, 0.16, -0.6],
-        [-0.15, -0.2, 0.3, 0.13, -0.15],
+        [-0.08, -0.12, 0.24, 0.11, -0.1],
+        [-0.26, -0.02, 0.32, 0.13, -0.3],
+        [-0.44, -0.06, 0.34, 0.13, -0.5],
+        [-0.6, -0.16, 0.3, 0.12, -0.7],
+        [-0.18, -0.3, 0.26, 0.12, -0.2],
+        [-0.38, -0.3, 0.3, 0.12, -0.45],
       ])
-        pushSpike(surfaceDir(V(s * 0.95, y, z - CENTRE.z).normalize()), V(s, oy, -0.35).normalize(), len, ra, true)
+        pushSpike(surfaceDir(V(s * 0.95, y, z - CENTRE.z).normalize()), V(s, oy, -0.3).normalize(), len, ra, true, 0.045)
   // The nape: a point hanging down at the back, and cream fluff in a V
   // down the throat.
   pushSpike(surfaceDir(V(0, -0.8, -0.75).normalize()), V(0, -1, -0.45).normalize(), 0.32, 0.16, false)
@@ -359,6 +381,16 @@ function buildSpikes() {
     const out = e.r.clone().multiplyScalar(Math.sign(e.r.x * s))
     const a = e.base.clone().addScaledVector(e.u, 0.08).addScaledVector(out, e.w * 0.55).addScaledVector(e.f, 0.12)
     pushSpike(a, out.clone().addScaledVector(e.u, 0.05).addScaledVector(e.f, 0.45).normalize(), 0.26, 0.1, true)
+    // The husky's white fluff round the outside of each ear's root.
+    if (F.earRootTufts)
+      for (const [du, len, ra, up] of [
+        [-0.05, 0.22, 0.1, -0.1],
+        [0.08, 0.2, 0.09, 0.25],
+        [0.2, 0.17, 0.08, 0.5],
+      ]) {
+        const at = e.base.clone().addScaledVector(e.u, du).addScaledVector(out, e.w * 0.85)
+        pushSpike(at, out.clone().addScaledVector(e.u, up).addScaledVector(e.f, 0.2).normalize(), len, ra, true, 0.03)
+      }
   }
 }
 
@@ -403,7 +435,8 @@ function huskyMask(p: V3) {
   const ax = Math.abs(p.x)
   const stripe = 0.07 + 0.2 * ss(p.y, -0.12, 0.3)
   // (arching up over each eye, dipping to the stripe and down the sides)
-  const line = 0.3 - 0.4 * ss(ax, 0.62, 1.0) - 0.1 * ss(0.3, 0.1, ax)
+  // (well clear of the eyes' tops, which sit at about 0.3)
+  const line = 0.44 - 0.45 * ss(ax, 0.72, 1.05) - 0.14 * ss(0.3, 0.1, ax)
   let c = ss(line - p.y, -0.02, 0.02) * (1 - ss(stripe - ax, -0.015, 0.015) * ss(p.y, -0.2, -0.12))
   c *= ss(p.z, -0.65 - 0.3 * ss(-p.y, 0.1, 0.6), -0.42 - 0.3 * ss(-p.y, 0.1, 0.6))
   return Math.max(c, shibaMask(p))
@@ -649,7 +682,7 @@ function eyeTexture(right: boolean) {
     g.fill()
     g.fillStyle = E.pupil
     g.beginPath()
-    g.ellipse(X(0.8), Y(0.52), W * 0.17 * k, H * 0.32 * k, 0, 0, Math.PI * 2)
+    g.ellipse(X(0.8 - 0.05 * (1 - E.pupilW)), Y(0.53), W * 0.17 * k * E.pupilW, H * 0.32 * k * E.pupilH, 0, 0, Math.PI * 2)
     g.fill()
     // The lid's soft shadow across the top.
     const sh = g.createLinearGradient(0, Y(0), 0, Y(0.25))
@@ -659,9 +692,42 @@ function eyeTexture(right: boolean) {
     g.fillRect(0, 0, W, H)
     g.fillStyle = '#ffffff'
     g.beginPath()
-    g.arc(X(0.57), Y(0.39), W * 0.07 * k, 0, Math.PI * 2)
+    g.arc(X(0.6), Y(0.42), W * 0.07 * k * E.catchLight, 0, Math.PI * 2)
     g.fill()
     g.restore()
+    if (E.lid) {
+      // The upper lid, come down over the top of the eye: everything above
+      // its edge is cut away so the face itself shows there, and its edge
+      // is a dark line; x = 1 is the nose side.
+      const edge = (x: number) => Y(E.lid!.cover + E.lid!.slope * (x - 0.5))
+      g.save()
+      g.globalCompositeOperation = 'destination-out'
+      g.fillStyle = '#000'
+      g.beginPath()
+      g.moveTo(X(-0.3), edge(-0.3))
+      g.lineTo(X(1.3), edge(1.3))
+      g.lineTo(X(1.3), Y(-0.4))
+      g.lineTo(X(-0.3), Y(-0.4))
+      g.closePath()
+      g.fill()
+      g.restore()
+      g.save()
+      eyePath(g, W, H, 0.04)
+      g.clip()
+      g.strokeStyle = '#121216'
+      g.lineWidth = W * 0.06 * k
+      g.beginPath()
+      g.moveTo(X(-0.1), edge(-0.1))
+      g.lineTo(X(1.1), edge(1.1))
+      g.stroke()
+      // A soft shadow under the lid.
+      const sh2 = g.createLinearGradient(0, edge(0.5), 0, edge(0.5) + H * 0.12 * k)
+      sh2.addColorStop(0, 'rgba(12,20,40,0.35)')
+      sh2.addColorStop(1, 'rgba(12,20,40,0)')
+      g.fillStyle = sh2
+      g.fillRect(0, edge(0.5) - H * 0.1, W, H * 0.3)
+      g.restore()
+    }
   })
 }
 
