@@ -45,6 +45,8 @@ function headBody(x: number, y: number, z: number) {
   // Narrowing toward the top, so the crown domes up between the ears.
   const tx = x * (1 + 0.32 * ss(y, 0.1, 1.0))
   let d = ellipsoid(tx, y - 0.1, z + 0.3, 0.82, 0.92, 0.62)
+  // A full, round back of the skull, bulging out behind the ears.
+  d = smin(d, ellipsoid(x * (1 + 0.15 * ss(y, 0.1, 1.0)), y - 0.02, z + 0.56, 0.74, 0.8, 0.56), 0.3)
   // Under each ear, filling out the head's upper sides that the ears grow from.
   for (const s of [-1, 1]) d = smin(d, ellipsoid(x - s * 0.64, y - 0.4, z + 0.42, 0.3, 0.32, 0.34), 0.22)
   // Full jowls, the head's widest at the eyes' height...
