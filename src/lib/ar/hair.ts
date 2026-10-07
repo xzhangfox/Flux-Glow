@@ -65,12 +65,12 @@ const cache: Record<'hair' | 'person' | 'protect', { m: Float32Array; box: Box; 
 let turn = 0
 
 /** `kind`'s confidence over `box` of `frame`, at w × h. */
-function matte(kind: 'hair' | 'person' | 'protect', frame: HTMLCanvasElement, box: Box, w: number, h: number, live: boolean): Float32Array | null {
+function matte(kind: 'hair' | 'person' | 'protect', frame: HTMLCanvasElement, box: Box, w: number, h: number, live: boolean, maxAge = 1, alone = false): Float32Array | null {
   const seg = segmenters[kind === 'hair' ? 'hair' : 'person']
   if (!seg) return null
   const c = cache[kind]
   const fresh = c && c.w === w && c.h === h && Math.abs(c.box.x - box.x) < box.w * 0.04 && Math.abs(c.box.y - box.y) < box.h * 0.04
-  if (live && fresh && c.age < 1 && (kind === 'protect' || (turn & 1) === (kind === 'hair' ? 1 : 0))) {
+  if (live && fresh && c.age < maxAge && (alone || kind === 'protect' || (turn & 1) === (kind === 'hair' ? 1 : 0))) {
     c.age++
     return c.m
   }
@@ -113,6 +113,29 @@ function maxLine(src: Float32Array, dst: Float32Array, start: number, stride: nu
   for (let i = 0; i < m; i++) g[i] = i % k === 0 ? at(i) : Math.max(g[i - 1], at(i))
   for (let i = m - 1; i >= 0; i--) hh[i] = i === m - 1 || (i + 1) % k === 0 ? at(i) : Math.max(hh[i + 1], at(i))
   for (let j = 0; j < n; j++) dst[start + j * stride] = Math.max(hh[j], g[j + k - 1])
+}
+
+/** Box blur of radius r (two passes, rows then columns). */
+function boxBlur(src: Float32Array, w: number, h: number, r: number) {
+  const tmp = new Float32Array(w * h)
+  const out = new Float32Array(w * h)
+  for (let y = 0; y < h; y++) {
+    let s = 0
+    for (let x = -r; x <= r; x++) s += src[y * w + Math.min(w - 1, Math.max(0, x))]
+    for (let x = 0; x < w; x++) {
+      tmp[y * w + x] = s / (2 * r + 1)
+      s += src[y * w + Math.min(w - 1, x + r + 1)] - src[y * w + Math.max(0, x - r)]
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let s = 0
+    for (let y = -r; y <= r; y++) s += tmp[Math.min(h - 1, Math.max(0, y)) * w + x]
+    for (let y = 0; y < h; y++) {
+      out[y * w + x] = s / (2 * r + 1)
+      s += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x]
+    }
+  }
+  return out
 }
 
 /** Max filter (dilation) with a square of radius r. */
@@ -205,6 +228,10 @@ export interface HideHead {
   zone: (ctx: CanvasRenderingContext2D) => void
   /** How far past the mask's edge the person is removed (frame pixels). */
   margin: number
+  /** Only hair, and only inside `zone` (a wig: the head under it stays, and
+   *  so does hair hanging below it). One segmenter instead of two, its
+   *  matte reused for a few live frames. */
+  hairOnly?: boolean
 }
 
 /** Paints the background over hair and head showing outside a mask, in
@@ -216,8 +243,8 @@ export function hideHead(frame: HTMLCanvasElement, box: Box, layer: HTMLCanvasEl
   const k = Math.min(1, WORK / Math.max(box.w, box.h))
   const w = Math.max(4, Math.round(box.w * k))
   const h = Math.max(4, Math.round(box.h * k))
-  const hairRaw = matte('hair', frame, box, w, h, live)
-  const person = matte('person', frame, box, w, h, live)
+  const hairRaw = matte('hair', frame, box, w, h, live, opts.hairOnly ? 3 : 1, opts.hairOnly)
+  const person = opts.hairOnly ? null : matte('person', frame, box, w, h, live)
   if (!hairRaw && !person) return
   const n = w * h
 
@@ -239,6 +266,12 @@ export function hideHead(frame: HTMLCanvasElement, box: Box, layer: HTMLCanvasEl
   zc.fillStyle = '#fff'
   opts.zone(zc)
   const zoneA = zc.getImageData(0, 0, w, h).data
+  const n0 = w * h
+  // (soft at its edge for a wig: where hair is kept and where it goes
+  // mustn't be a line)
+  let zoneF = new Float32Array(n0)
+  for (let i = 0; i < n0; i++) zoneF[i] = zoneA[i * 4 + 3] / 255
+  if (opts.hairOnly) zoneF = boxBlur(zoneF, w, h, Math.max(2, Math.round(h * 0.04)))
 
   const kept = new Float32Array(n)
   for (let i = 0; i < n; i++) kept[i] = keepA[i * 4 + 3] / 255
@@ -258,15 +291,15 @@ export function hideHead(frame: HTMLCanvasElement, box: Box, layer: HTMLCanvasEl
   const remove = new Float32Array(n)
   let any = false
   for (let i = 0; i < n; i++) {
-    const zone = zoneA[i * 4 + 3] / 255
+    const zone = zoneF[i]
     const pers = person ? person[i] : 0
     const head = ramp(pers, 0.35, 0.7) * zone * near[i]
     const x = i % w
     const y = (i / w) | 0
     // Fade out at the box's edges rather than end in a hard line.
-    const edge = Math.min(1, Math.min(x, y, w - 1 - x, h - 1 - y) / 4)
+    const edge = Math.min(1, Math.min(x, y, w - 1 - x, h - 1 - y) / Math.max(4, Math.min(w, h) * 0.08))
     // Under the mask's own soft edge too, or hair shows through its fringe.
-    remove[i] = Math.max(ramp(hair[i], 0.1, 0.4), head) * (1 - ramp(kept[i], 0.5, 0.95)) * edge
+    remove[i] = Math.max(ramp(hair[i], 0.1, 0.4) * (opts.hairOnly ? zone : 1), head) * (1 - ramp(kept[i], 0.5, 0.95)) * edge
     if (remove[i] > 0.02) any = true
     // Known background: not hair, not the person, not under the mask
     // (whose edge pixels are the face's and hair's colours, which mustn't

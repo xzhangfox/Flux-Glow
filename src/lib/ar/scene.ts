@@ -70,6 +70,13 @@ export interface Model {
   reach?: number
   /** How dark its shadows on the face are, relative to the usual (1). */
   shadow?: number
+  /** With hidesHead: remove only hair, and only above the line (a wig —
+   *  hair hanging below it stays). */
+  hairOnly?: boolean
+  /** With hidesHead: an opening in the model (rig x, y on the face's
+   *  front) where nothing is painted out either — a wig's face opening,
+   *  where the background fill can't stand in for the sides of a face. */
+  keepOpening?: [number, number][]
   /** Brightly coloured on purpose (a dyed wig): not muted to the photo's
    *  own saturation when composited. */
   vivid?: boolean
@@ -556,6 +563,13 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
     compositeARFast(frame, st.renderer.domElement, RS, box)
     return true
   }
+  // Hair only above a line: no need to look below it.
+  let hideBox = box
+  if (model.hairOnly && model.hidesHead !== undefined) {
+    const ys = [-3, 3].map((x) => -new THREE.Vector3(x, model.hidesHead!, -1).applyMatrix4(rig.matrix).y)
+    const bottom = Math.min(box.y + box.h, Math.ceil(Math.max(...ys) + rig.E * 0.15))
+    hideBox = { ...box, h: Math.max(0, bottom - box.y) }
+  }
   const layer = readLayer(st.renderer.domElement, RS, box)
   if (model.hidesHead !== undefined) {
     const line = model.hidesHead
@@ -570,18 +584,32 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
     }
     hideHead(
       frame,
-      box,
+      hideBox,
       layer,
       {
         // The face itself stays (the mask's openings show it).
-        keep: (ctx) => poly(ctx, OVAL.map((i) => [P2[i].x, P2[i].y] as const)),
+        keep: (ctx) => {
+          poly(ctx, OVAL.map((i) => [P2[i].x, P2[i].y] as const))
+          if (model.keepOpening)
+            poly(
+              ctx,
+              model.keepOpening.map(([x, y]) => {
+                const w = new THREE.Vector3(x, y, 0).applyMatrix4(rig.matrix)
+                return [w.x, -w.y] as const
+              }),
+            )
+        },
         zone: (ctx) => poly(ctx, [px(-12, line), px(12, line), px(12, line + 24), px(-12, line + 24)]),
         margin: rig.E * 0.5,
+        hairOnly: model.hairOnly,
       },
       live,
     )
   }
-  compositeAR(frame, layer, box, live, model.vivid)
+  // (live: the GPU blend here too — the read-back above was only of the
+  // small hair box)
+  if (live) compositeARFast(frame, st.renderer.domElement, RS, box)
+  else compositeAR(frame, layer, box, live, model.vivid)
   return true
 }
 

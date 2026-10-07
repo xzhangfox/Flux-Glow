@@ -9,9 +9,9 @@ import { surfaceNets } from './sdfMesh'
 //
 // Sculpted as one signed distance field in the head rig's units (origin
 // between the eyes, 1 = the eye spacing, y up, z out of the face): an outer
-// helmet of hair minus the head inside it, with the face opening cut out
-// and fine vertical ridges for strand clumps; meshed with surface nets
-// (off the main thread — see wigWorker.ts). Shaded as synthetic fibre:
+// helmet of hair (solid — the face occluding it is enough), with the face
+// opening cut out;
+// meshed with surface nets (off the main thread — see wigWorker.ts). Shaded as synthetic fibre:
 // strand texture, a stretched shine band, a soft sheen.
 
 const smin = (a: number, b: number, k: number) => {
@@ -31,6 +31,12 @@ const bangsAt = (x: number) => 0.31 - 0.04 * (x / 0.9) ** 2 + 0.006 * Math.sin(x
 const hemAt = (x: number, z: number) => -1.5 + 0.008 * Math.sin(Math.atan2(x, z - HZ) * 41) + 0.005 * Math.sin(x * 97)
 
 export function wigSdf(x: number, y: number, z: number) {
+  return wigParts(x, y, z).d
+}
+
+/** The field, and how far into the face opening's cut (> 0: on the cut
+ *  walls — the inner face of the hair framing the face). */
+function wigParts(x: number, y: number, z: number) {
   const ax = Math.abs(x)
   const zc = z - HZ
   // The outside: a rounded crown flowing into a bell — fullest by the
@@ -40,21 +46,15 @@ export function wigSdf(x: number, y: number, z: number) {
   const side = ell2(ax, zc, rx, rx * 1.2)
   const body = smax(smax(side, y - 0.55, 0.3), hemAt(x, z) - y, 0.16)
   let outer = smin(dome, body, 0.4)
-  // Strand clumps: faint vertical ridges round the head.
-  const ang = Math.atan2(x, zc)
-  outer += 0.002 * Math.sin(ang * 150 + Math.sin(ang * 7) * 2) * clamp01((1.2 - y) / 0.6)
-  // The head inside it: skull, face and jaw, neck.
-  const skull = ell(ax, y - 0.42, zc, 1.15, 1.3, 1.42)
-  const face = ell(ax, y + 0.55, z + 0.78, 1.0, 1.3, 1.0)
-  const neck = smax(ell2(ax, z + 1.4, 0.74, 0.82), y + 0.3, 0.2)
-  const inner = smin(smin(skull, face, 0.3), neck, 0.3)
-  const shell = smax(outer, -inner, 0.05)
+  // Solid: no hollow for the head — the face, which occludes, hides
+  // whatever is behind it, and a hollow only doubled the triangles.
+  const shell = outer
   // The face opening: everything in front, between the side curtains and
   // under the bangs; the curtains come in a little toward the jaw.
   const half = 0.92 - 0.2 * clamp01((-0.5 - y) / 1.0)
   // (its top corners rounded: the bangs blend into the sides)
   const opening = Math.max(smax(ax - half, y - bangsAt(x), 0.14), -(z + 0.9))
-  return smax(shell, -opening, 0.025)
+  return { d: smax(shell, -opening, 0.025), cut: -opening - shell }
 }
 
 export interface WigData {
@@ -70,7 +70,9 @@ let cache: WigData | null = null
  *  worker). */
 export function computeWig(): WigData {
   if (cache) return cache
-  const { pos, index } = surfaceNets(wigSdf, { x: -1.75, y: -1.85, z: -3.45 }, { x: 1.75, y: 2.45, z: 0.45 }, 0.028)
+  // (a coarse grid is plenty: the strands are in the texture, not the
+  // mesh, and fewer triangles keep live frames quick)
+  const { pos, index } = surfaceNets(wigSdf, { x: -1.75, y: -1.85, z: -3.45 }, { x: 1.75, y: 2.45, z: 0.45 }, 0.04)
   const n = pos.length / 3
   const nrm = new Float32Array(n * 3)
   const uv = new Float32Array(n * 2)
@@ -99,10 +101,14 @@ export function computeWig(): WigData {
     uv[i * 2 + 1] = y * 0.25
     const t = clamp01((1.9 - y) / 3.4)
     const c = t < 0.35 ? root.map((v, k) => v + (mid[k] - v) * (t / 0.35)) : mid.map((v, k) => v + (tip[k] - v) * ((t - 0.35) / 0.65))
-    // Undersides (the bangs' underside, the curtains' inner face) a shade
-    // deeper: the light that reaches them has come through hair.
-    const under = 0.78 + 0.22 * clamp01(gy * 0.8 + 0.6)
-    col.set(c.map((v) => v * under), i * 3)
+    // Undersides and the inner face of the hair round the face (the cut
+    // walls) deeper: the light that reaches them has come through hair.
+    const under = 0.62 + 0.38 * clamp01(gy * 0.9 + 0.7)
+    const wall = 1 - 0.5 * clamp01(wigParts(x, y, z).cut / 0.04 + 0.5)
+    // …and the curtains a shade deeper toward the face, where they turn in.
+    const half = 0.92 - 0.2 * clamp01((-0.5 - y) / 1.0)
+    const rim = y < 0.3 && z > -1.3 ? 0.72 + 0.28 * clamp01((Math.abs(x) - half) / 0.25) : 1
+    col.set(c.map((v) => v * under * wall * rim), i * 3)
   }
   // Wind every triangle to face along its normal (the mesher's winding
   // depends on the field's sign convention; double-sided rendering flips
@@ -227,6 +233,12 @@ function strandMaps() {
   return { map, normal }
 }
 
+// The face opening's outline (rig x, y), for the hair remover to leave
+// alone; scaled with the wig each frame.
+const OPENING0: [number, number][] = [
+  [-0.92, 0.3], [0.92, 0.3], [0.92, -0.5], [0.72, -1.5], [-0.72, -1.5], [-0.92, -0.5],
+]
+
 /** The wig, ready to wear. */
 export async function lavenderWig(): Promise<Model> {
   const d = await computeWigOffThread()
@@ -238,45 +250,78 @@ export async function lavenderWig(): Promise<Model> {
   g.setIndex(new THREE.BufferAttribute(d.index, 1))
   g.computeBoundingSphere()
   const { map, normal } = strandMaps()
-  // Synthetic fibre: glossy, its shine stretched across the strands into
-  // the band that rings a head of smooth hair, with a pale sheen.
-  const material = new THREE.MeshPhysicalMaterial({
+  // Synthetic fibre: a plain standard material (a physical one with
+  // anisotropy, sheen and clear coat cost twice the frame time live) plus
+  // a strand highlight of its own — Kajiya-Kay: light glints off each
+  // fibre in a band across the strands, the ring of shine round a head of
+  // smooth hair — a bright white lobe and a softer lilac one below it.
+  const material = new THREE.MeshStandardMaterial({
     vertexColors: true,
     map,
     normalMap: normal,
     normalScale: new THREE.Vector2(0.6, 0.6),
-    roughness: 0.26,
+    roughness: 0.5,
     metalness: 0,
-    anisotropy: 0.85,
-    anisotropyRotation: 0,
-    sheen: 0.6,
-    sheenRoughness: 0.35,
-    sheenColor: new THREE.Color(0xeee2ff),
-    clearcoat: 0.45,
-    clearcoatRoughness: 0.22,
-    envMapIntensity: 0.8,
-    side: THREE.DoubleSide,
+    envMapIntensity: 0.7,
   })
+  material.onBeforeCompile = (sh) => {
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vStrand;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n  vStrand = normalize(normalMatrix * vec3(0.0, 1.0, 0.0));')
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vStrand;')
+      .replace(
+        '#include <opaque_fragment>',
+        `#if NUM_DIR_LIGHTS > 0
+  {
+    vec3 Lh = directionalLights[0].direction;
+    vec3 Vh = normalize(vViewPosition);
+    vec3 Hh = normalize(Lh + Vh);
+    // The strand's direction, in the surface: the head's "up" with the
+    // normal taken out, tilted a touch to shift each lobe along it.
+    vec3 T = normalize(vStrand - normal * dot(normal, vStrand));
+    float t1 = dot(normalize(T + normal * 0.12), Hh);
+    float t2 = dot(normalize(T - normal * 0.18), Hh);
+    float s1 = pow(max(0.0, sqrt(max(0.0, 1.0 - t1 * t1))), 160.0);
+    float s2 = pow(max(0.0, sqrt(max(0.0, 1.0 - t2 * t2))), 45.0);
+    float lit = clamp(dot(normal, Lh) * 0.5 + 0.5, 0.0, 1.0);
+    outgoingLight += directionalLights[0].color * lit * (s1 * 0.13 * vec3(0.95, 0.9, 1.0) + s2 * 0.12 * diffuseColor.rgb);
+  }
+#endif
+#include <opaque_fragment>`,
+      )
+  }
+  material.customProgramCacheKey = () => 'wig-strands'
   const mesh = new THREE.Mesh(g, material)
-  mesh.castShadow = true
+  // (no shadow pass for it: the bangs' shade on the brow is too subtle to
+  // be worth drawing the whole wig twice a frame)
+  mesh.castShadow = false
   mesh.frustumCulled = false
   const wig = new THREE.Group()
   wig.add(mesh)
   const root = new THREE.Group()
   root.add(wig)
+  const OPENING = OPENING0.map((p) => [...p] as [number, number])
   return {
     root,
     // The face shows through the opening, and only the face hides the
     // inside of the wig; whatever of the wearer's own hair shows outside
     // it is painted out, and the head just past its edge down to the jaw.
     occludeFace: true,
-    hidesHead: -1.25,
+    // Hair is painted out above the hem only (just inside it, so the change
+    // hides under the wig's edge); hair falling below the wig stays.
+    hidesHead: -1.4,
+    hairOnly: true,
+    // (the face opening, at its natural size — scaled with the wig below)
+    keepOpening: OPENING,
     vivid: true,
     update(rig) {
       // One size, scaled to this face's width at the cheeks (it was made
       // round a face 2.16 eye spacings wide).
       const w = Math.abs(rig.local(454).x - rig.local(234).x)
-      wig.scale.setScalar(THREE.MathUtils.clamp(w / 2.16, 0.88, 1.2))
+      const k = THREE.MathUtils.clamp(w / 2.16, 0.88, 1.2)
+      wig.scale.setScalar(k)
+      OPENING.forEach((p, i) => ((p[0] = OPENING0[i][0] * k), (p[1] = OPENING0[i][1] * k)))
     },
   }
 }

@@ -20,15 +20,20 @@ interface Sprite {
 }
 
 // Anchors read off the sprites (public/effects/glam/*.png): the corners of
-// each eye's opening, the corners of the mouth.
+// each eye's opening, the corners of the mouth. The sprites carry their
+// own soft contact shadow, baked in round a PAD-pixel margin (a canvas
+// shadow is slow, and some browsers draw an image's shadow as its whole
+// rectangle — a faint box round each eye).
+const PAD = 24
+const at = (x: number, y: number) => ({ x: x + PAD, y: y + PAD })
 const SPRITES = {
-  eyeL: { src: '/effects/glam/eyeL.png', a: { x: 95, y: 170 }, b: { x: 328, y: 172 } } as Sprite,
-  eyeR: { src: '/effects/glam/eyeR.png', a: { x: 60, y: 190 }, b: { x: 300, y: 178 } } as Sprite,
-  lipsTop: { src: '/effects/glam/lipsTop.png', a: { x: 25, y: 100 }, b: { x: 420, y: 100 } } as Sprite,
-  lipsBot: { src: '/effects/glam/lipsBot.png', a: { x: 25, y: 100 }, b: { x: 420, y: 100 } } as Sprite,
+  eyeL: { src: '/effects/glam/eyeL.png', a: at(95, 170), b: at(328, 172) } as Sprite,
+  eyeR: { src: '/effects/glam/eyeR.png', a: at(60, 190), b: at(300, 178) } as Sprite,
+  lipsTop: { src: '/effects/glam/lipsTop.png', a: at(25, 100), b: at(420, 100) } as Sprite,
+  lipsBot: { src: '/effects/glam/lipsBot.png', a: at(25, 100), b: at(420, 100) } as Sprite,
 }
 /** The middle of the lips' seam (where they're cut apart). */
-const LIP_SEAM = { x: 222, y: 117 }
+const LIP_SEAM = at(222, 117)
 
 let loading: Promise<void> | null = null
 /** Loads the sprites (once). */
@@ -117,10 +122,6 @@ export function drawGlam(ctx: CanvasRenderingContext2D, P: Pt[], slot: string, l
   ctx.save()
   ctx.imageSmoothingEnabled = true
   ctx.imageSmoothingQuality = 'high'
-  // A soft contact shadow: printed on, not floating.
-  ctx.shadowColor = 'rgba(40,10,10,0.28)'
-  ctx.shadowBlur = E * 0.03
-  ctx.shadowOffsetY = E * 0.012
 
   // Eyes: the subject's right eye (33/133) shows on the picture's left
   // unless the frame is mirrored, so go by where each actually is.

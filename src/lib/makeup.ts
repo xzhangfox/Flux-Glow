@@ -50,6 +50,40 @@ function smooth(ctx: CanvasRenderingContext2D, pts: Pt[]) {
   ctx.lineTo(last.x, last.y)
 }
 
+// Soft edges without canvas filters (not every browser has them, and a
+// blur filter is slow): draw at reduced resolution and scale it back up —
+// the upscale's own interpolation feathers every edge by about a
+// low-res pixel.
+let softCanvas: HTMLCanvasElement | null = null
+function soft(ctx: CanvasRenderingContext2D, x0: number, y0: number, w: number, h: number, blur: number, draw: (g: CanvasRenderingContext2D) => void) {
+  const k = Math.min(1, Math.max(0.12, 1 / Math.max(1, blur)))
+  const sw = Math.max(2, Math.ceil(w * k))
+  const sh = Math.max(2, Math.ceil(h * k))
+  softCanvas ??= document.createElement('canvas')
+  if (softCanvas.width < sw + 2 || softCanvas.height < sh + 2) {
+    softCanvas.width = Math.max(softCanvas.width, sw + 2)
+    softCanvas.height = Math.max(softCanvas.height, sh + 2)
+  }
+  const g = softCanvas.getContext('2d')!
+  g.setTransform(1, 0, 0, 1, 0, 0)
+  g.globalCompositeOperation = 'source-over'
+  g.globalAlpha = 1
+  g.clearRect(0, 0, sw + 2, sh + 2)
+  g.setTransform(k, 0, 0, k, -x0 * k, -y0 * k)
+  draw(g)
+  ctx.save()
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  ctx.drawImage(softCanvas, 0, 0, sw, sh, x0, y0, sw / k, sh / k)
+  ctx.restore()
+}
+
+const boundsOf = (pts: Pt[], pad: number) => {
+  const x0 = Math.floor(Math.min(...pts.map((p) => p.x)) - pad)
+  const y0 = Math.floor(Math.min(...pts.map((p) => p.y)) - pad)
+  return { x0, y0, w: Math.ceil(Math.max(...pts.map((p) => p.x)) + pad) - x0, h: Math.ceil(Math.max(...pts.map((p) => p.y)) + pad) - y0 }
+}
+
 function eye(ctx: CanvasRenderingContext2D, P: Pt[], up: number[], lo: number[], brow: number[], E: number) {
   const lid = up.map((i) => P[i])
   const lower = lo.map((i) => P[i])
@@ -81,36 +115,41 @@ function eye(ctx: CanvasRenderingContext2D, P: Pt[], up: number[], lo: number[],
     return lerp(p, b, 0.62 - 0.12 * t)
   })
   const flick = { x: outer.x + ox * w * 0.3 + ux * w * 0.22, y: outer.y + oy * w * 0.3 + uy * w * 0.22 }
-  ctx.save()
-  ctx.filter = `blur(${Math.max(1, E * 0.035)}px)`
-  const grad = ctx.createLinearGradient(inner.x, inner.y, flick.x, flick.y)
-  grad.addColorStop(0, 'rgba(255,150,205,0.55)')
-  grad.addColorStop(0.55, 'rgba(244,84,176,0.62)')
-  grad.addColorStop(1, 'rgba(196,72,214,0.6)')
-  ctx.fillStyle = grad
-  path(ctx, [...lid, flick, ...top.slice().reverse()])
-  ctx.fill()
+  const bb = boundsOf([...lid, flick, ...top], E * 0.12)
+  soft(ctx, bb.x0, bb.y0, bb.w, bb.h, E * 0.035, (g) => {
+    const grad = g.createLinearGradient(inner.x, inner.y, flick.x, flick.y)
+    grad.addColorStop(0, 'rgba(255,150,205,0.55)')
+    grad.addColorStop(0.55, 'rgba(244,84,176,0.62)')
+    grad.addColorStop(1, 'rgba(196,72,214,0.6)')
+    g.fillStyle = grad
+    path(g, [...lid, flick, ...top.slice().reverse()])
+    g.fill()
+  })
   // A shimmer lift on the centre of the lid.
   const c = lerp(lid[4], top[4], 0.4)
   const r = w * 0.32
+  ctx.save()
   const sh = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, r)
   sh.addColorStop(0, 'rgba(255,215,240,0.45)')
   sh.addColorStop(1, 'rgba(255,215,240,0)')
   ctx.globalCompositeOperation = 'screen'
   ctx.fillStyle = sh
-  ctx.fillRect(c.x - r, c.y - r, r * 2, r * 2)
+  ctx.beginPath()
+  ctx.arc(c.x, c.y, r, 0, Math.PI * 2)
+  ctx.fill()
   ctx.restore()
 
   // Cool blue sparkle along the lower lash line.
-  ctx.save()
-  ctx.filter = `blur(${Math.max(0.6, E * 0.012)}px)`
-  ctx.strokeStyle = 'rgba(120,190,255,0.55)'
-  ctx.lineWidth = Math.max(1, E * 0.035)
-  ctx.lineCap = 'round'
-  ctx.beginPath()
-  smooth(ctx, lower.slice(0, 7).map((p) => ({ x: p.x - ux * E * 0.012, y: p.y - uy * E * 0.012 })))
-  ctx.stroke()
-  ctx.restore()
+  const lashLo = lower.slice(0, 7).map((p) => ({ x: p.x - ux * E * 0.012, y: p.y - uy * E * 0.012 }))
+  const lb = boundsOf(lashLo, E * 0.08)
+  soft(ctx, lb.x0, lb.y0, lb.w, lb.h, E * 0.012, (g) => {
+    g.strokeStyle = 'rgba(120,190,255,0.55)'
+    g.lineWidth = Math.max(1, E * 0.035)
+    g.lineCap = 'round'
+    g.beginPath()
+    smooth(g, lashLo)
+    g.stroke()
+  })
 
   // Winged liner: thin at the inner corner, thickening outward along the
   // lash line, then a sharp wing flicked up and out.
@@ -125,7 +164,6 @@ function eye(ctx: CanvasRenderingContext2D, P: Pt[], up: number[], lo: number[],
     })
   ctx.save()
   ctx.fillStyle = 'rgba(14,10,16,0.92)'
-  ctx.filter = `blur(${Math.max(0.4, E * 0.004)}px)`
   ctx.beginPath()
   const lashLine = lid.slice().reverse()
   ctx.moveTo(lashLine[0].x, lashLine[0].y)
@@ -137,61 +175,47 @@ function eye(ctx: CanvasRenderingContext2D, P: Pt[], up: number[], lo: number[],
   ctx.restore()
 }
 
-let maskCanvas: HTMLCanvasElement | null = null
+let lipLayer: HTMLCanvasElement | null = null
 
-/** Pale lavender gloss: the lips recoloured, keeping their own light and
- *  texture, with the gloss's highlights lifted. */
+/** Pale lavender gloss: the lips recoloured with blend modes (no pixel
+ *  read-back, which stalls the GPU every frame) — 'color' takes the
+ *  lavender's hue and saturation while keeping the lips' own light and
+ *  texture, then 'screen' lifts them to a pale cream shade. */
 function lips(ctx: CanvasRenderingContext2D, P: Pt[], E: number) {
   const outer = LIPS_OUTER.map((i) => P[i])
   const inner = LIPS_INNER.map((i) => P[i])
-  const pad = Math.ceil(E * 0.08)
-  const x0 = Math.max(0, Math.floor(Math.min(...outer.map((p) => p.x)) - pad))
-  const y0 = Math.max(0, Math.floor(Math.min(...outer.map((p) => p.y)) - pad))
-  const x1 = Math.min(ctx.canvas.width, Math.ceil(Math.max(...outer.map((p) => p.x)) + pad))
-  const y1 = Math.min(ctx.canvas.height, Math.ceil(Math.max(...outer.map((p) => p.y)) + pad))
-  const w = x1 - x0
-  const h = y1 - y0
-  if (w < 4 || h < 4) return
-  // The lips' mask: the outer outline minus the mouth's opening, feathered.
-  maskCanvas ??= document.createElement('canvas')
-  maskCanvas.width = w
-  maskCanvas.height = h
-  const m = maskCanvas.getContext('2d', { willReadFrequently: true })!
-  m.filter = `blur(${Math.max(0.6, E * 0.012)}px)`
-  m.translate(-x0, -y0)
-  m.fillStyle = '#fff'
-  path(m, outer)
-  m.fill()
-  m.globalCompositeOperation = 'destination-out'
-  path(m, inner)
-  m.fill()
-  const mask = m.getImageData(0, 0, w, h).data
-  const img = ctx.getImageData(x0, y0, w, h)
-  const d = img.data
-  // The lips' own mean brightness, to keep their light and shade.
-  let sum = 0
-  let n = 0
-  for (let i = 0; i < d.length; i += 4)
-    if (mask[i + 3] > 200) {
-      sum += 0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2]
-      n++
-    }
-  const mean = n ? sum / n : 128
-  const lav = [206, 190, 238]
-  for (let i = 0; i < d.length; i += 4) {
-    const a = (mask[i + 3] / 255) * 0.9
-    if (a <= 0.01) continue
-    const L = 0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2]
-    // Shade follows the lips' own (an opaque cream lipstick flattens it
-    // somewhat), and the brightest points become gloss.
-    const shade = Math.min(1.25, Math.max(0.55, 0.45 + 0.55 * (L / mean)))
-    const gloss = Math.max(0, (L - mean * 1.35) / (255 - mean * 1.35)) * 0.8
-    for (let k = 0; k < 3; k++) {
-      const c = lav[k] * shade + (255 - lav[k] * shade) * gloss
-      d[i + k] = d[i + k] + (c - d[i + k]) * a
-    }
+  const bb = boundsOf(outer, E * 0.06)
+  if (bb.w < 4 || bb.h < 4) return
+  lipLayer ??= document.createElement('canvas')
+  if (lipLayer.width < bb.w || lipLayer.height < bb.h) {
+    lipLayer.width = Math.max(lipLayer.width, bb.w)
+    lipLayer.height = Math.max(lipLayer.height, bb.h)
   }
-  ctx.putImageData(img, x0, y0)
+  const L = lipLayer.getContext('2d')!
+  L.setTransform(1, 0, 0, 1, 0, 0)
+  L.globalCompositeOperation = 'source-over'
+  L.clearRect(0, 0, lipLayer.width, lipLayer.height)
+  // The lips' shape, feathered (the outline minus the mouth's opening).
+  soft(L, 0, 0, bb.w, bb.h, E * 0.012, (g) => {
+    g.translate(-bb.x0, -bb.y0)
+    g.fillStyle = '#fff'
+    path(g, outer)
+    g.fill()
+    g.globalCompositeOperation = 'destination-out'
+    path(g, inner)
+    g.fill()
+  })
+  L.globalCompositeOperation = 'source-in'
+  L.fillStyle = 'rgb(200,182,240)'
+  L.fillRect(0, 0, bb.w, bb.h)
+  ctx.save()
+  ctx.globalCompositeOperation = 'color'
+  ctx.globalAlpha = 0.9
+  ctx.drawImage(lipLayer, 0, 0, bb.w, bb.h, bb.x0, bb.y0, bb.w, bb.h)
+  ctx.globalCompositeOperation = 'screen'
+  ctx.globalAlpha = 0.55
+  ctx.drawImage(lipLayer, 0, 0, bb.w, bb.h, bb.x0, bb.y0, bb.w, bb.h)
+  ctx.restore()
 }
 
 /** The Lavender look's makeup on the face at landmarks `P`. */
