@@ -29,10 +29,52 @@ const HZ = -1.55
 const NECK_Z = -1.3
 const NECK_RX = 0.6
 const NECK_RZ = 0.66
-/** The bangs' blunt edge and the bob's hem (rig y), each a little ragged
- *  the way a cut edge of fibre is. */
-const bangsAt = (x: number) => 0.31 - 0.04 * (x / 0.9) ** 2 + 0.006 * Math.sin(x * 57) + 0.004 * Math.sin(x * 133 + 1.3)
-const hemAt = (x: number, z: number) => -1.5 + 0.008 * Math.sin(Math.atan2(x, z - HZ) * 41) + 0.005 * Math.sin(x * 97)
+// ---- Clumps and the part ---------------------------------------------------------
+//
+// Hair isn't one smooth surface: it falls in clumps (一绺一绺), each a
+// rounded bundle with a groove either side, twisting a little as it falls,
+// its end coming to a soft point; and it parts on the crown. All of it is
+// in the field itself, so the light and the silhouette show it.
+
+const hash = (n: number) => {
+  const v = Math.sin(n * 127.1 + 311.7) * 43758.5453
+  return v - Math.floor(v)
+}
+/** The side part: x where it runs over the crown. */
+const PART_X = 0.3
+/** How far into a clump (rig x, y, z) a point is: 1 on a clump's crest,
+ *  0 in the groove between two. */
+function clumpRidge(x: number, y: number, z: number) {
+  // Round the head (angle), plus a slow twist down the length; clumps of
+  // a few different widths.
+  const a = Math.atan2(x, z - HZ)
+  let u = (a / (Math.PI * 2)) * 26 + 0.25 * Math.sin(y * 1.6 + a * 3)
+  const i = Math.floor(u)
+  const w = 0.7 + 0.6 * hash(i)
+  u = Math.min(1, (u - i) * w + (1 - w) * 0.5)
+  return Math.sin(Math.PI * Math.min(1, Math.max(0, u)))
+}
+/** How much a point is "bangs" (0..1), blended gently into the rest so
+ *  the two clump patterns meet without a seam. */
+const bangsWeight = (x: number, y: number, z: number) => clamp01((0.85 - y) / 0.25) * clamp01((z + 0.75) / 0.3) * clamp01((1.05 - Math.abs(x)) / 0.2)
+/** The clump pattern anywhere: round the head, or across the bangs. */
+const ridgeAt = (x: number, y: number, z: number) => {
+  const b = bangsWeight(x, y, z)
+  return b <= 0 ? clumpRidge(x, y, z) : b >= 1 ? bangsRidge(x) : clumpRidge(x, y, z) * (1 - b) + bangsRidge(x) * b
+}
+/** The same across the bangs (they fall straight down the front). */
+function bangsRidge(x: number) {
+  let u = (x + 1) * 5
+  const i = Math.floor(u)
+  const w = 0.7 + 0.6 * hash(i + 91)
+  u = Math.min(1, Math.max(0, (u - i) * w + (1 - w) * 0.5))
+  return Math.sin(Math.PI * u)
+}
+
+/** The bangs' edge and the bob's hem (rig y): each clump a little longer
+ *  at its middle, so the ends come to soft points rather than one cut. */
+const bangsAt = (x: number) => 0.31 - 0.04 * (x / 0.9) ** 2 + 0.025 * (1 - bangsRidge(x))
+const hemAt = (x: number, z: number) => -1.53 + 0.05 * (1 - clumpRidge(x, -1.5, z))
 
 export function wigSdf(x: number, y: number, z: number) {
   return wigParts(x, y, z).d
@@ -50,6 +92,14 @@ function wigParts(x: number, y: number, z: number) {
   const side = ell2(ax, zc, rx, rx * 1.2)
   const body = smax(smax(side, y - 0.55, 0.3), hemAt(x, z) - y, 0.16)
   let outer = smin(dome, body, 0.4)
+  // Grooves between clumps: deepest down the sides and back, finer over
+  // the crown, where the hair lies close; across the bangs, their own.
+  const ridge = ridgeAt(x, y, z)
+  const depth = 0.02 * Math.min(1, Math.max(0.3, (1.3 - y) / 1.1))
+  outer += depth * (1 - ridge)
+  // The part: a narrow groove over the crown, front to back.
+  const onTop = clamp01((y - 0.95) / 0.35) * clamp01((z + 2.3) / 0.5) * clamp01((-0.2 - z) / 0.4)
+  outer += 0.03 * Math.exp(-(((x - PART_X) / 0.04) ** 2)) * onTop
   // Solid: no hollow for the head — the face, which occludes, hides
   // whatever is behind it, and a hollow only doubled the triangles — but a
   // channel for the neck under it, so the back hair falls round the neck
@@ -69,6 +119,9 @@ export interface WigData {
   nrm: Float32Array
   uv: Float32Array
   col: Float32Array
+  /** Which way the hair runs at each vertex (rig space, not yet in the
+   *  surface): away from the part over the crown, then down. */
+  flow: Float32Array
   index: Uint32Array
 }
 
@@ -79,8 +132,10 @@ export function computeWig(): WigData {
   if (cache) return cache
   // (a coarse grid is plenty: the strands are in the texture, not the
   // mesh, and fewer triangles keep live frames quick)
-  const { pos, index } = surfaceNets(wigSdf, { x: -1.75, y: -1.85, z: -3.45 }, { x: 1.75, y: 2.45, z: 0.45 }, 0.04)
+  // (fine enough for the clumps' grooves: several cells across each)
+  const { pos, index } = surfaceNets(wigSdf, { x: -1.75, y: -1.85, z: -3.45 }, { x: 1.75, y: 2.45, z: 0.45 }, 0.039)
   const n = pos.length / 3
+  const flow = new Float32Array(n * 3)
   const nrm = new Float32Array(n * 3)
   const uv = new Float32Array(n * 2)
   const col = new Float32Array(n * 3)
@@ -115,7 +170,17 @@ export function computeWig(): WigData {
     // …and the curtains a shade deeper toward the face, where they turn in.
     const half = 0.92 - 0.2 * clamp01((-0.5 - y) / 1.0)
     const rim = y < 0.3 && z > -1.3 ? 0.72 + 0.28 * clamp01((Math.abs(x) - half) / 0.25) : 1
-    col.set(c.map((v) => v * under * wall * rim), i * 3)
+    // The grooves between clumps in shade, the crests catching light: what
+    // makes the clumps read.
+    const ridge = ridgeAt(x, y, z)
+    const groove = 0.8 + 0.2 * ridge
+    col.set(c.map((v) => v * under * wall * rim * groove), i * 3)
+    // Flow: over the crown, away from the part to either side; below it,
+    // straight down.
+    const top = clamp01((y - 0.7) / 0.9)
+    const fx = Math.sign(x - PART_X) * top
+    const fl = Math.hypot(fx, 1) || 1
+    flow.set([fx / fl, -1 / fl, 0], i * 3)
   }
   // Wind every triangle to face along its normal (the mesher's winding
   // depends on the field's sign convention; double-sided rendering flips
@@ -141,6 +206,7 @@ export function computeWig(): WigData {
   const N2 = Array.from(nrm)
   const U2 = Array.from(uv)
   const C2 = Array.from(col)
+  const F2 = Array.from(flow)
   for (let t = 0; t < idx.length; t += 3) {
     const us = [0, 1, 2].map((k) => U2[idx[t + k] * 2])
     if (Math.max(...us) - Math.min(...us) < 0.5) continue
@@ -155,15 +221,16 @@ export function computeWig(): WigData {
         N2.push(N2[v * 3], N2[v * 3 + 1], N2[v * 3 + 2])
         U2.push(U2[v * 2] + 1, U2[v * 2 + 1])
         C2.push(C2[v * 3], C2[v * 3 + 1], C2[v * 3 + 2])
+        F2.push(F2[v * 3], F2[v * 3 + 1], F2[v * 3 + 2])
       }
       idx[t + k] = w
     }
   }
-  cache = { pos: Float32Array.from(P2), nrm: Float32Array.from(N2), uv: Float32Array.from(U2), col: Float32Array.from(C2), index: idx }
+  cache = { pos: Float32Array.from(P2), nrm: Float32Array.from(N2), uv: Float32Array.from(U2), col: Float32Array.from(C2), flow: Float32Array.from(F2), index: idx }
   return cache
 }
 
-export const wigTransferables = (d: WigData) => [d.pos, d.nrm, d.uv, d.col, d.index].map((a) => a.buffer as ArrayBuffer)
+export const wigTransferables = (d: WigData) => [d.pos, d.nrm, d.uv, d.col, d.flow, d.index].map((a) => a.buffer as ArrayBuffer)
 
 let worker: Worker | null = null
 let pending: Promise<WigData> | null = null
@@ -389,6 +456,7 @@ export async function lavenderWig(): Promise<Model> {
   g.setAttribute('normal', new THREE.BufferAttribute(d.nrm, 3))
   g.setAttribute('uv', new THREE.BufferAttribute(d.uv, 2))
   g.setAttribute('color', new THREE.BufferAttribute(d.col, 3))
+  g.setAttribute('aFlow', new THREE.BufferAttribute(d.flow, 3))
   g.setIndex(new THREE.BufferAttribute(d.index, 1))
   g.computeBoundingSphere()
   const { map, normal } = strandMaps()
@@ -411,11 +479,11 @@ export async function lavenderWig(): Promise<Model> {
   material.onBeforeCompile = (sh) => {
     Object.assign(sh.uniforms, motion)
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vStrand;\n' + SWAY_GLSL)
+      .replace('#include <common>', '#include <common>\nattribute vec3 aFlow;\nvarying vec3 vStrand;\n' + SWAY_GLSL)
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
-  vStrand = normalize(normalMatrix * vec3(0.0, 1.0, 0.0));
+  vStrand = normalize(normalMatrix * aFlow);
   // (the lower half sways, more toward the hem; never the crown)
   float sw = smoothstep(-0.2, -1.5, position.y);
   transformed = swayed(transformed, sw * sw, position.x * 3.0 + position.z * 2.0);`,
@@ -429,7 +497,7 @@ export async function lavenderWig(): Promise<Model> {
     vec3 Lh = directionalLights[0].direction;
     vec3 Vh = normalize(vViewPosition);
     vec3 Hh = normalize(Lh + Vh);
-    // The strand's direction, in the surface: the head's "up" with the
+    // The strand's direction, in the surface: the hair's flow with the
     // normal taken out, tilted a touch to shift each lobe along it.
     vec3 T = normalize(vStrand - normal * dot(normal, vStrand));
     float t1 = dot(normalize(T + normal * 0.12), Hh);
