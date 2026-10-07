@@ -159,8 +159,23 @@ function headBody(x: number, y: number, z: number) {
   // Round, puffed cheeks below the eyes.
   for (const s of [-1, 1]) d = smin(d, ellipsoid(x - s * 0.46, y + 0.38, z - 0.0, 0.36, 0.32, 0.3), 0.2)
   d = smin(d, ellipsoid(xm, y + 0.7, z - 0.06 - ml * 0.5, 0.26, 0.14, 0.24), 0.14)
-  // The two round pads under the nose that the mouth curls round.
-  for (const s of [-1, 1]) d = smin(d, ellipsoid(xm - s * 0.135, y + 0.565, z - 0.4 - ml, 0.17, 0.14, 0.16), 0.035)
+  // The two round pads under the nose that the mouth curls round: made a
+  // little too big, then cut off along the mouth line, so their lower edge
+  // is exactly where the line is drawn — line and lip are one edge.
+  let pads = Infinity
+  for (const s of [-1, 1]) pads = smin(pads, ellipsoid(xm - s * 0.15, y + 0.6, z - 0.4 - ml, 0.23, 0.18, 0.16), 0.035)
+  const ax = Math.abs(x)
+  const lip = lipSegment(ax)
+  // ...below along the line, and at the sides where it turns up at the
+  // corners (the line's last point), the pads ending in that upturn.
+  const [cx] = LIP[LIP.length - 1]
+  // (the height gap over the line's slope ≈ the true distance to it, which
+  // keeps the cut clean where the line turns steeply up)
+  if (lip) pads = smax(pads, (lip.y - y) / Math.sqrt(1 + lip.slope * lip.slope), 0.012)
+  // (the side softly rounded, and just past the line, so the upturn sits
+  // on the pad's front rather than on a sharp wall)
+  pads = smax(pads, ax - cx - 0.02, 0.045)
+  d = smin(d, pads, 0.03)
   // ...with a shallow groove down between them from the nose.
   d = smax(d, -(Math.hypot(x / 0.5, (z - 0.58 - ml) / 0.5) * 0.5 - 0.018 + Math.max(0, y + 0.47) * 2 + Math.max(0, -0.68 - y) * 2), 0.02)
   // A short neck at the back.
@@ -784,6 +799,41 @@ function paintTexture() {
 
 /** The open mouth's lips: the upper lip's left half (from the middle out to
  *  its corner) and the lower lip (corner to corner). */
+/** The upper lip's line from the middle out to the corner (x >= 0), as
+ *  drawn: the closed "ω" (to where it starts to hook up), or the open
+ *  smile's upper lip. In the head's coordinates (muzzle width and nose
+ *  height applied). */
+function upperLipLine(): [number, number][] {
+  const half: [number, number][] =
+    D.mouth === 'open'
+      ? openMouth()[0].map(([x, y]) => [-x, y])
+      : [[0, -0.64], [0.06, -0.69], [0.16, -0.715], [0.26, -0.69], [0.33, -0.61], [0.365, -0.52]]
+  const dy = D.nose.y + 0.38
+  return half.map(([x, y]) => [x * D.muzzle.width, y + dy])
+}
+let LIP: [number, number][] = []
+
+/** The upper lip line's height at |x| = `ax`, or null beyond its corner. */
+function upperLipY(ax: number): number | null {
+  const s = lipSegment(ax)
+  return s ? s.y : null
+}
+
+/** Height and slope of the upper lip line at |x| = `ax`. */
+function lipSegment(ax: number): { y: number; slope: number } | null {
+  for (let i = 1; i < LIP.length; i++) {
+    const [x0, y0] = LIP[i - 1]
+    const [x1, y1] = LIP[i]
+    // (the last segment carries on a little past the corner, so the pads'
+    // cut has no gap there)
+    if (ax <= x1 || (i === LIP.length - 1 && ax <= x1 + 0.06)) {
+      const slope = (y1 - y0) / Math.max(1e-6, x1 - x0)
+      return { y: y0 + slope * (ax - x0), slope }
+    }
+  }
+  return null
+}
+
 function openMouth(): [[number, number][], [number, number][]] {
   const upper: [number, number][] = [[0, -0.645], [-0.07, -0.672], [-0.14, -0.682], [-0.21, -0.665], [-0.27, -0.62], [-0.3, -0.57]]
   const lower: [number, number][] = [[-0.27, -0.62], [-0.22, -0.69], [-0.13, -0.735], [0, -0.75], [0.13, -0.735], [0.22, -0.69], [0.27, -0.62]]
@@ -857,6 +907,7 @@ const built = new Map<string, THREE.BufferGeometry>()
 /** Make `d` the design being built (the field, ears and fur follow it). */
 function selectDesign(d: Design) {
   D = d
+  LIP = upperLipLine()
   EARS = [makeEar(-1), makeEar(1)]
   buildSpikes()
 }
@@ -977,7 +1028,12 @@ function animalHead(design: Design): Model {
         ]
   ).map((st) => st.map(([x, y]): [number, number] => [x * mw, y + dy]))
   for (const st of strokes) {
-    const pts = st.map(([x, y]) => onFront(x, y).add(V(0, 0, 0.004)))
+    const pts = st.map(([x, y]) => {
+      // Points on the upper lip sit on the pads' cut edge, a hair above it.
+      const lip = upperLipY(Math.abs(x))
+      const onLip = lip !== null && Math.abs(y - lip) < 0.004
+      return onFront(x, onLip ? y + 0.006 : y).add(V(0, onLip ? -0.004 : 0, 0.004))
+    })
     sculpt.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 48, 0.0085, 8, false), line))
     for (const end of [pts[0], pts[pts.length - 1]]) {
       const cap = new THREE.Mesh(new THREE.SphereGeometry(0.0085, 8, 6), line)
