@@ -15,11 +15,27 @@ const MODEL_URL = '/mediapipe/face_landmarker.task'
 let landmarkerPromise: Promise<FaceLandmarker> | null = null
 let currentMode: 'IMAGE' | 'VIDEO' = 'IMAGE'
 
+let filesetPromise: ReturnType<typeof FilesetResolver.forVisionTasks> | null = null
+/** The vision WASM runtime (loaded once, shared by every task). */
+export const visionFileset = () => (filesetPromise ??= FilesetResolver.forVisionTasks(WASM_BASE_URL))
+
+/** A landmarker of its own (the video editor's, tracking several faces),
+ *  as lenient as the camera's. */
+export async function createLandmarker(runningMode: 'IMAGE' | 'VIDEO', numFaces: number): Promise<FaceLandmarker> {
+  return FaceLandmarker.createFromOptions(await visionFileset(), {
+    baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
+    runningMode,
+    numFaces,
+    minFaceDetectionConfidence: 0.35,
+    minFacePresenceConfidence: 0.4,
+    minTrackingConfidence: 0.35,
+  })
+}
+
 function getLandmarker(): Promise<FaceLandmarker> {
   if (!landmarkerPromise) {
     landmarkerPromise = (async () => {
-      const filesetResolver = await FilesetResolver.forVisionTasks(WASM_BASE_URL)
-      return FaceLandmarker.createFromOptions(filesetResolver, {
+      return FaceLandmarker.createFromOptions(await visionFileset(), {
         baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
         runningMode: 'IMAGE',
         numFaces: 1,

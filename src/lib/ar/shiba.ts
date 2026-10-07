@@ -790,15 +790,20 @@ function openMouth(): [[number, number][], [number, number][]] {
   return [upper, lower]
 }
 
-/** The surface point marching in from `from` along `dir`. */
-function march(from: V3, dir: V3) {
+/** The surface point marching in from `from` along `dir`, or null if the
+ *  ray misses the head (it would otherwise run off to infinity). */
+function march(from: V3, dir: V3): V3 | null {
   const q = from.clone()
+  let travelled = 0
   for (let i = 0; i < 300; i++) {
     const d = sdf(q.x, q.y, q.z)
-    if (d < 5e-4) break
-    q.addScaledVector(dir, Math.max(d * 0.8, 1e-3))
+    if (d < 5e-4) return q
+    const step = Math.max(d * 0.8, 1e-3)
+    travelled += step
+    if (travelled > 4) return null
+    q.addScaledVector(dir, step)
   }
-  return q
+  return null
 }
 
 /** A decal over (cx, cy) conformed to the head, projected along the
@@ -816,17 +821,21 @@ function decal(cx: number, cy: number, w: number, h: number, mat: THREE.Material
   n.normalize()
   const ux = new THREE.Vector3().crossVectors(V(0, 1, 0), n).normalize()
   const back = n.clone().negate()
+  const miss = new Set<number>()
   for (let j = 0; j <= N; j++)
     for (let i = 0; i <= N; i++) {
       const u = i / N - 0.5
       const v = j / N - 0.5
       const q = march(c.clone().addScaledVector(n, 1).addScaledVector(ux, u * w).add(V(0, v * h, 0)), back)
-      pts.push(q.x + n.x * lift, q.y, q.z + n.z * lift)
+      // (a miss: parked at the centre, and its cells dropped below)
+      if (!q) miss.add(pts.length / 3)
+      const at = q ?? c
+      pts.push(at.x + n.x * lift, at.y, at.z + n.z * lift)
       uvs.push(u + 0.5, v + 0.5)
     }
   // Skip cells stretched across a fold (where the march slid off the side).
   const step = (Math.max(w, h) / N) * 2.5
-  const far = (a: number, b: number) => Math.hypot(pts[a * 3] - pts[b * 3], pts[a * 3 + 1] - pts[b * 3 + 1], pts[a * 3 + 2] - pts[b * 3 + 2]) > step
+  const far = (a: number, b: number) => miss.has(a) || miss.has(b) || Math.hypot(pts[a * 3] - pts[b * 3], pts[a * 3 + 1] - pts[b * 3 + 1], pts[a * 3 + 2] - pts[b * 3 + 2]) > step
   for (let j = 0; j < N; j++)
     for (let i = 0; i < N; i++) {
       const a = j * (N + 1) + i

@@ -84,13 +84,30 @@ export function faceFocus(landmarks: NormalizedLandmark[] | null, w: number, h: 
  * this flag — it's equally cheap (a shader, not a CPU blur) either way.
  */
 export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandmark[] | null, rawParams: EditParams, highQuality = true): HTMLCanvasElement {
-  const params = calibrate(withEffectBoost(rawParams))
-  const preset = findPreset(params.filterId)
-  if (!landmarks) return applyFilter(base, preset, params.filterStrength)
+  return processFaces(base, landmarks ? [{ landmarks, params: rawParams }] : [], rawParams, highQuality)
+}
 
-  const mask = buildSkinMask(landmarks, base.width, base.height)
-  const ovalLoop = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_FACE_OVAL)
-  const bounds = loopBoundsPx(ovalLoop, landmarks, base.width, base.height, Math.max(20, base.width * 0.05))
+/** One face in a frame and the edit it gets. `slot` keeps a 3D effect's
+ *  model to this face when several faces wear the same effect. */
+export interface FaceEdit {
+  landmarks: NormalizedLandmark[]
+  params: EditParams
+  slot?: string
+}
+
+/**
+ * The same pipeline for any number of faces, each with its own Beauty,
+ * Shape and Effect (the video editor gives each person their own): every
+ * face's tone work on one shared canvas, then every face's reshape in
+ * turn (each warp leaves everything outside its own mesh untouched), then
+ * every face's effect — after all the reshapes, so one face's warp never
+ * bends another's ears — and finally the frame-wide filter, which comes
+ * from `frame` (one look for the whole picture). `t`: the effects' clock
+ * (animated props), defaulting to now for live frames.
+ */
+export function processFaces(base: HTMLCanvasElement, faces: FaceEdit[], frame: Pick<EditParams, 'filterId' | 'filterStrength'>, highQuality = true, t?: number): HTMLCanvasElement {
+  const preset = findPreset(frame.filterId)
+  if (!faces.length) return applyFilter(base, preset, frame.filterStrength)
 
   // One shared canvas that every tone/beauty effect mutates in place over
   // just its own bounds rect, instead of each allocating a full-frame
@@ -102,34 +119,42 @@ export function processFrame(base: HTMLCanvasElement, landmarks: NormalizedLandm
   working.width = base.width
   working.height = base.height
   working.getContext('2d')!.drawImage(base, 0, 0)
+  const ovalLoop = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_FACE_OVAL)
+  const prepared = faces.map((f) => ({ ...f, params: calibrate(withEffectBoost(f.params)) }))
 
-  if (highQuality) {
-    if (params.whitening > 0.001) applyWhitening(working, mask, params.whitening, bounds)
-    if (params.acneRemoval > 0.001) applyAcneRemoval(working, mask, params.acneRemoval, bounds, true)
-    if (params.wrinkleRemoval > 0.001) applyWrinkleRemoval(working, mask, params.wrinkleRemoval, bounds, true)
-    smoothSkin(working, mask, params.smoothness, bounds, true)
-  } else {
-    // Even with each effect already cropping its own blurs to the face's
-    // bounding box instead of the full frame, running the five separate
-    // functions still cost 150-200ms/frame at live resolution — the
-    // remaining dominant cost was each one doing its own
-    // getImageData/putImageData round trip on the same ~500x600 region.
-    // This fuses all five into one shared read, one shared per-pixel
-    // loop, and one shared write (see livePass.ts for the accepted
-    // fidelity tradeoffs that come with fusing them).
-    applyLiveTonePass(working, mask, params, bounds)
+  for (const { landmarks, params } of prepared) {
+    const mask = buildSkinMask(landmarks, base.width, base.height)
+    const bounds = loopBoundsPx(ovalLoop, landmarks, base.width, base.height, Math.max(20, base.width * 0.05))
+    if (highQuality) {
+      if (params.whitening > 0.001) applyWhitening(working, mask, params.whitening, bounds)
+      if (params.acneRemoval > 0.001) applyAcneRemoval(working, mask, params.acneRemoval, bounds, true)
+      if (params.wrinkleRemoval > 0.001) applyWrinkleRemoval(working, mask, params.wrinkleRemoval, bounds, true)
+      smoothSkin(working, mask, params.smoothness, bounds, true)
+    } else {
+      // Even with each effect already cropping its own blurs to the face's
+      // bounding box instead of the full frame, running the five separate
+      // functions still cost 150-200ms/frame at live resolution — the
+      // remaining dominant cost was each one doing its own
+      // getImageData/putImageData round trip on the same ~500x600 region.
+      // This fuses all five into one shared read, one shared per-pixel
+      // loop, and one shared write (see livePass.ts for the accepted
+      // fidelity tradeoffs that come with fusing them).
+      applyLiveTonePass(working, mask, params, bounds)
+    }
+    if (params.mouthCornerSmooth > 0.001) {
+      const corners = [LEFT_MOUTH_CORNER, RIGHT_MOUTH_CORNER].map((idx) => ({ x: landmarks[idx].x * base.width, y: landmarks[idx].y * base.height }))
+      const radius = (bounds.maxX - bounds.minX) * 0.12
+      applyMouthCornerSmoothing(working, corners, radius, params.mouthCornerSmooth)
+    }
   }
-  if (params.mouthCornerSmooth > 0.001) {
-    const corners = [LEFT_MOUTH_CORNER, RIGHT_MOUTH_CORNER].map((idx) => ({ x: landmarks[idx].x * base.width, y: landmarks[idx].y * base.height }))
-    const radius = (bounds.maxX - bounds.minX) * 0.12
-    applyMouthCornerSmoothing(working, corners, radius, params.mouthCornerSmooth)
-  }
-  const reshaped = applyReshape(working, landmarks, params)
-  if (params.effectId !== 'none') {
+  let reshaped = working
+  for (const { landmarks, params } of prepared) reshaped = applyReshape(reshaped, landmarks, params)
+  for (const { landmarks, params, slot } of prepared) {
+    if (params.effectId === 'none') continue
     // Effects track the face as reshaped, so ears sit on the slimmed head.
-    const t = deformTargets(landmarks, params, base.width / base.height)
-    const pts = Array.from({ length: t.length / 2 }, (_, i) => ({ x: t[i * 2] * base.width, y: t[i * 2 + 1] * base.height, z: landmarks[i].z * base.width }))
-    drawEffect(reshaped, pts, params.effectId, highQuality ? 0.6 : performance.now() / 1000, !highQuality)
+    const tg = deformTargets(landmarks, params, base.width / base.height)
+    const pts = Array.from({ length: tg.length / 2 }, (_, i) => ({ x: tg[i * 2] * base.width, y: tg[i * 2 + 1] * base.height, z: landmarks[i].z * base.width }))
+    drawEffect(reshaped, pts, params.effectId, t ?? (highQuality ? 0.6 : performance.now() / 1000), !highQuality, slot)
   }
-  return applyFilter(reshaped, preset, params.filterStrength)
+  return applyFilter(reshaped, preset, frame.filterStrength)
 }

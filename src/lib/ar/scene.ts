@@ -373,7 +373,7 @@ function updateEnvironment(st: State, frame: HTMLCanvasElement, force: boolean) 
 
 /** Renders the 3D effect over `frame` (in place). `P` are landmark pixel
  *  positions with z in pixels (MediaPipe z × width, negative = nearer). */
-export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, build: () => Model, t: number, live: boolean) {
+export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, build: () => Model, t: number, live: boolean, slot = '') {
   S ??= init()
   const st = S
   const W = frame.width
@@ -411,13 +411,16 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
   hp.setXYZ(OVAL.length * (HEAD_RINGS + 1), HEAD_BACK.x, HEAD_BACK.y, HEAD_BACK.z)
   hp.needsUpdate = true
 
-  let model = st.models.get(effectId)
+  // One model per effect and face, so two people wearing the same effect
+  // never share (or fight over) one model's state.
+  const key = slot ? `${slot}:${effectId}` : effectId
+  let model = st.models.get(key)
   if (!model) {
     model = build()
-    st.models.set(effectId, model)
+    st.models.set(key, model)
     st.rig.add(model.root)
   }
-  for (const [id, m] of st.models) m.root.visible = id === effectId
+  for (const [id, m] of st.models) m.root.visible = id === key
   model.update?.(rig, t)
   st.headParts.forEach((o, i) => (o.visible = model.occludeFace ? i < 2 : !model.fullHead))
 

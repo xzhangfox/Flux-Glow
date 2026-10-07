@@ -4,6 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>Flux Glow</title>
+    <!-- Nothing the app processes leaves the device: scripts may only talk
+         to this origin. (MediaPipe's tasks otherwise post usage logs to
+         Google every minute on their own.) -->
+    <meta http-equiv="Content-Security-Policy" content="connect-src 'self' blob: data:" />
 
     <!-- PWA / "Add to Home Screen" — see flux-ambient-ui-system and
          ios-pwa-icon-design skills. apple-touch-icon and the manifest

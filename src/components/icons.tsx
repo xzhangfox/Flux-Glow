@@ -308,3 +308,60 @@ export function IconPlus(props: IconProps) {
     </svg>
   )
 }
+
+export function IconPlay(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M8 5.5v13l10.5-6.5L8 5.5z" fill="currentColor" />
+    </svg>
+  )
+}
+
+export function IconPause(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <rect x="6.5" y="5.5" width="3.6" height="13" rx="1" fill="currentColor" />
+      <rect x="13.9" y="5.5" width="3.6" height="13" rx="1" fill="currentColor" />
+    </svg>
+  )
+}
+
+export function IconVideo(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <rect x="3" y="6" width="13" height="12" rx="2.5" />
+      <path d="M16 10.5l5-3v9l-5-3" />
+    </svg>
+  )
+}
+
+export function IconPeople(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <circle cx="9" cy="8.5" r="3.2" />
+      <path d="M3.5 19c.6-3.2 2.8-5 5.5-5s4.9 1.8 5.5 5" />
+      <circle cx="16.8" cy="9.2" r="2.6" />
+      <path d="M16.3 14c2.3.1 3.8 1.6 4.3 4.3" />
+    </svg>
+  )
+}
+
+export function IconMerge(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M6 4v4.5a4 4 0 0 0 4 4h4a4 4 0 0 1 4 4V20" />
+      <path d="M18 4v4.5a4 4 0 0 1-4 4" />
+      <path d="M15.5 17.5L18 20l2.5-2.5" />
+    </svg>
+  )
+}
+
+export function IconEyeOff(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M3 12s3.2-6 9-6c1.6 0 3 .4 4.2 1M21 12s-3.2 6-9 6c-1.6 0-3-.4-4.2-1" />
+      <path d="M9.8 14.2a3 3 0 0 1 4.4-4.4" />
+      <path d="M4 20L20 4" />
+    </svg>
+  )
+}

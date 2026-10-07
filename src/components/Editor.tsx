@@ -4,16 +4,18 @@ import { detectFaceLandmarks, LiveFaceTracker } from '../lib/faceLandmarker'
 import { processFrame, DEFAULT_PARAMS, faceFocus, type EditParams, type NumericParam } from '../lib/pipeline'
 import { renderFilterThumbnails } from '../lib/filters'
 import { ASPECT_MODES, aspectRatioFor, cropRectFor, drawFrame, remapLandmarks, type AspectMode } from '../lib/frame'
-import AdjustPanel, { type AdjustItem } from './AdjustPanel'
+import AdjustPanel from './AdjustPanel'
+import { BEAUTY_KEYS, SHAPE_KEYS, beautyItems, changedFrom, shapeItems } from './adjustItems'
 import FilterPanel from './FilterPanel'
 import ThumbStrip from './ThumbStrip'
 import Slider from './Slider'
 import StickerPanel, { type StickerRequest } from './StickerPanel'
 import StickerLayer from './StickerLayer'
-import { SHAPE_PARAMS } from '../lib/deform'
 import { LOOKS, applyLook, findLook } from '../lib/looks'
 import { EFFECTS, findEffect, preloadAR, setCustomImage } from '../lib/effects'
 import CropDialog from './CropDialog'
+import VideoReview from './VideoReview'
+import { downloadBlob, isIOS, isVideoFile, timestampedName } from '../lib/save'
 import { renderFaceThumbs } from '../lib/thumbs'
 import { artImage, drawStickers, emojiCanvas, photoSticker, placeSticker, textCanvas, type Sticker } from '../lib/stickers'
 import ZoomControl from './ZoomControl'
@@ -30,16 +32,10 @@ import {
   IconFaceOutline,
   IconPalette,
   IconFlipCamera,
-  IconDroplet,
   IconImage,
   IconSparkle,
-  IconSun,
-  IconWhiten,
-  IconTarget,
-  IconWave,
   IconTimer,
   IconGrid,
-  RegionIcon,
   IconWand,
   IconEars,
   IconSticker,
@@ -61,8 +57,6 @@ const LIVE_MAX_DIMENSION = 1280
 const LIVE_FRAME_INTERVAL_MS = 33
 const TIMER_STEPS = [0, 3, 10] as const
 
-const BEAUTY_KEYS: NumericParam[] = ['smoothness', 'whitening', 'acneRemoval', 'wrinkleRemoval', 'mouthCornerSmooth', 'fillLight']
-const SHAPE_KEYS: NumericParam[] = [...SHAPE_PARAMS]
 
 export type Source = { kind: 'image'; file: File } | { kind: 'live' }
 
@@ -88,23 +82,6 @@ function loadImage(file: File): Promise<HTMLImageElement> {
 const FULL_FRAME = { x0: 0, y0: 0, fw: 1, fh: 1 }
 
 const nextPaint = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)))
-
-const isIOS = typeof navigator !== 'undefined' && (/iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1))
-
-function timestampedName(): string {
-  const d = new Date()
-  const p = (n: number) => String(n).padStart(2, '0')
-  return `FluxGlow_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.jpg`
-}
-
-function downloadBlob(blob: Blob, name: string) {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = name
-  a.click()
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
-}
 
 function useElementSize(ref: RefObject<HTMLElement | null>) {
   const [size, setSize] = useState({ width: 0, height: 0 })
@@ -183,7 +160,20 @@ function GridOverlay() {
   )
 }
 
-export default function Editor({ source, onReset, onPickImage, onTrySample }: { source: Source; onReset: () => void; onPickImage?: (file: File) => void; onTrySample?: () => void }) {
+export default function Editor({
+  source,
+  onReset,
+  onPickImage,
+  onEditVideo,
+  onTrySample,
+}: {
+  source: Source
+  onReset: () => void
+  onPickImage?: (file: File) => void
+  /** Opens a video in the video editor, starting from `params`. */
+  onEditVideo?: (file: Blob, params?: EditParams) => void
+  onTrySample?: () => void
+}) {
   const [params, setParams] = useState<EditParams>(DEFAULT_PARAMS)
   const [status, setStatus] = useState<Status>('loading')
   const [live, setLive] = useState(source.kind === 'live')
@@ -195,7 +185,12 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
   // Video: long-press the shutter to record.
   const [recordingSince, setRecordingSince] = useState<number | null>(null)
   const [recordTick, setRecordTick] = useState(0)
-  const recRef = useRef<{ rec: MediaRecorder; chunks: Blob[]; audio: MediaStream | null } | null>(null)
+  // Two recordings at once: what the viewfinder shows (effects and all) to
+  // keep as is, and the same frames before any retouch, so the video editor
+  // can redo the retouch person by person.
+  const recRef = useRef<{ rec: MediaRecorder; audio: MediaStream | null; clean: MediaRecorder | null } | null>(null)
+  const cleanRef = useRef<HTMLCanvasElement | null>(null)
+  const [review, setReview] = useState<{ video: Blob; clean: Blob | null; params: EditParams } | null>(null)
   const pressTimerRef = useRef<number | null>(null)
   const pressHandledRef = useRef(false)
   const [processing, setProcessing] = useState(false)
@@ -392,6 +387,14 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
             resultRef.current = processFrame(base, landmarks, paramsRef.current, false)
             setStatus(landmarks ? 'ready' : 'no-face')
             render()
+            const clean = recRef.current?.clean ? cleanRef.current : null
+            if (clean) {
+              if (clean.width !== base.width || clean.height !== base.height) {
+                clean.width = base.width
+                clean.height = base.height
+              }
+              clean.getContext('2d')!.drawImage(base, 0, 0)
+            }
           })
           .catch(() => {})
           .finally(() => {
@@ -602,28 +605,16 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
   }
 
   // ---- Video ----
-  const saveVideo = async (blob: Blob, ext: string) => {
-    const name = timestampedName().replace(/\.jpg$/, `.${ext}`)
-    const file = new File([blob], name, { type: blob.type })
-    if (navigator.canShare?.({ files: [file] })) {
-      try {
-        await navigator.share({ files: [file] })
-        return
-      } catch {
-        // dismissed: fall through to a download
-      }
-    }
-    downloadBlob(blob, name)
-    showToast('Video saved')
-  }
-
   const stopRecording = useCallback(() => {
     const r = recRef.current
-    if (r && r.rec.state !== 'inactive') r.rec.stop()
+    if (!r) return
+    if (r.rec.state !== 'inactive') r.rec.stop()
+    if (r.clean && r.clean.state !== 'inactive') r.clean.stop()
   }, [])
 
   const startRecording = async () => {
-    const canvas = displayRef.current as (HTMLCanvasElement & { captureStream?: (fps?: number) => MediaStream }) | null
+    type CaptureCanvas = HTMLCanvasElement & { captureStream?: (fps?: number) => MediaStream }
+    const canvas = displayRef.current as CaptureCanvas | null
     if (!canvas?.captureStream || typeof MediaRecorder === 'undefined') {
       showToast("Video recording isn't supported in this browser")
       return
@@ -643,26 +634,60 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
       audio?.getTracks().forEach((t) => t.stop())
       return
     }
-    const type = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find((t) => MediaRecorder.isTypeSupported(t))
+    // MP4 with H.264 where it's offered (Safari, current Chrome): it plays
+    // everywhere. Otherwise WebM — never a bare "video/mp4", for which some
+    // browsers write VP9 into MP4 with a codec tag decoders then reject
+    // (the video editor couldn't open the recording).
+    const type = ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4;codecs=avc1', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find((t) => MediaRecorder.isTypeSupported(t))
+    const opts = (bps: number) => (type ? { mimeType: type, videoBitsPerSecond: bps } : undefined)
     let rec: MediaRecorder
     try {
-      rec = new MediaRecorder(stream, type ? { mimeType: type, videoBitsPerSecond: 6_000_000 } : undefined)
+      rec = new MediaRecorder(stream, opts(6_000_000))
     } catch {
       audio?.getTracks().forEach((t) => t.stop())
       showToast("Video recording isn't supported in this browser")
       return
     }
+    // The untouched copy, for editing afterwards. Best effort: without it
+    // the editor starts from the retouched video instead.
+    const cleanCanvas = (cleanRef.current ??= document.createElement('canvas')) as CaptureCanvas
+    if (baseRef.current) {
+      cleanCanvas.width = baseRef.current.width
+      cleanCanvas.height = baseRef.current.height
+      cleanCanvas.getContext('2d')!.drawImage(baseRef.current, 0, 0)
+    }
+    let clean: MediaRecorder | null = null
+    try {
+      const cs = cleanCanvas.captureStream!(30)
+      audio?.getAudioTracks().forEach((t) => cs.addTrack(t.clone()))
+      clean = new MediaRecorder(cs, opts(8_000_000))
+    } catch {
+      clean = null
+    }
     const chunks: Blob[] = []
+    const cleanChunks: Blob[] = []
     rec.ondataavailable = (e) => e.data.size && chunks.push(e.data)
-    rec.onstop = () => {
-      recRef.current?.audio?.getTracks().forEach((t) => t.stop())
+    if (clean) clean.ondataavailable = (e) => e.data.size && cleanChunks.push(e.data)
+    const mime = () => rec.mimeType || type || 'video/webm'
+    const stopped = (r: MediaRecorder | null) => new Promise<void>((res) => (!r || r.state === 'inactive' ? res() : r.addEventListener('stop', () => res(), { once: true })))
+    const params = { ...paramsRef.current }
+    recRef.current = { rec, audio, clean }
+    rec.start(250)
+    clean?.start(250)
+    // (only once both have started: a recorder not yet started reads as
+    // already stopped)
+    Promise.all([stopped(rec), stopped(clean)]).then(() => {
+      const r = recRef.current
+      r?.audio?.getTracks().forEach((t) => t.stop())
       recRef.current = null
       setRecordingSince(null)
-      const mime = rec.mimeType || type || 'video/webm'
-      if (chunks.length) saveVideo(new Blob(chunks, { type: mime }), mime.includes('mp4') ? 'mp4' : 'webm')
-    }
-    recRef.current = { rec, chunks, audio }
-    rec.start(250)
+      if (!chunks.length) return
+      const video = new Blob(chunks, { type: mime() })
+      const cleanBlob = cleanChunks.length ? new Blob(cleanChunks, { type: clean?.mimeType || mime() }) : null
+      // Watch it before keeping it: the camera pauses under the review.
+      stopLive()
+      setReview({ video, clean: cleanBlob, params })
+    })
     navigator.vibrate?.(25)
     setRecordingSince(Date.now())
   }
@@ -804,7 +829,7 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
   const handleSave = async () => {
     const blob = await exportBlob()
     if (!blob) return
-    const name = timestampedName()
+    const name = timestampedName('jpg')
     const file = new File([blob], name, { type: 'image/jpeg' })
     if (isIOS && navigator.canShare?.({ files: [file] })) {
       try {
@@ -821,7 +846,7 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
   const handleShare = async () => {
     const blob = await exportBlob()
     if (!blob) return
-    const name = timestampedName()
+    const name = timestampedName('jpg')
     const file = new File([blob], name, { type: 'image/jpeg' })
     if (navigator.canShare?.({ files: [file] })) {
       try {
@@ -835,65 +860,9 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
     showToast('Sharing unavailable — saved instead')
   }
 
-  const item = (key: NumericParam, label: string, icon: ReactNode, bidirectional = false): AdjustItem => ({
-    key,
-    label,
-    icon,
-    value: params[key],
-    defaultValue: DEFAULT_PARAMS[key],
-    onChange: set(key),
-    bidirectional,
-  })
-
-  const beautyItems: AdjustItem[] = [
-    item('smoothness', 'Smooth', <IconDroplet className="w-5 h-5" />),
-    item('whitening', 'Whiten', <IconWhiten className="w-5 h-5" />),
-    item('acneRemoval', 'Blemish', <IconTarget className="w-5 h-5" />),
-    item('wrinkleRemoval', 'Wrinkle', <IconWave className="w-5 h-5" />),
-    item('mouthCornerSmooth', 'Folds', <RegionIcon dot={[9, 15.6]} pair className="w-5 h-5" />),
-    item('fillLight', 'Light', <IconSun className="w-5 h-5" />),
-  ]
-  const R = (dot: [number, number], pair = false) => <RegionIcon dot={dot} pair={pair} className="w-5 h-5" />
-  const group = (key: string, label: string, children: AdjustItem[]): AdjustItem => ({ key, label, icon: null, children })
-  const shapeItems: AdjustItem[] = [
-    group('faceGroup', 'Face', [
-      item('face', 'Slim', R([7.2, 13.8], true), true),
-      item('vJaw', 'V Jaw', R([8.2, 15.6], true), true),
-      item('chin', 'Chin', R([12, 17.2]), true),
-      item('forehead', 'Forehead', R([12, 5.2]), true),
-      item('temple', 'Temple', R([7.2, 7.6], true), true),
-      item('cheekbone', 'Cheekbone', R([6.8, 11.5], true), true),
-    ]),
-    group('eyeGroup', 'Eyes', [
-      item('eyes', 'Size', R([9, 10.2], true), true),
-      item('eyeWidth', 'Width', R([8.4, 10.2], true), true),
-      item('eyeHeight', 'Height', R([9, 9.8], true), true),
-      item('eyeTilt', 'Tilt', R([7.8, 9.7], true), true),
-      item('eyeDistance', 'Spacing', R([7.6, 10.2], true), true),
-      item('eyePosition', 'Position', R([9, 9.4], true), true),
-    ]),
-    group('browGroup', 'Brows', [
-      item('eyebrowHeight', 'Height', R([9, 8], true), true),
-      item('browTilt', 'Tilt', R([7.4, 7.6], true), true),
-      item('browDistance', 'Spacing', R([10.4, 8], true), true),
-    ]),
-    group('noseGroup', 'Nose', [
-      item('nose', 'Size', R([12, 12.5]), true),
-      item('noseWings', 'Wings', R([10.8, 12.8], true), true),
-      item('noseTip', 'Tip', R([12, 13]), true),
-      item('noseLength', 'Length', R([12, 11.6]), true),
-      item('noseBridge', 'Bridge', R([12, 9.3]), true),
-    ]),
-    group('mouthGroup', 'Mouth', [
-      item('mouth', 'Size', R([12, 14.3]), true),
-      item('mouthWidth', 'Width', R([10, 14.3], true), true),
-      item('mouthUpperLip', 'Upper Lip', R([12, 13.6]), true),
-      item('mouthLowerLip', 'Lower Lip', R([12, 15.1]), true),
-      item('mouthCorners', 'Smile', R([9.6, 14], true), true),
-      item('mouthPosition', 'Position', R([12, 13.2]), true),
-    ]),
-  ]
-  const changedFrom = (keys: NumericParam[]) => keys.some((k) => Math.abs(params[k] - DEFAULT_PARAMS[k]) > 0.005)
+  const setParam = (key: NumericParam, v: number) => setParams((p) => ({ ...p, [key]: v }))
+  const beauty = beautyItems(params, setParam)
+  const shape = shapeItems(params, setParam)
 
   const togglePanel = (p: Panel) => setPanel((v) => (v === p ? null : p))
   const noFace = status === 'no-face'
@@ -1080,8 +1049,8 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
                 )}
               </div>
             )}
-            {panel === 'beauty' && <AdjustPanel title="Beauty" items={beautyItems} disabled={noFace} />}
-            {panel === 'shape' && <AdjustPanel title="Shape" items={shapeItems} disabled={noFace} tabs />}
+            {panel === 'beauty' && <AdjustPanel title="Beauty" items={beauty} disabled={noFace} />}
+            {panel === 'shape' && <AdjustPanel title="Shape" items={shape} disabled={noFace} tabs />}
             {panel === 'effects' && (
               <div>
                 <div className="flex items-center justify-between h-7 mb-3">
@@ -1164,8 +1133,8 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
           const left = (
             <>
               <TrayButton compact={c} icon={IconWand} label="Looks" toggle active={panel === 'looks'} dot={lookId !== null} onClick={() => togglePanel('looks')} />
-              <TrayButton compact={c} icon={IconSparkle} label="Beauty" toggle active={panel === 'beauty'} dot={changedFrom(BEAUTY_KEYS)} onClick={() => togglePanel('beauty')} />
-              <TrayButton compact={c} icon={IconFaceOutline} label="Shape" toggle active={panel === 'shape'} dot={changedFrom(SHAPE_KEYS)} onClick={() => togglePanel('shape')} />
+              <TrayButton compact={c} icon={IconSparkle} label="Beauty" toggle active={panel === 'beauty'} dot={changedFrom(params, BEAUTY_KEYS)} onClick={() => togglePanel('beauty')} />
+              <TrayButton compact={c} icon={IconFaceOutline} label="Shape" toggle active={panel === 'shape'} dot={changedFrom(params, SHAPE_KEYS)} onClick={() => togglePanel('shape')} />
             </>
           )
           const right = (
@@ -1224,14 +1193,36 @@ export default function Editor({ source, onReset, onPickImage, onTrySample }: { 
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
+        accept={onEditVideo ? 'image/*,video/*' : 'image/*'}
         className="hidden"
         onChange={(e) => {
           const file = e.target.files?.[0]
-          if (file) onPickImage?.(file)
+          if (file && isVideoFile(file) && onEditVideo) onEditVideo(file)
+          else if (file) onPickImage?.(file)
           e.target.value = ''
         }}
       />
+      {review && (
+        <VideoReview
+          blob={review.video}
+          onClose={() => {
+            setReview(null)
+            startLive()
+          }}
+          onEdit={
+            onEditVideo
+              ? () => {
+                  const r = review
+                  setReview(null)
+                  // The untouched copy starts from the settings it was
+                  // filmed with; the retouched one (no copy) from scratch.
+                  onEditVideo(r.clean ?? r.video, r.clean ? r.params : { ...DEFAULT_PARAMS, smoothness: 0, face: 0 })
+                }
+              : undefined
+          }
+          editLabel="Edit people"
+        />
+      )}
     </div>
   )
 }

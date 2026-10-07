@@ -248,8 +248,10 @@ export function setCustomImage(image: HTMLCanvasElement) {
 export const getCustomImage = () => custom.image
 
 /** Draw `effectId` onto `canvas` (in place). `P` are landmark pixel
- *  positions; z is MediaPipe's relative depth in pixels (negative = nearer). */
-export function drawEffect(canvas: HTMLCanvasElement, P: P3[], effectId: string, t = 0, live = false) {
+ *  positions; z is MediaPipe's relative depth in pixels (negative = nearer).
+ *  `slot`: whose face this is, when a frame has several (each keeps its
+ *  own model). */
+export function drawEffect(canvas: HTMLCanvasElement, P: P3[], effectId: string, t = 0, live = false, slot = '') {
   if (effectId === 'none') return
   const ctx = canvas.getContext('2d')!
   const f = faceGeometry(P)
@@ -268,7 +270,7 @@ export function drawEffect(canvas: HTMLCanvasElement, P: P3[], effectId: string,
     const special: Record<string, () => import('./ar/scene').Model> = { spider: spiderMask, bat: batCowl, foxhead: foxHead, huskyhead: huskyHead, shibahead: shibaHead, custom: () => faceSticker(() => custom) }
     const build = special[effectId] ?? (() => buildModel(effectId))
     try {
-      renderAR(canvas, P, effectId, build, t, live)
+      renderAR(canvas, P, effectId, build, t, live, slot)
     } catch (err) {
       // No WebGL (or it was lost): the photo is still fine without the prop.
       console.warn('AR effect unavailable', err)
