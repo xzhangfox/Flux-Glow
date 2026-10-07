@@ -6,6 +6,7 @@ import { renderFilterThumbnails } from '../lib/filters'
 import { ASPECT_MODES, aspectRatioFor, cropRectFor, drawFrame, remapLandmarks, type AspectMode } from '../lib/frame'
 import BgProtectToggle from './BgProtectToggle'
 import { loadBgProtect, saveBgProtect } from '../lib/bgProtect'
+import SettingsSheet from './SettingsSheet'
 import AdjustPanel from './AdjustPanel'
 import { BEAUTY_KEYS, SHAPE_KEYS, beautyItems, changedFrom, shapeItems } from './adjustItems'
 import FilterPanel from './FilterPanel'
@@ -43,6 +44,7 @@ import {
   IconSticker,
   IconRefresh,
   IconPlus,
+  IconSettings,
 } from './icons'
 
 // Saved photos and uploads are worked on at up to this size — phone photos
@@ -176,6 +178,7 @@ export default function Editor({
   onEditVideo?: (file: Blob, params?: EditParams) => void
   onTrySample?: () => void
 }) {
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [params, setParams] = useState<EditParams>(() => ({ ...DEFAULT_PARAMS, protectBackground: loadBgProtect() }))
   const [status, setStatus] = useState<Status>('loading')
   const [live, setLive] = useState(source.kind === 'live')
@@ -893,7 +896,9 @@ export default function Editor({
   const previewStyle = fullBleed ? { top: 0, bottom: 0 } : { top: `calc(${topInset} + 3.25rem)`, bottom: (trayH.current || trayBox.height) + 44 }
 
   return (
-    <div className="fixed inset-0 bg-black overflow-hidden select-none">
+    // (No backdrop of its own: around the picture, the theme's ambient
+    // background shows through.)
+    <div className="fixed inset-0 overflow-hidden select-none">
       <video ref={videoRef} autoPlay playsInline muted className="hidden" />
 
       <div ref={previewRef} className={`absolute inset-x-0 flex justify-center ${(live || captured) && !fullBleed ? 'items-start' : 'items-center'}`} style={previewStyle}>
@@ -979,6 +984,9 @@ export default function Editor({
               <IconShare className="w-5 h-5" />
             </TopButton>
           )}
+          <TopButton label="Settings" onClick={() => setSettingsOpen(true)}>
+            <IconSettings className="w-5 h-5" />
+          </TopButton>
         </div>
       </div>
 
@@ -1248,6 +1256,7 @@ export default function Editor({
           editLabel="Edit people"
         />
       )}
+      {settingsOpen && <SettingsSheet onClose={() => setSettingsOpen(false)} />}
     </div>
   )
 }

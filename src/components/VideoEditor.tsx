@@ -477,7 +477,7 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
   const targetName = target === 'all' ? 'Everyone' : `Person ${target}`
 
   return (
-    <div className="fixed inset-0 z-30 bg-black overflow-hidden select-none">
+    <div className="fixed inset-0 z-30 overflow-hidden select-none">
       {url && (
         <video
           ref={videoRef}

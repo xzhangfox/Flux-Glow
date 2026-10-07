@@ -1,0 +1,150 @@
+/* ============ Flux family theme tokens ============
+   Same variable names and glass surfaces as Flux (Nutrition), filled with
+   Flux Path's four mineral-derived palettes, so every app in the family
+   switches between the same four looks: Dark Luxury, Zen Nature,
+   Attention, Calm Ocean. Selected via <html data-theme="...">; no
+   attribute = Dark Luxury. */
+
+:root {
+  /* ---- Dark Luxury: navy × layered gold × bronze ---- */
+  --primary: #cba35c;
+  --primary-rgb: 203, 163, 92;
+  --grad-1: #2f4256;
+  --grad-2: #dcbb7c;
+  --grad-3: #b08a48;
+  --grad-4: #f4e7c1;
+  --grad-5: #4a4736;
+  --bg-base: #070a11;
+  --surface-dark: rgba(12, 15, 22, 0.6);
+  --surface-light: rgba(12, 15, 22, 0.78);
+  --surface-border: rgba(236, 217, 164, 0.1);
+  --surface-border-strong: rgba(176, 138, 72, 0.4);
+  --text-main: #f5f0e3;
+  --text-secondary: #b3a78e;
+  --text-inverse: #000000;
+  --app-bg-image: radial-gradient(circle at 18% 12%, rgba(203, 163, 92, 0.2) 0%, rgba(7, 10, 17, 0) 45%),
+    radial-gradient(circle at 88% 86%, rgba(47, 66, 86, 0.4) 0%, rgba(7, 10, 17, 0.62) 60%, rgba(3, 5, 9, 0.8) 100%),
+    url('/themes/dark_luxury_bg.webp');
+  --app-bg-blur: blur(16px);
+}
+
+[data-theme='nature'] {
+  /* ---- Zen Nature: fluorite — deep teal, jade, mint, olive, violet tip ---- */
+  --primary: #59c0ab;
+  --primary-rgb: 89, 192, 171;
+  --grad-1: #2f4944;
+  --grad-2: #d6f9aa;
+  --grad-3: #59c0ab;
+  --grad-4: #ccda5d;
+  --grad-5: #6874a8;
+  --bg-base: #060b09;
+  --surface-dark: rgba(18, 28, 25, 0.6);
+  --surface-light: rgba(18, 28, 25, 0.78);
+  --surface-border: rgba(214, 249, 170, 0.14);
+  --surface-border-strong: rgba(89, 192, 171, 0.45);
+  --text-main: #eef8f2;
+  --text-secondary: #92aaa5;
+  --app-bg-image: radial-gradient(circle at 80% 12%, rgba(89, 192, 171, 0.22) 0%, rgba(6, 11, 9, 0) 45%),
+    radial-gradient(circle at 18% 86%, rgba(73, 113, 105, 0.45) 0%, rgba(5, 10, 8, 0.62) 60%, rgba(2, 5, 4, 0.8) 100%),
+    url('/themes/zen_nature_bg.webp');
+  --app-bg-blur: blur(16px);
+}
+
+[data-theme='attention'] {
+  /* ---- Attention: cotton candy — pink × baby blue × mint × lavender ---- */
+  --primary: #ef8fc9;
+  --primary-rgb: 239, 143, 201;
+  --grad-1: #f2a6d6;
+  --grad-2: #cbb8ec;
+  --grad-3: #a8e6c8;
+  --grad-4: #9cc9f2;
+  --grad-5: #f2a6d6;
+  --bg-base: #0b0a14;
+  --surface-dark: rgba(22, 20, 40, 0.5);
+  --surface-light: rgba(22, 20, 40, 0.72);
+  --surface-border: rgba(239, 143, 201, 0.22);
+  --surface-border-strong: rgba(147, 197, 240, 0.42);
+  --text-main: #f3ecf6;
+  --text-secondary: #aab6e2;
+  --app-bg-image: radial-gradient(circle at 50% 0%, rgba(147, 197, 240, 0.26) 0%, rgba(11, 10, 20, 0) 45%),
+    radial-gradient(circle at 18% 82%, rgba(239, 143, 201, 0.22) 0%, rgba(11, 10, 20, 0) 50%),
+    radial-gradient(circle at 86% 74%, rgba(168, 230, 200, 0.14) 0%, rgba(9, 8, 16, 0.62) 60%, rgba(6, 5, 12, 0.8) 100%),
+    url('/themes/attention_bg.webp');
+  --app-bg-blur: blur(20px);
+}
+
+[data-theme='ocean'] {
+  /* ---- Calm Ocean: blue fluorite — ice blue, mid blue, violet tip, mist ---- */
+  --primary: #59a1d5;
+  --primary-rgb: 89, 161, 213;
+  --grad-1: #2c497b;
+  --grad-2: #b2edfc;
+  --grad-3: #59a1d5;
+  --grad-4: #969bb8;
+  --grad-5: #6973a7;
+  --bg-base: #05090f;
+  --surface-dark: rgba(16, 24, 36, 0.6);
+  --surface-light: rgba(16, 24, 36, 0.78);
+  --surface-border: rgba(178, 237, 252, 0.14);
+  --surface-border-strong: rgba(89, 161, 213, 0.45);
+  --text-main: #eaf6fb;
+  --text-secondary: #969bb8;
+  --app-bg-image: radial-gradient(circle at 82% 10%, rgba(89, 161, 213, 0.24) 0%, rgba(5, 9, 15, 0) 42%),
+    radial-gradient(circle at 16% 88%, rgba(44, 73, 123, 0.55) 0%, rgba(4, 7, 12, 0.92) 56%, rgba(2, 4, 7, 1) 100%);
+  --app-bg-blur: blur(18px);
+}
+
+html {
+  background-color: var(--bg-base);
+}
+
+/* The themed backdrop every screen sits on — fixed, blurred, slightly
+   overscaled so the blur never shows a hard edge. */
+.global-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -10;
+  pointer-events: none;
+  background-image: var(--app-bg-image);
+  background-size: cover;
+  background-position: center;
+  filter: var(--app-bg-blur, none);
+  transform: scale(1.05);
+  transition: background-image 0.7s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.glass-panel {
+  background: var(--surface-light);
+  border: 1px solid var(--surface-border);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.premium-card {
+  background-color: var(--surface-dark);
+  border: 1px solid var(--surface-border);
+  border-radius: 2rem;
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+/* Soft fade on both ends of a horizontal scroller (e.g. Other Apps). */
+.mask-gradient-sides {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 8%, #000 92%, transparent);
+  mask-image: linear-gradient(to right, transparent, #000 8%, #000 92%, transparent);
+}
+
+@keyframes shine {
+  to {
+    background-position: 200% center;
+  }
+}
+.shiny-text {
+  background: linear-gradient(to right, var(--grad-2) 20%, var(--primary) 40%, var(--grad-2) 60%, var(--grad-4) 80%);
+  background-size: 200% auto;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shine 2s linear infinite;
+}
