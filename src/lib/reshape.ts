@@ -2,6 +2,7 @@ import { FaceLandmarker, type NormalizedLandmark } from '@mediapipe/tasks-vision
 import { connectorsToLoop, loopCenterPx, dist, lerp, type Px } from './landmarks'
 import { renderMeshWarp } from './meshWarp'
 import { SHAPE_PARAMS, type ReshapeParams } from './deform'
+import { protectBackground } from './bgProtect'
 
 export type { ReshapeParams }
 
@@ -63,11 +64,15 @@ function radialWarpInPlace(srcData: Uint8ClampedArray, outData: Uint8ClampedArra
 
 const MESH_FIELDS = [...SHAPE_PARAMS.filter((k) => k !== 'nose'), 'fillLight'] as const
 
-export function applyReshape(source: HTMLCanvasElement, landmarks: NormalizedLandmark[], params: ReshapeParams): HTMLCanvasElement {
+/** `protect`: keep the background beside the face from bending with it
+ *  (see bgProtect.ts). */
+export function applyReshape(source: HTMLCanvasElement, landmarks: NormalizedLandmark[], params: ReshapeParams, protect = false, live = false): HTMLCanvasElement {
   // Bidirectional now (negative values are meaningful, e.g. face<0 widens)
   // — checking `> 0.001` alone would silently skip every negative value.
   const anyMeshFieldActive = MESH_FIELDS.some((key) => Math.abs(params[key]) > 0.001)
-  const meshed = anyMeshFieldActive ? renderMeshWarp(source, landmarks, params) : source
+  let meshed = anyMeshFieldActive ? renderMeshWarp(source, landmarks, params) : source
+  // (Fill light alone moves nothing.)
+  if (protect && SHAPE_PARAMS.some((key) => key !== 'nose' && Math.abs(params[key]) > 0.001)) meshed = protectBackground(source, meshed, landmarks, params, live)
 
   if (Math.abs(params.nose) <= 0.001) return meshed
 

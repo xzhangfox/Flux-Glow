@@ -9,6 +9,8 @@ import { LOOKS, applyLook, findLook } from '../lib/looks'
 import { renderFaceThumbs } from '../lib/thumbs'
 import { renderFilterThumbnails } from '../lib/filters'
 import AdjustPanel from './AdjustPanel'
+import BgProtectToggle from './BgProtectToggle'
+import { loadBgProtect, saveBgProtect } from '../lib/bgProtect'
 import FilterPanel from './FilterPanel'
 import ThumbStrip from './ThumbStrip'
 import Slider from './Slider'
@@ -127,7 +129,7 @@ function Sheet({ children, onDismiss }: { children: ReactNode; onDismiss: () => 
 }
 
 export default function VideoEditor({ file, startParams, onClose }: { file: Blob; startParams?: EditParams; onClose: () => void }) {
-  const initial = useMemo(() => ({ ...(startParams ?? DEFAULT_PARAMS) }), [startParams])
+  const initial = useMemo(() => ({ ...(startParams ?? { ...DEFAULT_PARAMS, protectBackground: loadBgProtect() }) }), [startParams])
   const [phase, setPhase] = useState<Phase>('preparing')
   const [error, setError] = useState('')
   const [progress, setProgress] = useState(0)
@@ -357,7 +359,7 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
   const selectLook = (id: string | null, strength = look.strength) => {
     setLookSel((m) => ({ ...m, [lookKey]: { id, strength } }))
     const l = findLook(id)
-    editTarget((p) => (l ? applyLook(l, strength, p) : { ...DEFAULT_PARAMS, effectId: p.effectId, filterId: p.filterId, filterStrength: p.filterStrength }))
+    editTarget((p) => (l ? applyLook(l, strength, p) : { ...DEFAULT_PARAMS, effectId: p.effectId, filterId: p.filterId, filterStrength: p.filterStrength, protectBackground: p.protectBackground }))
   }
 
   const focusPerson = target === 'all' ? people[0] : people.find((p) => p.id === target)
@@ -462,6 +464,16 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
 
   const beauty = beautyItems(current, setKey)
   const shape = shapeItems(current, setKey)
+  const bgToggle = (
+    <BgProtectToggle
+      on={current.protectBackground}
+      disabled={!anyFaces}
+      onChange={(on) => {
+        saveBgProtect(on)
+        editTarget((p) => ({ ...p, protectBackground: on }))
+      }}
+    />
+  )
   const targetName = target === 'all' ? 'Everyone' : `Person ${target}`
 
   return (
@@ -632,10 +644,13 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
               <div>
                 <div className="flex items-center justify-between h-7 mb-2">
                   <span className="text-[13px] font-semibold text-white">Looks</span>
-                  <button onClick={() => selectLook(null)} disabled={!look.id} className="flex items-center gap-1 text-[11px] font-medium text-white/70 disabled:opacity-30">
-                    <IconRefresh className="w-3.5 h-3.5" />
-                    Reset
-                  </button>
+                  <div className="flex items-center gap-3">
+                    {bgToggle}
+                    <button onClick={() => selectLook(null)} disabled={!look.id} className="flex items-center gap-1 text-[11px] font-medium text-white/70 disabled:opacity-30">
+                      <IconRefresh className="w-3.5 h-3.5" />
+                      Reset
+                    </button>
+                  </div>
                 </div>
                 {!anyFaces ? (
                   <p className="text-xs text-white/60 py-4 text-center">Looks need a face in the video.</p>
@@ -650,7 +665,7 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
               </div>
             )}
             {panel === 'beauty' && <AdjustPanel title="Beauty" items={beauty} disabled={!anyFaces} />}
-            {panel === 'shape' && <AdjustPanel title="Shape" items={shape} disabled={!anyFaces} tabs />}
+            {panel === 'shape' && <AdjustPanel title="Shape" items={shape} disabled={!anyFaces} tabs extra={bgToggle} />}
             {panel === 'effects' && (
               <div>
                 <div className="flex items-center justify-between h-7 mb-2">

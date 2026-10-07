@@ -22,9 +22,12 @@ export interface EditParams extends ReshapeParams {
   filterStrength: number
   /** Face-tracked AR effect (see effects.ts), 'none' for off. */
   effectId: string
+  /** Warp only the person, never the background beside them (see
+   *  bgProtect.ts). */
+  protectBackground: boolean
 }
 
-export type NumericParam = Exclude<keyof EditParams, 'filterId' | 'effectId'>
+export type NumericParam = Exclude<keyof EditParams, 'filterId' | 'effectId' | 'protectBackground'>
 
 /** The untouched starting point — also what each panel's Reset restores
  *  and what "has this control been changed" is measured against. Light
@@ -42,6 +45,7 @@ export const DEFAULT_PARAMS: EditParams = {
   filterId: 'none',
   filterStrength: 0.8,
   effectId: 'none',
+  protectBackground: false,
 }
 
 /** Beauty sliders whose raw effect is too strong at the top of the track:
@@ -149,7 +153,7 @@ export function processFaces(base: HTMLCanvasElement, faces: FaceEdit[], frame: 
     }
   }
   let reshaped = working
-  for (const { landmarks, params } of prepared) reshaped = applyReshape(reshaped, landmarks, params)
+  for (const { landmarks, params } of prepared) reshaped = applyReshape(reshaped, landmarks, params, params.protectBackground, !highQuality)
   for (const { landmarks, params, slot } of prepared) {
     if (params.effectId === 'none') continue
     // Effects track the face as reshaped, so ears sit on the slimmed head.

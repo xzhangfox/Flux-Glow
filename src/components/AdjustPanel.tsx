@@ -35,7 +35,9 @@ function resetItem(item: AdjustItem) {
 // `tabs`: the top-level items are categories (Face, Eyes, Nose…) shown as a
 // chip row, with the chosen category's controls in the icon row below —
 // one tap to any control instead of drilling through a group first.
-export default function AdjustPanel({ title, items, disabled, tabs }: { title: string; items: AdjustItem[]; disabled?: boolean; tabs?: boolean }) {
+// `extra`: a control in the header beside Reset (Shape's background
+// protection), there at every level, sliders included.
+export default function AdjustPanel({ title, items, disabled, tabs, extra }: { title: string; items: AdjustItem[]; disabled?: boolean; tabs?: boolean; extra?: ReactNode }) {
   const [path, setPath] = useState<string[]>([])
   const [tab, setTab] = useState(items[0]?.key)
   const rowRef = useRef<HTMLDivElement>(null)
@@ -71,14 +73,17 @@ export default function AdjustPanel({ title, items, disabled, tabs }: { title: s
           )}
           <span className="text-[13px] font-semibold text-white truncate">{[title, ...trail.slice(tabItem && !showingSlider ? 1 : 0).map((t) => t.label)].join(' · ')}</span>
         </div>
-        <button
-          onClick={() => items.forEach(resetItem)}
-          disabled={!anyChanged || disabled}
-          className="flex items-center gap-1 text-[11px] font-medium text-white/70 hover:text-white disabled:opacity-30 transition"
-        >
-          <IconRefresh className="w-3.5 h-3.5" />
-          Reset
-        </button>
+        <div className="flex items-center gap-3 flex-shrink-0">
+          {extra}
+          <button
+            onClick={() => items.forEach(resetItem)}
+            disabled={!anyChanged || disabled}
+            className="flex items-center gap-1 text-[11px] font-medium text-white/70 hover:text-white disabled:opacity-30 transition"
+          >
+            <IconRefresh className="w-3.5 h-3.5" />
+            Reset
+          </button>
+        </div>
       </div>
 
       {showingSlider ? (

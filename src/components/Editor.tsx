@@ -4,6 +4,8 @@ import { detectFaceLandmarks, LiveFaceTracker } from '../lib/faceLandmarker'
 import { processFrame, DEFAULT_PARAMS, faceFocus, type EditParams, type NumericParam } from '../lib/pipeline'
 import { renderFilterThumbnails } from '../lib/filters'
 import { ASPECT_MODES, aspectRatioFor, cropRectFor, drawFrame, remapLandmarks, type AspectMode } from '../lib/frame'
+import BgProtectToggle from './BgProtectToggle'
+import { loadBgProtect, saveBgProtect } from '../lib/bgProtect'
 import AdjustPanel from './AdjustPanel'
 import { BEAUTY_KEYS, SHAPE_KEYS, beautyItems, changedFrom, shapeItems } from './adjustItems'
 import FilterPanel from './FilterPanel'
@@ -174,7 +176,7 @@ export default function Editor({
   onEditVideo?: (file: Blob, params?: EditParams) => void
   onTrySample?: () => void
 }) {
-  const [params, setParams] = useState<EditParams>(DEFAULT_PARAMS)
+  const [params, setParams] = useState<EditParams>(() => ({ ...DEFAULT_PARAMS, protectBackground: loadBgProtect() }))
   const [status, setStatus] = useState<Status>('loading')
   const [live, setLive] = useState(source.kind === 'live')
   // A photo just taken with the camera (not an upload): shown and edited
@@ -560,7 +562,7 @@ export default function Editor({
   const selectLook = (id: string | null, strength = lookStrength) => {
     setLookId(id)
     const look = findLook(id)
-    setParams((p) => (look ? applyLook(look, strength, p) : { ...DEFAULT_PARAMS, effectId: p.effectId }))
+    setParams((p) => (look ? applyLook(look, strength, p) : { ...DEFAULT_PARAMS, effectId: p.effectId, protectBackground: p.protectBackground }))
   }
 
   const addSticker = async (req: StickerRequest) => {
@@ -867,6 +869,16 @@ export default function Editor({
   const setParam = (key: NumericParam, v: number) => setParams((p) => ({ ...p, [key]: v }))
   const beauty = beautyItems(params, setParam)
   const shape = shapeItems(params, setParam)
+  const bgToggle = (
+    <BgProtectToggle
+      on={params.protectBackground}
+      disabled={status === 'no-face'}
+      onChange={(on) => {
+        saveBgProtect(on)
+        setParams((p) => ({ ...p, protectBackground: on }))
+      }}
+    />
+  )
 
   const togglePanel = (p: Panel) => setPanel((v) => (v === p ? null : p))
   const noFace = status === 'no-face'
@@ -1033,10 +1045,13 @@ export default function Editor({
               <div>
                 <div className="flex items-center justify-between h-7 mb-3">
                   <span className="text-[13px] font-semibold text-white">Looks</span>
+                  <div className="flex items-center gap-3">
+                  {bgToggle}
                   <button onClick={() => selectLook(null)} disabled={!lookId} className="flex items-center gap-1 text-[11px] font-medium text-white/70 hover:text-white disabled:opacity-30 transition">
                     <IconRefresh className="w-3.5 h-3.5" />
                     Reset
                   </button>
+                  </div>
                 </div>
                 {noFace ? (
                   <p className="text-xs text-white/60 py-4 text-center">Looks need a face in the frame.</p>
@@ -1060,7 +1075,7 @@ export default function Editor({
               </div>
             )}
             {panel === 'beauty' && <AdjustPanel title="Beauty" items={beauty} disabled={noFace} />}
-            {panel === 'shape' && <AdjustPanel title="Shape" items={shape} disabled={noFace} tabs />}
+            {panel === 'shape' && <AdjustPanel title="Shape" items={shape} disabled={noFace} tabs extra={bgToggle} />}
             {panel === 'effects' && (
               <div>
                 <div className="flex items-center justify-between h-7 mb-3">

@@ -137,7 +137,7 @@ const NUMERIC_KEYS = Object.keys(DEFAULT_PARAMS).filter((k) => typeof DEFAULT_PA
 /** The look's recipe blended toward the defaults by `strength` (0..1),
  *  keeping the current effect. */
 export function applyLook(look: Look, strength: number, current: EditParams): EditParams {
-  const next: EditParams = { ...DEFAULT_PARAMS, effectId: current.effectId }
+  const next: EditParams = { ...DEFAULT_PARAMS, effectId: current.effectId, protectBackground: current.protectBackground }
   for (const k of NUMERIC_KEYS) {
     const target = look.params[k]
     if (target === undefined) continue

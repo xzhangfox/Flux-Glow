@@ -61,16 +61,16 @@ const C: Record<'seg' | 'work' | 'keep' | 'zone' | 'out', HTMLCanvasElement | nu
 // Live preview: each matte is reused for a frame (the head doesn't move far
 // in 1/30 s, and the mattes are dilated anyway); the two segmenters take
 // turns.
-const cache: Record<'hair' | 'person', { m: Float32Array; box: Box; w: number; h: number; age: number } | null> = { hair: null, person: null }
+const cache: Record<'hair' | 'person' | 'protect', { m: Float32Array; box: Box; w: number; h: number; age: number } | null> = { hair: null, person: null, protect: null }
 let turn = 0
 
 /** `kind`'s confidence over `box` of `frame`, at w × h. */
-function matte(kind: 'hair' | 'person', frame: HTMLCanvasElement, box: Box, w: number, h: number, live: boolean): Float32Array | null {
-  const seg = segmenters[kind]
+function matte(kind: 'hair' | 'person' | 'protect', frame: HTMLCanvasElement, box: Box, w: number, h: number, live: boolean): Float32Array | null {
+  const seg = segmenters[kind === 'hair' ? 'hair' : 'person']
   if (!seg) return null
   const c = cache[kind]
   const fresh = c && c.w === w && c.h === h && Math.abs(c.box.x - box.x) < box.w * 0.04 && Math.abs(c.box.y - box.y) < box.h * 0.04
-  if (live && fresh && c.age < 1 && (turn & 1) === (kind === 'hair' ? 1 : 0)) {
+  if (live && fresh && c.age < 1 && (kind === 'protect' || (turn & 1) === (kind === 'hair' ? 1 : 0))) {
     c.age++
     return c.m
   }
@@ -116,7 +116,7 @@ function maxLine(src: Float32Array, dst: Float32Array, start: number, stride: nu
 }
 
 /** Max filter (dilation) with a square of radius r. */
-function dilate(src: Float32Array, w: number, h: number, r: number) {
+export function dilate(src: Float32Array, w: number, h: number, r: number) {
   if (r <= 0) return src
   const tmp = new Float32Array(w * h)
   const out = new Float32Array(w * h)
@@ -129,7 +129,7 @@ function dilate(src: Float32Array, w: number, h: number, r: number) {
 
 /** Push-pull fill: colours where weight is 1 are kept, the rest filled
  *  from their known surroundings. rgb: 3 floats per pixel. */
-function pushPull(rgb: Float32Array, wt: Float32Array, w: number, h: number): Float32Array {
+export function pushPull(rgb: Float32Array, wt: Float32Array, w: number, h: number): Float32Array {
   const levels: { c: Float32Array; w: Float32Array; W: number; H: number }[] = [{ c: rgb, w: wt, W: w, H: h }]
   while (levels[levels.length - 1].W > 1 || levels[levels.length - 1].H > 1) {
     const p = levels[levels.length - 1]
@@ -336,3 +336,9 @@ function addGrain(frame: HTMLCanvasElement, box: Box, remove: Float32Array, w: n
   }
   ctx.putImageData(img, box.x, box.y)
 }
+
+export const personSegmenterReady = () => !!segmenters.person
+
+/** The person's confidence over `box` of `frame`, at w × h (for background
+ *  protection; live frames reuse it every other frame). */
+export const personMatte = (frame: HTMLCanvasElement, box: Box, w: number, h: number, live: boolean) => matte('protect', frame, box, w, h, live)
