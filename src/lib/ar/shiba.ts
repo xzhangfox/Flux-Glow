@@ -172,6 +172,8 @@ function headBody(x: number, y: number, z: number) {
   // little too big, then cut off along the mouth line, so their lower edge
   // is exactly where the line is drawn — line and lip are one edge.
   let pads = padsRaw(x, y, z)
+  // (cutting them can only matter where they're near the surface)
+  if (pads > d + 0.03) return finishBody(d, x, y, z)
   const ax = Math.abs(x)
   const lip = lipSegment(ax)
   // ...below along the line, and at the sides where it turns up at the
@@ -184,11 +186,16 @@ function headBody(x: number, y: number, z: number) {
   // on the pad's front rather than on a sharp wall)
   pads = smax(pads, ax - cx - 0.03, 0.09)
   d = smin(d, pads, 0.03)
+  return finishBody(d, x, y, z)
+}
+
+/** The last of headBody: the groove between the pads, and the neck. */
+function finishBody(d: number, x: number, y: number, z: number) {
+  const ml = D.muzzle.len
   // ...with a shallow groove down between them from the nose.
   d = smax(d, -(Math.hypot(x / 0.5, (z - 0.58 - ml) / 0.5) * 0.5 - 0.018 + Math.max(0, y + 0.47) * 2 + Math.max(0, -0.68 - y) * 2), 0.02)
   // A short neck at the back.
-  d = smin(d, ellipsoid(x, y + 0.34, z + 0.52, 0.45, 0.3, 0.38), 0.3)
-  return d
+  return smin(d, ellipsoid(x, y + 0.34, z + 0.52, 0.45, 0.3, 0.38), 0.3)
 }
 
 interface Ear {
@@ -852,7 +859,16 @@ let LIP: [number, number][] = []
 
 /** Height and slope of the upper lip line at |x| = `ax`. */
 function lipSegment(ax: number): { y: number; slope: number } | null {
-  for (let i = 1; i < LIP.length; i++) {
+  // (LIP's x only grows, so start the walk near the right place)
+  if (!LIP.length || ax > LIP[LIP.length - 1][0] + 0.06) return null
+  let lo = 1
+  let hi = LIP.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (LIP[mid][0] < ax) lo = mid + 1
+    else hi = mid
+  }
+  for (let i = Math.max(1, lo - 1); i < LIP.length; i++) {
     const [x0, y0] = LIP[i - 1]
     const [x1, y1] = LIP[i]
     // (the last segment carries on a little past the corner, so the pads'
@@ -890,7 +906,7 @@ function march(from: V3, dir: V3): V3 | null {
 /** A decal over (cx, cy) conformed to the head, projected along the
  *  surface's normal there (or straight in, for `straight`), so features on
  *  the curve of the face sit on it rather than smear across it. */
-function decal(cx: number, cy: number, w: number, h: number, mat: THREE.Material, lift: number, N = 18, straight = false) {
+function decalData(cx: number, cy: number, w: number, h: number, lift: number, N = 18, straight = false): MeshData {
   const pts: number[] = []
   const uvs: number[] = []
   const idx: number[] = []
@@ -923,17 +939,105 @@ function decal(cx: number, cy: number, w: number, h: number, mat: THREE.Material
       if (far(a, a + 1) || far(a, a + N + 1) || far(a + 1, a + N + 2) || far(a + N + 1, a + N + 2)) continue
       idx.push(a, a + 1, a + N + 1, a + 1, a + N + 2, a + N + 1)
     }
-  const g = new THREE.BufferGeometry()
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3))
-  g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
-  g.setIndex(idx)
-  g.computeVertexNormals()
-  return new THREE.Mesh(g, mat)
+  return { pos: Float32Array.from(pts), uv: Float32Array.from(uvs), index: Uint32Array.from(idx) }
 }
 
 // ---- The model ------------------------------------------------------------------
+//
+// Built in two steps: the heavy, pure-number part — sculpting and meshing
+// the head, conforming the decals to it, tracing the mouth — which runs
+// in a worker (headWorker.ts) so the camera never stalls on it; and the
+// light part that makes three.js objects and canvas textures from that,
+// on the page.
 
-const built = new Map<string, THREE.BufferGeometry>()
+/** Plain arrays for one mesh (transferable to and from a worker). */
+export interface MeshData {
+  pos: Float32Array
+  nrm?: Float32Array
+  col?: Float32Array
+  uv?: Float32Array
+  index: Uint32Array
+}
+
+/** Everything the head is made of, as numbers. */
+export interface HeadData {
+  head: MeshData
+  paint: MeshData
+  eyes: { side: number; mesh: MeshData; lid: [number, number, number] }[]
+  /** The nose's tip, and the mouth's lines (flat x,y,z lists). */
+  tip: [number, number, number]
+  lines: Float32Array[]
+}
+
+export type HeadId = 'shiba' | 'fox' | 'husky'
+
+const headCache = new Map<HeadId, HeadData>()
+
+/** The heavy part (pure numbers): see above. */
+export function computeHead(id: HeadId): HeadData {
+  const hit = headCache.get(id)
+  if (hit) return hit
+  selectDesign(DESIGNS[id])
+  const head = headArrays()
+  const paint = decalData(0, 0, 2 * PAINT, 2 * PAINT, 0.003, 40, true)
+  const eyes = [-1, 1].map((s) => {
+    const c = headColorAt(onFront(s * 0.48, 0.05))
+    return { side: s, mesh: decalData(s * 0.48, -0.02, 0.68 * D.eye.size, 0.76 * D.eye.size, 0.006), lid: [c.r, c.g, c.b] as [number, number, number] }
+  })
+  const tip = onFront(0, D.nose.y)
+  const dy = D.nose.y + 0.38
+  const mw = D.muzzle.width
+  const strokes: [number, number][][] = (
+    D.mouth === 'open'
+      ? [
+          // The upper lip over the open mouth, its corners curling up, and
+          // the lower lip round under it.
+          [[0, -0.5], [0, -0.645]],
+          openMouth()[1],
+        ]
+      : [[[0, -0.5], [0, -0.64]]]
+  ).map((st) => st.map(([x, y]): [number, number] => [x * mw, y + dy]))
+  const lines: V3[][] = strokes.map((st) => st.map(([x, y]) => onFront(x, y).add(V(0, 0, 0.004))))
+  // The upper lip, each half: traced along the pads' own surface just above
+  // the cut, densely, so it runs smoothly round the pads from every angle
+  // (projecting a few points straight in from the front made it wander
+  // where the surface turns away).
+  for (const side of [-1, 1]) lines.push(STROKE.map(([x, y]) => lipEdge(side * x, y + 0.005)))
+  const data: HeadData = {
+    head,
+    paint,
+    eyes,
+    tip: [tip.x, tip.y, tip.z],
+    lines: lines.map((pts) => Float32Array.from(pts.flatMap((p) => [p.x, p.y, p.z]))),
+  }
+  headCache.set(id, data)
+  return data
+}
+
+/** The buffers in `d`, for transferring it. */
+export function transferablesOf(d: HeadData): ArrayBuffer[] {
+  const out: ArrayBuffer[] = []
+  const add = (m: MeshData) => [m.pos, m.nrm, m.col, m.uv, m.index].forEach((a) => a && out.push(a.buffer as ArrayBuffer))
+  add(d.head)
+  add(d.paint)
+  d.eyes.forEach((e) => add(e.mesh))
+  d.lines.forEach((l) => out.push(l.buffer as ArrayBuffer))
+  return out
+}
+
+function geometryOf(m: MeshData) {
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.BufferAttribute(m.pos, 3))
+  if (m.uv) g.setAttribute('uv', new THREE.BufferAttribute(m.uv, 2))
+  if (m.col) g.setAttribute('color', new THREE.BufferAttribute(m.col, 3))
+  g.setIndex(new THREE.BufferAttribute(m.index, 1))
+  if (m.nrm) g.setAttribute('normal', new THREE.BufferAttribute(m.nrm, 3))
+  else g.computeVertexNormals()
+  g.computeBoundingSphere()
+  return g
+}
+
+
 
 /** Make `d` the design being built (the field, ears and fur follow it). */
 function selectDesign(d: Design) {
@@ -956,11 +1060,8 @@ function headColorAt(p: V3) {
   return colorAt(p).multiplyScalar(occ)
 }
 
-function headGeometry() {
-  const cached = built.get(D.id)
-  if (cached) return cached
+function headArrays(): MeshData {
   const { pos, index } = surfaceNets(sdf, V(-1.45, -1.15, -1.55), V(1.45, 1.75, 0.85), 0.021)
-  const geo = new THREE.BufferGeometry()
   const n = pos.length / 3
   const nrm = new Float32Array(n * 3)
   const col = new Float32Array(n * 3)
@@ -993,13 +1094,7 @@ function headGeometry() {
       index[t + 2] = b2
     }
   }
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
-  geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3))
-  geo.setAttribute('color', new THREE.BufferAttribute(col, 3))
-  geo.setIndex(index)
-  geo.computeBoundingSphere()
-  built.set(D.id, geo)
-  return geo
+  return { pos: Float32Array.from(pos), nrm, col, index: Uint32Array.from(index) }
 }
 
 /** Reference units to rig units, and where the sculpt sits on the wearer:
@@ -1007,12 +1102,50 @@ function headGeometry() {
 export const SHIBA_SCALE = 2.15
 export const SHIBA_OFFSET = new THREE.Vector3(0, -0.3, 0.3)
 
-export const shibaHead = () => animalHead(DESIGNS.shiba)
-export const foxHead = () => animalHead(DESIGNS.fox)
-export const huskyHead = () => animalHead(DESIGNS.husky)
+export const shibaHead = () => assembleHead('shiba', computeHead('shiba'))
+export const foxHead = () => assembleHead('fox', computeHead('fox'))
+export const huskyHead = () => assembleHead('husky', computeHead('husky'))
 
-function animalHead(design: Design): Model {
-  selectDesign(design)
+/** The same, the heavy part done in a worker (falling back to doing it
+ *  here if workers aren't available). */
+export async function animalHeadAsync(id: HeadId): Promise<Model> {
+  return assembleHead(id, await computeHeadOffThread(id))
+}
+
+let worker: Worker | null = null
+const waiting = new Map<HeadId, Promise<HeadData>>()
+function computeHeadOffThread(id: HeadId): Promise<HeadData> {
+  const hit = headCache.get(id)
+  if (hit) return Promise.resolve(hit)
+  const pending = waiting.get(id)
+  if (pending) return pending
+  const p = new Promise<HeadData>((resolve) => {
+    try {
+      worker ??= new Worker(new URL('./headWorker.ts', import.meta.url), { type: 'module' })
+    } catch {
+      resolve(computeHead(id))
+      return
+    }
+    const w = worker
+    const onMsg = (e: MessageEvent<{ id: HeadId; data?: HeadData; error?: string }>) => {
+      if (e.data.id !== id) return
+      w.removeEventListener('message', onMsg)
+      if (e.data.data) {
+        headCache.set(id, e.data.data)
+        resolve(e.data.data)
+      } else resolve(computeHead(id))
+    }
+    w.addEventListener('message', onMsg)
+    w.postMessage(id)
+  })
+  waiting.set(id, p)
+  return p
+}
+
+/** The light part: three.js objects and textures from `data`. */
+function assembleHead(id: HeadId, data: HeadData): Model {
+  // (only the design's settings are needed here, not its sculpt)
+  D = DESIGNS[id]
   const root = new THREE.Group()
   const sculpt = new THREE.Group()
   sculpt.scale.setScalar(SHIBA_SCALE)
@@ -1020,29 +1153,29 @@ function animalHead(design: Design): Model {
   root.add(sculpt)
   // Matte, soft-touch: like a vinyl toy.
   const skin = new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.62, sheen: 0.35, sheenRoughness: 0.5, sheenColor: new THREE.Color(0xffe6cc), envMapIntensity: 0.6 })
-  const head = new THREE.Mesh(headGeometry(), skin)
+  const head = new THREE.Mesh(geometryOf(data.head), skin)
   head.castShadow = true
   head.receiveShadow = true
   sculpt.add(head)
 
   const paint = new THREE.MeshStandardMaterial({ map: paintTexture(), transparent: true, roughness: 0.65, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 })
-  sculpt.add(decal(0, 0, 2 * PAINT, 2 * PAINT, paint, 0.003, 40, true))
+  sculpt.add(new THREE.Mesh(geometryOf(data.paint), paint))
 
   // Eyes: big, a little inset under the brow; they blink with the wearer.
   const lids: { side: number; blink: { value: number } }[] = []
-  for (const s of [-1, 1]) {
+  for (const e of data.eyes) {
     // (the same surface as the head, so the lid, when down, matches it)
-    const eyeMat = new THREE.MeshPhysicalMaterial({ map: eyeTexture(s < 0), transparent: true, alphaTest: 0.4, roughness: 0.62, sheen: 0.35, sheenRoughness: 0.5, sheenColor: new THREE.Color(0xffe6cc), envMapIntensity: 0.6 })
+    const eyeMat = new THREE.MeshPhysicalMaterial({ map: eyeTexture(e.side < 0), transparent: true, alphaTest: 0.4, roughness: 0.62, sheen: 0.35, sheenRoughness: 0.5, sheenColor: new THREE.Color(0xffe6cc), envMapIntensity: 0.6 })
     // The lid is the head's own colour round this eye, shaded as the head
     // is there.
-    const blink = withEyelid(eyeMat, headColorAt(onFront(s * 0.48, 0.05)))
-    lids.push({ side: s, blink })
-    sculpt.add(decal(s * 0.48, -0.02, 0.68 * D.eye.size, 0.76 * D.eye.size, eyeMat, 0.006))
+    const blink = withEyelid(eyeMat, new THREE.Color(...e.lid))
+    lids.push({ side: e.side, blink })
+    sculpt.add(new THREE.Mesh(geometryOf(e.mesh), eyeMat))
   }
   const blinker = new Blinker()
 
   // Nose: a matte rounded triangle, broad on top, on the tip of the muzzle.
-  const tip = onFront(0, D.nose.y)
+  const tip = V(...data.tip)
   const ng = new THREE.SphereGeometry(1, 40, 28)
   const np = ng.getAttribute('position') as THREE.BufferAttribute
   for (let i = 0; i < np.count; i++) {
@@ -1060,24 +1193,7 @@ function animalHead(design: Design): Model {
   // The mouth: a line down from the nose into a wide, smiling "ω" whose
   // ends hook up into the cheeks.
   const line = new THREE.MeshStandardMaterial({ color: 0x24160f, roughness: 0.6 })
-  const dy = D.nose.y + 0.38
-  const mw = D.muzzle.width
-  const strokes: [number, number][][] = (
-    D.mouth === 'open'
-      ? [
-          // The upper lip over the open mouth, its corners curling up, and
-          // the lower lip round under it.
-          [[0, -0.5], [0, -0.645]],
-          openMouth()[1],
-        ]
-      : [[[0, -0.5], [0, -0.64]]]
-  ).map((st) => st.map(([x, y]): [number, number] => [x * mw, y + dy]))
-  const lines: V3[][] = strokes.map((st) => st.map(([x, y]) => onFront(x, y).add(V(0, 0, 0.004))))
-  // The upper lip, each half: traced along the pads' own surface just above
-  // the cut, densely, so it runs smoothly round the pads from every angle
-  // (projecting a few points straight in from the front made it wander
-  // where the surface turns away).
-  for (const side of [-1, 1]) lines.push(STROKE.map(([x, y]) => lipEdge(side * x, y + 0.005)))
+  const lines = data.lines.map((a) => Array.from({ length: a.length / 3 }, (_, i) => V(a[i * 3], a[i * 3 + 1], a[i * 3 + 2])))
   lines.forEach((pts, k) => {
     // The lip lines (the last two) taper off to a point where they curl up
     // into the cheek, like a brush stroke.

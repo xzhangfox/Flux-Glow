@@ -557,7 +557,10 @@ function rimmedPanel(
 function canvas(size: number) {
   const c = document.createElement('canvas')
   c.width = c.height = size
-  return [c, c.getContext('2d')!] as const
+  // In memory, not on the GPU: these are drawn once and some are read back
+  // (normal maps), and reading a GPU canvas back stalls on every stroke
+  // drawn into it — seconds, on a phone, with the camera frozen meanwhile.
+  return [c, c.getContext('2d', { willReadFrequently: true })!] as const
 }
 
 /** A tangent-space normal map from a height canvas (Sobel). */
@@ -651,9 +654,13 @@ function spiderTextures() {
       img.data[k + 3] = 255
     }
   h.putImageData(img, 0, 0)
+  // The piping drawn sharp on a layer of its own, then blurred once as a
+  // whole onto the knit (blurring every stroke as it's drawn cost seconds).
+  const [wc, w] = canvas(size)
+  drawWeb(w, size, 'rgba(255,255,255,0.55)', 11)
+  drawWeb(w, size, '#ffffff', 6)
   h.filter = 'blur(2px)'
-  drawWeb(h, size, 'rgba(255,255,255,0.55)', 11)
-  drawWeb(h, size, '#ffffff', 6)
+  h.drawImage(wc, 0, 0)
   h.filter = 'none'
   return { map, roughnessMap, normalMap: normalMapFrom(hc, 2.6) }
 }

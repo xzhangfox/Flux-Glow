@@ -741,7 +741,8 @@ function faunPattern() {
   const Y = (y: number) => (1 - (0.5 + (y - 0.45) / 1.8)) * S
   const h = document.createElement('canvas')
   h.width = h.height = S
-  const hx = h.getContext('2d')!
+  // (in memory: it's read back below, and a GPU canvas stalls on that)
+  const hx = h.getContext('2d', { willReadFrequently: true })!
   hx.fillStyle = '#000'
   hx.fillRect(0, 0, S, S)
   hx.lineCap = 'round'

@@ -374,9 +374,71 @@ function updateEnvironment(st: State, frame: HTMLCanvasElement, force: boolean) 
   st.scene.environmentIntensity = 0.9
 }
 
+// ---- Getting models ready ------------------------------------------------------
+//
+// A model is never made inside a frame: building one (and compiling its
+// shaders) can take a while, and the camera would freeze for that long.
+// prepareModel() builds it in the background — heavy builds go to a
+// worker — compiles its shaders without blocking, and only then hands it
+// to the renderer; until then renderAR() just leaves the effect off.
+
+const pending = new Map<string, Promise<void>>()
+const idle = () => new Promise<void>((r) => (typeof requestIdleCallback === 'function' ? requestIdleCallback(() => r(), { timeout: 200 }) : setTimeout(r, 0)))
+
+export const modelKey = (effectId: string, slot = '') => (slot ? `${slot}:${effectId}` : effectId)
+export const isModelReady = (effectId: string, slot = '') => !!S?.models.has(modelKey(effectId, slot))
+
+/** Gets the model for `effectId` (for face `slot`) ready. */
+export function prepareModel(effectId: string, slot: string, build: () => Model | Promise<Model>): Promise<void> {
+  S ??= init()
+  const st = S
+  const key = modelKey(effectId, slot)
+  if (st.models.has(key)) return Promise.resolve()
+  let p = pending.get(key)
+  if (p) return p
+  p = (async () => {
+    // (a beat for the frame in flight to finish first)
+    await idle()
+    const model = await build()
+    model.root.visible = true
+    // Compile its shaders against the scene's lights a mesh at a time,
+    // with a frame between each: without parallel compiling in the browser
+    // a shader compiles synchronously, and the whole model's at once (a
+    // fur effect has a dozen) froze the camera for seconds on slow GPUs.
+    const meshes: THREE.Object3D[] = []
+    model.root.traverse((o) => (o as THREE.Mesh).isMesh && o.visible && meshes.push(o))
+    meshes.forEach((m) => (m.visible = false))
+    for (const m of meshes) {
+      m.visible = true
+      try {
+        await st.renderer.compileAsync(model.root, st.camera, st.scene)
+      } catch {
+        // (it'll compile on first draw instead)
+      }
+      m.visible = false
+      await idle()
+    }
+    meshes.forEach((m) => (m.visible = true))
+    // And its textures uploaded ahead of the first frame that draws it.
+    const textures = new Set<THREE.Texture>()
+    for (const m of meshes)
+      for (const mat of ([] as THREE.Material[]).concat((m as THREE.Mesh).material))
+        for (const v of Object.values(mat)) if ((v as THREE.Texture)?.isTexture) textures.add(v as THREE.Texture)
+    for (const tex of textures) {
+      st.renderer.initTexture(tex)
+      await idle()
+    }
+    model.root.visible = false
+    st.models.set(key, model)
+    st.rig.add(model.root)
+  })().finally(() => pending.delete(key))
+  pending.set(key, p)
+  return p
+}
+
 /** Renders the 3D effect over `frame` (in place). `P` are landmark pixel
  *  positions with z in pixels (MediaPipe z × width, negative = nearer). */
-export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, build: () => Model, t: number, live: boolean, slot = '') {
+export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, build: () => Model | Promise<Model>, t: number, live: boolean, slot = ''): boolean {
   S ??= init()
   const st = S
   const W = frame.width
@@ -416,13 +478,13 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
   hp.needsUpdate = true
 
   // One model per effect and face, so two people wearing the same effect
-  // never share (or fight over) one model's state.
-  const key = slot ? `${slot}:${effectId}` : effectId
-  let model = st.models.get(key)
+  // never share (or fight over) one model's state. Not ready yet: start
+  // getting it ready, and leave the effect off for now.
+  const key = modelKey(effectId, slot)
+  const model = st.models.get(key)
   if (!model) {
-    model = build()
-    st.models.set(key, model)
-    st.rig.add(model.root)
+    prepareModel(effectId, slot, build)
+    return false
   }
   for (const [id, m] of st.models) m.root.visible = id === key
   model.update?.(rig, t)
@@ -470,7 +532,7 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
   // Live and nothing to hide: blend on the GPU, no pixel read-back.
   if (live && model.hidesHead === undefined) {
     compositeARFast(frame, st.renderer.domElement, RS, box)
-    return
+    return true
   }
   const layer = readLayer(st.renderer.domElement, RS, box)
   if (model.hidesHead !== undefined) {
@@ -498,4 +560,6 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
     )
   }
   compositeAR(frame, layer, box, live)
+  return true
 }
+

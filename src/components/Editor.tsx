@@ -12,7 +12,7 @@ import Slider from './Slider'
 import StickerPanel, { type StickerRequest } from './StickerPanel'
 import StickerLayer from './StickerLayer'
 import { LOOKS, applyLook, findLook } from '../lib/looks'
-import { EFFECTS, findEffect, preloadAR, setCustomImage } from '../lib/effects'
+import { EFFECTS, EFFECT_THUMBS, findEffect, isEffectReady, onEffectReady, prepareEffect, setCustomImage } from '../lib/effects'
 import CropDialog from './CropDialog'
 import VideoReview from './VideoReview'
 import { downloadBlob, isIOS, isVideoFile, timestampedName } from '../lib/save'
@@ -211,7 +211,8 @@ export default function Editor({
   const [lookId, setLookId] = useState<string | null>(null)
   const [lookStrength, setLookStrength] = useState(1)
   const [lookThumbs, setLookThumbs] = useState<Record<string, string>>({})
-  const [effectThumbs, setEffectThumbs] = useState<Record<string, string>>({})
+  // The chosen effect is still loading (in the background).
+  const [effectLoading, setEffectLoading] = useState(false)
   const [stickers, setStickers] = useState<Sticker[]>([])
   const [selectedSticker, setSelectedSticker] = useState<number | null>(null)
 
@@ -515,36 +516,39 @@ export default function Editor({
     return () => clearTimeout(t)
   }, [panel, frameVersion, frameReady])
 
-  // The 3D effects engine loads on first use; once it's in, redo the
-  // still so the chosen effect appears (the live loop picks it up itself).
+  // Effects load in the background — the camera keeps running, the effect
+  // just appears once it's in; a still is redrawn then.
   useEffect(() => {
-    if (params.effectId === 'none') return
+    const id = params.effectId
+    if (id === 'none' || isEffectReady(id)) {
+      setEffectLoading(false)
+      return
+    }
     let cancelled = false
-    preloadAR().then(() => {
-      if (!cancelled && !live && !staticBusyRef.current) recomputeStatic()
-    })
+    setEffectLoading(true)
+    prepareEffect(id)
+      .catch(() => {})
+      .finally(() => {
+        if (cancelled) return
+        setEffectLoading(false)
+        if (!live && !staticBusyRef.current) recomputeStatic()
+      })
     return () => {
       cancelled = true
     }
   }, [params.effectId, live, recomputeStatic])
+  useEffect(() => onEffectReady(() => !live && !staticBusyRef.current && recomputeStatic()), [live, recomputeStatic])
 
-  // Looks and Effects preview on this very face, rendered when their panel
-  // opens (and again for each new still), progressively, not per live frame.
+  // Looks preview on this very face, rendered when the panel opens (and
+  // again for each new still), progressively, not per live frame.
   useEffect(() => {
-    if (panel !== 'looks' && panel !== 'effects') return
+    if (panel !== 'looks') return
     const base = baseRef.current
     if (!base || status === 'loading') return
     let cancelled = false
     const t = setTimeout(() => {
-      if (panel === 'looks') {
-        const items = LOOKS.map((l) => ({ id: l.id, params: applyLook(l, 1, { ...DEFAULT_PARAMS, effectId: 'none' }) }))
-        renderFaceThumbs(base, landmarksRef.current, items, 1, (id, url) => setLookThumbs((m) => ({ ...m, [id]: url })), () => cancelled)
-      } else {
-        const items = EFFECTS.filter((e) => e.id !== 'none' && e.id !== 'custom').map((e) => ({ id: e.id, params: { ...paramsRef.current, effectId: e.id } }))
-        preloadAR().then(() => {
-          if (!cancelled) renderFaceThumbs(base, landmarksRef.current, items, 1.75, (id, url) => setEffectThumbs((m) => ({ ...m, [id]: url })), () => cancelled)
-        })
-      }
+      const items = LOOKS.map((l) => ({ id: l.id, params: applyLook(l, 1, { ...DEFAULT_PARAMS, effectId: 'none' }) }))
+      renderFaceThumbs(base, landmarksRef.current, items, 1, (id, url) => setLookThumbs((m) => ({ ...m, [id]: url })), () => cancelled)
     }, 40)
     return () => {
       cancelled = true
@@ -975,6 +979,12 @@ export default function Editor({
           })()}
         </div>
       )}
+      {effectLoading && !showBefore && !processing && recordingSince === null && (
+        <div className="absolute left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/60 backdrop-blur-md text-[11px] font-semibold text-white" style={{ top: `calc(${topInset} + 3.25rem)` }}>
+          <IconSpinner className="w-3 h-3 animate-spin text-primary" />
+          Loading {findEffect(params.effectId).label}…
+        </div>
+      )}
       {(showBefore || processing) && (
         <div className="absolute left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/60 backdrop-blur-md text-[11px] font-semibold text-white" style={{ top: `calc(${topInset} + 3.25rem)` }}>
           {processing && !showBefore && <IconSpinner className="w-3 h-3 animate-spin text-primary" />}
@@ -1062,7 +1072,7 @@ export default function Editor({
                 ) : (
                   <ThumbStrip
                     items={EFFECTS.map((e) => ({ id: e.id, label: e.label, badge: e.boost ? '♥' : undefined }))}
-                    thumbs={effectThumbs}
+                    thumbs={EFFECT_THUMBS}
                     selected={params.effectId}
                     onSelect={(id) => {
                       // Custom: pick a photo first (or a new one, tapping it again).

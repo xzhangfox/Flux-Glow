@@ -66,6 +66,11 @@ export const EFFECTS: EffectDef[] = [
 
 export const findEffect = (id: string) => EFFECTS.find((e) => e.id === id) ?? EFFECTS[0]
 
+/** Each effect's preview tile: pre-rendered (public/effects), so opening
+ *  the strip never builds every model on the spot — doing that froze the
+ *  camera for seconds on a phone. */
+export const EFFECT_THUMBS: Record<string, string> = Object.fromEntries(EFFECTS.filter((e) => e.id !== 'none' && e.id !== 'custom').map((e) => [e.id, `/effects/${e.id}.jpg`]))
+
 /** The user's params with the effect's boost added (clamped to each
  *  slider's own range). */
 export function withEffectBoost<T extends EditParams>(params: T): T {
@@ -236,6 +241,48 @@ function sparkle(ctx: CanvasRenderingContext2D, c: Pt, r: number, color: string)
 }
 
 
+/** How to build `effectId`'s model. The animal heads are sculpted in a
+ *  worker; the rest are quick enough to make on the page, between frames. */
+function builderFor(a: AR, effectId: string, _slot: string): () => import('./ar/scene').Model | Promise<import('./ar/scene').Model> {
+  const heads: Record<string, 'shiba' | 'fox' | 'husky'> = { shibahead: 'shiba', foxhead: 'fox', huskyhead: 'husky' }
+  if (heads[effectId]) return () => a.animalHeadAsync(heads[effectId])
+  const special: Record<string, () => import('./ar/scene').Model> = { spider: a.spiderMask, bat: a.batCowl, custom: () => a.faceSticker(() => custom) }
+  return special[effectId] ?? (() => a.buildModel(effectId))
+}
+
+// Effects that came in after being asked for: listeners redraw stills,
+// thumbnails, paused video.
+const readyListeners = new Set<() => void>()
+const watching = new Set<string>()
+/** Calls `fn` whenever an effect finishes getting ready. Returns the
+ *  unsubscribe. */
+export function onEffectReady(fn: () => void): () => void {
+  readyListeners.add(fn)
+  return () => readyListeners.delete(fn)
+}
+function watchReady(effectId: string, slot: string) {
+  const key = `${slot}:${effectId}`
+  if (watching.has(key) || !ar) return
+  watching.add(key)
+  ar.prepareModel(effectId, slot, builderFor(ar, effectId, slot))
+    .catch((err) => console.warn('Effect failed to load', effectId, err))
+    .finally(() => {
+      watching.delete(key)
+      readyListeners.forEach((fn) => fn())
+    })
+}
+
+/** Gets `effectId` ready for face `slot` (loading the 3D engine first if
+ *  need be), in the background. Resolves when it can be drawn. */
+export async function prepareEffect(effectId: string, slot = ''): Promise<void> {
+  if (!THREE_D.has(effectId)) return
+  const a = await preloadAR()
+  await a.prepareModel(effectId, slot, builderFor(a, effectId, slot))
+}
+
+/** Is `effectId` ready to draw for face `slot` (no wait on first use)? */
+export const isEffectReady = (effectId: string, slot = '') => !THREE_D.has(effectId) || (!!ar && ar.isModelReady(effectId, slot))
+
 const THREE_D = new Set(['foxhead', 'huskyhead', 'shibahead', 'kitty', 'fox', 'bunny', 'bear', 'spider', 'bat', 'sport', 'wayfarer', 'crown', 'faun', 'angel', 'stars', 'custom'])
 
 // The Custom effect's picture: a square the user cropped from their own
@@ -266,11 +313,13 @@ export function drawEffect(canvas: HTMLCanvasElement, P: P3[], effectId: string,
       preloadAR()
       return
     }
-    const { renderAR, spiderMask, batCowl, foxHead, huskyHead, shibaHead, faceSticker, buildModel } = ar
-    const special: Record<string, () => import('./ar/scene').Model> = { spider: spiderMask, bat: batCowl, foxhead: foxHead, huskyhead: huskyHead, shibahead: shibaHead, custom: () => faceSticker(() => custom) }
-    const build = special[effectId] ?? (() => buildModel(effectId))
     try {
-      renderAR(canvas, P, effectId, build, t, live, slot)
+      if (!ar.renderAR(canvas, P, effectId, builderFor(ar, effectId, slot), t, live, slot)) {
+        // Still being got ready (in the background): the frame goes out
+        // without it, and whoever is waiting hears when it's in.
+        watchReady(effectId, slot)
+        return
+      }
     } catch (err) {
       // No WebGL (or it was lost): the photo is still fine without the prop.
       console.warn('AR effect unavailable', err)

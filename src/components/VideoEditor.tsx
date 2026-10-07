@@ -4,7 +4,7 @@ import { DEFAULT_PARAMS, faceFocus, processFaces, type EditParams, type FaceEdit
 import { analyzeVideo, preloadVideoModels, type PersonInfo, type VideoAnalysis } from '../lib/video/analyze'
 import { canExportVideo, exportVideo, type ExportResult } from '../lib/video/export'
 import { ensureSeekable } from '../lib/video/source'
-import { EFFECTS, findEffect, preloadAR } from '../lib/effects'
+import { EFFECTS, EFFECT_THUMBS, findEffect, onEffectReady, prepareEffect } from '../lib/effects'
 import { LOOKS, applyLook, findLook } from '../lib/looks'
 import { renderFaceThumbs } from '../lib/thumbs'
 import { renderFilterThumbnails } from '../lib/filters'
@@ -154,7 +154,6 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
   const [showBefore, setShowBefore] = useState(false)
   const [tags, setTags] = useState<{ id: number; x0: number; y0: number; x1: number; y1: number }[]>([])
   const [lookThumbs, setLookThumbs] = useState<Record<string, string>>({})
-  const [effectThumbs, setEffectThumbs] = useState<Record<string, string>>({})
   const [filterThumbs, setFilterThumbs] = useState<Map<string, string> | null>(null)
   const [toast, setToast] = useState<{ key: number; text: string } | null>(null)
 
@@ -237,12 +236,9 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
     }
   }, [file, initial])
 
-  // 3D effects load on first use.
+  // 3D effects load in the background, one model per person wearing one;
+  // the (paused) preview redraws as each comes in.
   const anyEffect = all.effectId !== 'none' || Object.values(per).some((p) => p.effectId !== 'none')
-  useEffect(() => {
-    if (anyEffect) preloadAR().then(() => renderNow())
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [anyEffect])
 
   // ---- Rendering ----
   const paramsFor = (id: number, s = state.current): EditParams | null => (s.off[id] ? null : (s.per[id] ?? s.all))
@@ -288,6 +284,9 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [updateTags],
   )
+
+  // (paused: redraw as each effect comes in)
+  useEffect(() => onEffectReady(() => !videoRef.current?.paused || renderNow()), [renderNow])
 
   // Playback: retouch each frame as the video presents it.
   useEffect(() => {
@@ -364,24 +363,16 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
   const focusPerson = target === 'all' ? people[0] : people.find((p) => p.id === target)
   const anyFaces = people.length > 0
 
-  // Previews of looks and effects on the person being edited.
+  // Previews of looks on the person being edited (effects have ready-made
+  // tiles).
   useEffect(() => {
-    if ((panel !== 'looks' && panel !== 'effects') || !focusPerson) return
+    if (panel !== 'looks' || !focusPerson) return
     let cancelled = false
     const { frame, landmarks } = focusPerson.best
     const t = setTimeout(() => {
-      if (panel === 'looks') {
-        setLookThumbs({})
-        const items = LOOKS.map((l) => ({ id: l.id, params: applyLook(l, 1, { ...DEFAULT_PARAMS, effectId: 'none' }) }))
-        renderFaceThumbs(frame, landmarks, items, 1, (id, u) => setLookThumbs((m) => ({ ...m, [id]: u })), () => cancelled)
-      } else {
-        setEffectThumbs({})
-        const base = { ...current }
-        const items = EFFECTS.filter((e) => e.id !== 'none' && e.id !== 'custom').map((e) => ({ id: e.id, params: { ...base, effectId: e.id } }))
-        preloadAR().then(() => {
-          if (!cancelled) renderFaceThumbs(frame, landmarks, items, 1.75, (id, u) => setEffectThumbs((m) => ({ ...m, [id]: u })), () => cancelled)
-        })
-      }
+      setLookThumbs({})
+      const items = LOOKS.map((l) => ({ id: l.id, params: applyLook(l, 1, { ...DEFAULT_PARAMS, effectId: 'none' }) }))
+      renderFaceThumbs(frame, landmarks, items, 1, (id, u) => setLookThumbs((m) => ({ ...m, [id]: u })), () => cancelled)
     }, 40)
     return () => {
       cancelled = true
@@ -441,7 +432,8 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
       showToast('Exporting needs a newer browser')
       return
     }
-    if (anyEffect) await preloadAR()
+    // Every effect anyone wears, ready before the first frame goes out.
+    if (anyEffect) await Promise.all(an.people.map((p) => paramsFor(p.id)).flatMap((q, i) => (q && q.effectId !== 'none' ? [prepareEffect(q.effectId, `p${an.people[i].id}`)] : []))).catch(() => {})
     const ac = new AbortController()
     exportAbort.current = ac
     setExporting({ progress: 0, started: performance.now() })
@@ -670,7 +662,7 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
                 ) : (
                   <ThumbStrip
                     items={EFFECTS.filter((e) => e.id !== 'custom').map((e) => ({ id: e.id, label: e.label, badge: e.boost ? '♥' : undefined }))}
-                    thumbs={effectThumbs}
+                    thumbs={EFFECT_THUMBS}
                     selected={current.effectId}
                     onSelect={(id) => editTarget((p) => ({ ...p, effectId: id }))}
                     fallback={(id) => (id === 'none' ? <IconClose className="w-6 h-6 text-white/60" /> : null)}
