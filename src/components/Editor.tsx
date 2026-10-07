@@ -18,6 +18,7 @@ import { LOOKS, applyLook, findLook } from '../lib/looks'
 import { EFFECTS, EFFECT_THUMBS, findEffect, isEffectReady, onEffectReady, prepareEffect, setCustomImage } from '../lib/effects'
 import CropDialog from './CropDialog'
 import VideoReview from './VideoReview'
+import type { RecordView } from '../lib/video/render'
 import { downloadBlob, isIOS, isVideoFile, timestampedName } from '../lib/save'
 import { renderFaceThumbs } from '../lib/thumbs'
 import { artImage, drawStickers, emojiCanvas, photoSticker, placeSticker, textCanvas, type Sticker } from '../lib/stickers'
@@ -84,6 +85,8 @@ function loadImage(file: File): Promise<HTMLImageElement> {
 }
 
 const FULL_FRAME = { x0: 0, y0: 0, fw: 1, fh: 1 }
+// Rendering a recording at full quality needs WebCodecs (decode + encode).
+const canRenderVideo = () => typeof VideoEncoder !== 'undefined' && typeof VideoDecoder !== 'undefined'
 
 const nextPaint = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)))
 
@@ -193,9 +196,10 @@ export default function Editor({
   // Two recordings at once: what the viewfinder shows (effects and all) to
   // keep as is, and the same frames before any retouch, so the video editor
   // can redo the retouch person by person.
-  const recRef = useRef<{ rec: MediaRecorder; audio: MediaStream | null; clean: MediaRecorder | null } | null>(null)
-  const cleanRef = useRef<HTMLCanvasElement | null>(null)
-  const [review, setReview] = useState<{ video: Blob; clean: Blob | null; params: EditParams } | null>(null)
+  const recRef = useRef<{ rec: MediaRecorder; audio: MediaStream | null; raw: MediaRecorder | null } | null>(null)
+  // `raw`: the camera's own stream, recorded as it came, with how the
+  // preview framed it — rendered to full quality afterwards.
+  const [review, setReview] = useState<{ video: Blob; raw: Blob | null; view: RecordView; params: EditParams } | null>(null)
   const pressTimerRef = useRef<number | null>(null)
   const pressHandledRef = useRef(false)
   const [processing, setProcessing] = useState(false)
@@ -344,7 +348,10 @@ export default function Editor({
       // ever runs. A 4:3 shape instead: phone sensors are natively 4:3, and
       // the 16:9 modes browsers otherwise pick cut a quarter of the width
       // off a portrait selfie.
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facingModeRef.current, width: { ideal: 1440 }, aspectRatio: { ideal: 4 / 3 } } })
+      // Up to 1920 on the long side and 60 fps where the camera has them:
+      // recordings are taken straight from this stream (the live preview
+      // works on a scaled-down copy, so it costs it nothing).
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facingModeRef.current, width: { ideal: 1920 }, aspectRatio: { ideal: 4 / 3 }, frameRate: { ideal: 60 } } })
       if (gen !== liveGenRef.current) {
         stream.getTracks().forEach((t) => t.stop())
         return
@@ -393,14 +400,6 @@ export default function Editor({
             resultRef.current = processFrame(base, landmarks, paramsRef.current, false)
             setStatus(landmarks ? 'ready' : 'no-face')
             render()
-            const clean = recRef.current?.clean ? cleanRef.current : null
-            if (clean) {
-              if (clean.width !== base.width || clean.height !== base.height) {
-                clean.width = base.width
-                clean.height = base.height
-              }
-              clean.getContext('2d')!.drawImage(base, 0, 0)
-            }
           })
           .catch(() => {})
           .finally(() => {
@@ -618,7 +617,7 @@ export default function Editor({
     const r = recRef.current
     if (!r) return
     if (r.rec.state !== 'inactive') r.rec.stop()
-    if (r.clean && r.clean.state !== 'inactive') r.clean.stop()
+    if (r.raw && r.raw.state !== 'inactive') r.raw.stop()
   }, [])
 
   const startRecording = async () => {
@@ -657,45 +656,50 @@ export default function Editor({
       showToast("Video recording isn't supported in this browser")
       return
     }
-    // The untouched copy, for editing afterwards. Best effort: without it
-    // the editor starts from the retouched video instead.
-    const cleanCanvas = (cleanRef.current ??= document.createElement('canvas')) as CaptureCanvas
-    if (baseRef.current) {
-      cleanCanvas.width = baseRef.current.width
-      cleanCanvas.height = baseRef.current.height
-      cleanCanvas.getContext('2d')!.drawImage(baseRef.current, 0, 0)
+    // The camera's own stream, recorded as it comes: full resolution, its
+    // full frame rate (60 fps where it has it), the phone's hardware
+    // encoder. The look is rendered onto it afterwards, frame by frame —
+    // the recording above is only what the preview managed live. Best
+    // effort: without it the review keeps that one.
+    const camTrack = streamRef.current?.getVideoTracks()[0]
+    const video0 = videoRef.current
+    const view: RecordView = {
+      crop: video0 ? cropRectFor(video0.videoWidth, video0.videoHeight, aspectRatioFor(aspectRef.current), cropZoom(zoomRef.current, zoomRangeRef.current)) : FULL_FRAME,
+      mirror: facingModeRef.current === 'user',
     }
-    let clean: MediaRecorder | null = null
+    let raw: MediaRecorder | null = null
     try {
-      const cs = cleanCanvas.captureStream!(30)
-      audio?.getAudioTracks().forEach((t) => cs.addTrack(t.clone()))
-      clean = new MediaRecorder(cs, opts(8_000_000))
+      if (camTrack && canRenderVideo()) {
+        const rs = new MediaStream([camTrack])
+        audio?.getAudioTracks().forEach((t) => rs.addTrack(t.clone()))
+        raw = new MediaRecorder(rs, opts(16_000_000))
+      }
     } catch {
-      clean = null
+      raw = null
     }
     const chunks: Blob[] = []
-    const cleanChunks: Blob[] = []
+    const rawChunks: Blob[] = []
     rec.ondataavailable = (e) => e.data.size && chunks.push(e.data)
-    if (clean) clean.ondataavailable = (e) => e.data.size && cleanChunks.push(e.data)
+    if (raw) raw.ondataavailable = (e) => e.data.size && rawChunks.push(e.data)
     const mime = () => rec.mimeType || type || 'video/webm'
     const stopped = (r: MediaRecorder | null) => new Promise<void>((res) => (!r || r.state === 'inactive' ? res() : r.addEventListener('stop', () => res(), { once: true })))
     const params = { ...paramsRef.current }
-    recRef.current = { rec, audio, clean }
+    recRef.current = { rec, audio, raw }
     rec.start(250)
-    clean?.start(250)
+    raw?.start(250)
     // (only once both have started: a recorder not yet started reads as
     // already stopped)
-    Promise.all([stopped(rec), stopped(clean)]).then(() => {
+    Promise.all([stopped(rec), stopped(raw)]).then(() => {
       const r = recRef.current
       r?.audio?.getTracks().forEach((t) => t.stop())
       recRef.current = null
       setRecordingSince(null)
       if (!chunks.length) return
       const video = new Blob(chunks, { type: mime() })
-      const cleanBlob = cleanChunks.length ? new Blob(cleanChunks, { type: clean?.mimeType || mime() }) : null
+      const rawBlob = rawChunks.length ? new Blob(rawChunks, { type: raw?.mimeType || mime() }) : null
       // Watch it before keeping it: the camera pauses under the review.
       stopLive()
-      setReview({ video, clean: cleanBlob, params })
+      setReview({ video, raw: rawBlob, view, params })
     })
     navigator.vibrate?.(25)
     setRecordingSince(Date.now())
@@ -1238,18 +1242,19 @@ export default function Editor({
       {review && (
         <VideoReview
           blob={review.video}
+          hd={review.raw ? { raw: review.raw, view: review.view, params: review.params } : undefined}
           onClose={() => {
             setReview(null)
             startLive()
           }}
           onEdit={
             onEditVideo
-              ? () => {
+              ? (clean?: Blob) => {
                   const r = review
                   setReview(null)
                   // The untouched copy starts from the settings it was
                   // filmed with; the retouched one (no copy) from scratch.
-                  onEditVideo(r.clean ?? r.video, r.clean ? r.params : { ...DEFAULT_PARAMS, smoothness: 0, face: 0 })
+                  onEditVideo(clean ?? r.video, clean ? r.params : { ...DEFAULT_PARAMS, smoothness: 0, face: 0 })
                 }
               : undefined
           }

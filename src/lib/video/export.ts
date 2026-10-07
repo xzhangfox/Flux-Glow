@@ -1,6 +1,7 @@
 import { ALL_FORMATS, BlobSource, BufferTarget, Conversion, Input, Mp4OutputFormat, Output, QUALITY_HIGH, canEncodeAudio, getFirstEncodableVideoCodec } from 'mediabunny'
 import { processFaces, type EditParams, type FaceEdit } from '../pipeline'
 import type { VideoAnalysis } from './analyze'
+import { withFrameDurations } from './source'
 
 // Renders the edited video: every frame decoded, each person retouched with
 // their own settings at their smoothed landmarks for that frame, the
@@ -37,7 +38,9 @@ export async function exportVideo(
   signal?: AbortSignal,
 ): Promise<ExportResult> {
   if (!canExportVideo()) throw new Error('Exporting video needs a newer browser (WebCodecs).')
-  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
+  // (a recording's WebM has frames without durations, which re-encoding
+  // would drop)
+  const input = new Input({ source: new BlobSource(await withFrameDurations(file)), formats: ALL_FORMATS })
   try {
     const vt = await input.getPrimaryVideoTrack()
     if (!vt) throw new Error('This file has no video.')

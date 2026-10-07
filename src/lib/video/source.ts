@@ -67,3 +67,28 @@ export function toShareableMp4(file: Blob): Promise<Blob> {
   shareable.set(file, p)
   return p
 }
+
+/**
+ * `file` with a duration on every frame. MediaRecorder's WebM leaves the
+ * frame at each chunk boundary without one, and a frame without a
+ * duration is skipped when re-encoding — a third of a camera recording's
+ * frames went missing that way. Repackaged into MP4 (the same encoded
+ * frames and sound, no re-encode), every frame gets the time to the next
+ * one. Anything that isn't WebM is returned as is.
+ */
+export async function withFrameDurations(file: Blob): Promise<Blob> {
+  if (!/webm|matroska/i.test(file.type)) return file
+  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
+  try {
+    const output = new Output({ format: new Mp4OutputFormat(), target: new BufferTarget() })
+    const conversion = await Conversion.init({ input, output })
+    if (!conversion.isValid) return file
+    await conversion.execute()
+    const buf = (output.target as BufferTarget).buffer
+    return buf ? new Blob([buf], { type: 'video/mp4' }) : file
+  } catch {
+    return file
+  } finally {
+    input.dispose()
+  }
+}
