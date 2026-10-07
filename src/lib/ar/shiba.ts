@@ -135,6 +135,15 @@ let D: Design = DESIGNS.shiba
 // proportions are measured off the six views; shibaHead() scales the result
 // up to cover the wearer's head.
 
+/** The two pads under the nose, before they're cut along the mouth line. */
+function padsRaw(x: number, y: number, z: number) {
+  const xm = x / D.muzzle.width
+  const ml = D.muzzle.len
+  let pads = Infinity
+  for (const s of [-1, 1]) pads = smin(pads, ellipsoid(xm - s * 0.16, y + 0.6, z - 0.4 - ml, 0.29, 0.18, 0.17), 0.035)
+  return pads
+}
+
 /** Head without ears and spikes. */
 function headBody(x: number, y: number, z: number) {
   // Cranium: a round dome, a little shorter front to back than across.
@@ -162,8 +171,7 @@ function headBody(x: number, y: number, z: number) {
   // The two round pads under the nose that the mouth curls round: made a
   // little too big, then cut off along the mouth line, so their lower edge
   // is exactly where the line is drawn — line and lip are one edge.
-  let pads = Infinity
-  for (const s of [-1, 1]) pads = smin(pads, ellipsoid(xm - s * 0.15, y + 0.6, z - 0.4 - ml, 0.23, 0.18, 0.16), 0.035)
+  let pads = padsRaw(x, y, z)
   const ax = Math.abs(x)
   const lip = lipSegment(ax)
   // ...below along the line, and at the sides where it turns up at the
@@ -174,7 +182,7 @@ function headBody(x: number, y: number, z: number) {
   if (lip) pads = smax(pads, (lip.y - y) / Math.sqrt(1 + lip.slope * lip.slope), 0.012)
   // (the side softly rounded, and just past the line, so the upturn sits
   // on the pad's front rather than on a sharp wall)
-  pads = smax(pads, ax - cx - 0.02, 0.045)
+  pads = smax(pads, ax - cx - 0.03, 0.09)
   d = smin(d, pads, 0.03)
   // ...with a shallow groove down between them from the nose.
   d = smax(d, -(Math.hypot(x / 0.5, (z - 0.58 - ml) / 0.5) * 0.5 - 0.018 + Math.max(0, y + 0.47) * 2 + Math.max(0, -0.68 - y) * 2), 0.02)
@@ -588,6 +596,23 @@ function surfaceNets(f: (x: number, y: number, z: number) => number, min: V3, ma
 
 // ---- Face features ------------------------------------------------------------
 
+/** The lip line's point at (x, y), lifted a hair off the surface. */
+function lipEdge(x: number, y: number) {
+  // On the pads' own (uncut) surface: smooth, where the full surface steps
+  // from pad to cheek. The pads reach past the line's end, so the whole
+  // line stays on their front.
+  const q = V(x, y, 2)
+  for (let i = 0; i < 300; i++) {
+    const d = padsRaw(q.x, q.y, q.z)
+    if (d < 2e-4) break
+    q.z -= Math.max(d * 0.8, 5e-4)
+    if (q.z < -1) return onFront(x, y).add(V(0, 0, 0.004))
+  }
+  const e = 0.002
+  const n = V(padsRaw(q.x + e, q.y, q.z) - padsRaw(q.x - e, q.y, q.z), padsRaw(q.x, q.y + e, q.z) - padsRaw(q.x, q.y - e, q.z), padsRaw(q.x, q.y, q.z + e) - padsRaw(q.x, q.y, q.z - e)).normalize()
+  return q.addScaledVector(n, 0.006)
+}
+
 /** The surface point at (x, y), marching in from the front. */
 function onFront(x: number, y: number) {
   const q = V(x, y, 2)
@@ -803,21 +828,27 @@ function paintTexture() {
  *  drawn: the closed "ω" (to where it starts to hook up), or the open
  *  smile's upper lip. In the head's coordinates (muzzle width and nose
  *  height applied). */
-function upperLipLine(): [number, number][] {
+function upperLipStroke(): [number, number][] {
   const half: [number, number][] =
     D.mouth === 'open'
       ? openMouth()[0].map(([x, y]) => [-x, y])
-      : [[0, -0.64], [0.06, -0.69], [0.16, -0.715], [0.26, -0.69], [0.33, -0.61], [0.365, -0.52]]
+      : // (curling up at the corner without turning back on itself)
+        [[0, -0.64], [0.06, -0.69], [0.16, -0.715], [0.26, -0.69], [0.33, -0.615], [0.365, -0.535], [0.375, -0.49]]
   const dy = D.nose.y + 0.38
-  return half.map(([x, y]) => [x * D.muzzle.width, y + dy])
+  return smoothCurve(half.map(([x, y]) => [x * D.muzzle.width, y + dy]), 64)
 }
-let LIP: [number, number][] = []
 
-/** The upper lip line's height at |x| = `ax`, or null beyond its corner. */
-function upperLipY(ax: number): number | null {
-  const s = lipSegment(ax)
-  return s ? s.y : null
+/** A smooth curve through `pts` (centripetal-ish Catmull-Rom), `n` points:
+ *  the cut and the drawn line both follow this, so neither has corners. */
+function smoothCurve(pts: [number, number][], n: number): [number, number][] {
+  const c = new THREE.CatmullRomCurve3(pts.map(([x, y]) => V(x, y, 0)), false, 'centripetal')
+  return c.getSpacedPoints(n - 1).map((p) => [p.x, p.y])
 }
+
+/** The upper lip's line from the middle out (as drawn), and its part the
+ *  pads are cut along: up to where it turns back in at the corner. */
+let STROKE: [number, number][] = []
+let LIP: [number, number][] = []
 
 /** Height and slope of the upper lip line at |x| = `ax`. */
 function lipSegment(ax: number): { y: number; slope: number } | null {
@@ -907,9 +938,22 @@ const built = new Map<string, THREE.BufferGeometry>()
 /** Make `d` the design being built (the field, ears and fur follow it). */
 function selectDesign(d: Design) {
   D = d
-  LIP = upperLipLine()
+  STROKE = upperLipStroke()
+  let far = 0
+  STROKE.forEach(([x], i) => x > STROKE[far][0] && (far = i))
+  LIP = STROKE.slice(0, far + 1)
   EARS = [makeEar(-1), makeEar(1)]
   buildSpikes()
+}
+
+/** The head's vertex colour at surface point `p` (as headGeometry bakes
+ *  it, crease shading included). */
+function headColorAt(p: V3) {
+  const e = 0.004
+  const g = V(sdf(p.x + e, p.y, p.z) - sdf(p.x - e, p.y, p.z), sdf(p.x, p.y + e, p.z) - sdf(p.x, p.y - e, p.z), sdf(p.x, p.y, p.z + e) - sdf(p.x, p.y, p.z - e)).normalize()
+  const o = 0.05
+  const occ = Math.max(0.68, Math.min(1, 1 - 4 * Math.max(0, o - sdf(p.x + g.x * o, p.y + g.y * o, p.z + g.z * o))))
+  return colorAt(p).multiplyScalar(occ)
 }
 
 function headGeometry() {
@@ -984,11 +1028,18 @@ function animalHead(design: Design): Model {
   const paint = new THREE.MeshStandardMaterial({ map: paintTexture(), transparent: true, roughness: 0.65, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 })
   sculpt.add(decal(0, 0, 2 * PAINT, 2 * PAINT, paint, 0.003, 40, true))
 
-  // Eyes: big, a little inset under the brow.
+  // Eyes: big, a little inset under the brow; they blink with the wearer.
+  const lids: { side: number; blink: { value: number } }[] = []
   for (const s of [-1, 1]) {
-    const eyeMat = new THREE.MeshStandardMaterial({ map: eyeTexture(s < 0), transparent: true, alphaTest: 0.4, roughness: 0.7 })
+    // (the same surface as the head, so the lid, when down, matches it)
+    const eyeMat = new THREE.MeshPhysicalMaterial({ map: eyeTexture(s < 0), transparent: true, alphaTest: 0.4, roughness: 0.62, sheen: 0.35, sheenRoughness: 0.5, sheenColor: new THREE.Color(0xffe6cc), envMapIntensity: 0.6 })
+    // The lid is the head's own colour round this eye, shaded as the head
+    // is there.
+    const blink = withEyelid(eyeMat, headColorAt(onFront(s * 0.48, 0.05)))
+    lids.push({ side: s, blink })
     sculpt.add(decal(s * 0.48, -0.02, 0.68 * D.eye.size, 0.76 * D.eye.size, eyeMat, 0.006))
   }
+  const blinker = new Blinker()
 
   // Nose: a matte rounded triangle, broad on top, on the tip of the muzzle.
   const tip = onFront(0, D.nose.y)
@@ -1017,33 +1068,115 @@ function animalHead(design: Design): Model {
           // The upper lip over the open mouth, its corners curling up, and
           // the lower lip round under it.
           [[0, -0.5], [0, -0.645]],
-          openMouth()[0],
-          openMouth()[0].map(([x, y]): [number, number] => [-x, y]),
           openMouth()[1],
         ]
-      : [
-          [[0, -0.5], [0, -0.64]],
-          [[0, -0.64], [-0.06, -0.69], [-0.16, -0.715], [-0.26, -0.69], [-0.33, -0.61], [-0.365, -0.52], [-0.35, -0.48]],
-          [[0, -0.64], [0.06, -0.69], [0.16, -0.715], [0.26, -0.69], [0.33, -0.61], [0.365, -0.52], [0.35, -0.48]],
-        ]
+      : [[[0, -0.5], [0, -0.64]]]
   ).map((st) => st.map(([x, y]): [number, number] => [x * mw, y + dy]))
-  for (const st of strokes) {
-    const pts = st.map(([x, y]) => {
-      // Points on the upper lip sit on the pads' cut edge, a hair above it.
-      const lip = upperLipY(Math.abs(x))
-      const onLip = lip !== null && Math.abs(y - lip) < 0.004
-      return onFront(x, onLip ? y + 0.006 : y).add(V(0, onLip ? -0.004 : 0, 0.004))
-    })
-    sculpt.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 48, 0.0085, 8, false), line))
-    for (const end of [pts[0], pts[pts.length - 1]]) {
+  const lines: V3[][] = strokes.map((st) => st.map(([x, y]) => onFront(x, y).add(V(0, 0, 0.004))))
+  // The upper lip, each half: traced along the pads' own surface just above
+  // the cut, densely, so it runs smoothly round the pads from every angle
+  // (projecting a few points straight in from the front made it wander
+  // where the surface turns away).
+  for (const side of [-1, 1]) lines.push(STROKE.map(([x, y]) => lipEdge(side * x, y + 0.005)))
+  lines.forEach((pts, k) => {
+    // The lip lines (the last two) taper off to a point where they curl up
+    // into the cheek, like a brush stroke.
+    const taper = k >= lines.length - 2
+    // (and the open mouth's lower lip at both ends)
+    const both = D.mouth === 'open' && k === 1
+    const T = Math.max(16, pts.length * 2)
+    const curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal')
+    const g = new THREE.TubeGeometry(curve, T, 0.0085, 8, false)
+    if (taper || both) {
+      const pos = g.getAttribute('position') as THREE.BufferAttribute
+      const c = V(0, 0, 0)
+      const v = V(0, 0, 0)
+      for (let i = 0; i <= T; i++) {
+        curve.getPointAt(i / T, c)
+        const w = (1 - 0.75 * ss(i / T, 0.72, 1)) * (both ? 1 - 0.75 * ss(i / T, 0.28, 0) : 1)
+        for (let j = 0; j <= 8; j++) {
+          const n = i * 9 + j
+          v.fromBufferAttribute(pos, n).sub(c).multiplyScalar(w).add(c)
+          pos.setXYZ(n, v.x, v.y, v.z)
+        }
+      }
+      g.computeVertexNormals()
+    }
+    sculpt.add(new THREE.Mesh(g, line))
+    // Round caps (just the start of a tapered line: its end is a point).
+    for (const end of both ? [] : taper ? [pts[0]] : [pts[0], pts[pts.length - 1]]) {
       const cap = new THREE.Mesh(new THREE.SphereGeometry(0.0085, 8, 6), line)
       cap.position.copy(end)
       sculpt.add(cap)
     }
-  }
+  })
   return {
     root,
     fullHead: true,
-    update(_rig: Rig) {},
+    update(rig: Rig) {
+      const closed = blinker.update(rig)
+      for (const l of lids) l.blink.value = l.side < 0 ? closed.left : closed.right
+    },
+  }
+}
+
+/** Adds an upper eyelid to an eye decal's material, in `lid` (the face's
+ *  colour there): at 0 it's up out of sight, and as it comes down it
+ *  covers the eye with a dark lash line along its edge, until at 1 only
+ *  a curved closed-eye line is left. Returns the uniform to drive. */
+function withEyelid(mat: THREE.MeshPhysicalMaterial, lid: THREE.Color) {
+  const blink = { value: 0 }
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uBlink = blink
+    sh.uniforms.uLid = { value: lid }
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform float uBlink;\nuniform vec3 uLid;')
+      .replace(
+        '#include <map_fragment>',
+        `#include <map_fragment>
+        {
+          // Eye texture space: the eye spans ${EYE_MARGIN} .. ${1 - EYE_MARGIN} (y up).
+          float u = clamp((vMapUv.x - ${EYE_MARGIN}) / ${1 - 2 * EYE_MARGIN}, 0.0, 1.0);
+          float b = clamp(uBlink, 0.0, 1.0);
+          // The lid's edge: down from above the eye to just below its
+          // middle, bowing downward as it closes (a closed eye's smile).
+          float edge = mix(${1 - EYE_MARGIN + 0.04}, 0.5, b) - 0.1 * b * sin(3.14159 * u);
+          float above = smoothstep(edge - 0.006, edge + 0.006, vMapUv.y);
+          // Fully shut: what's left under the lid goes too.
+          float cover = max(above, smoothstep(0.85, 1.0, b));
+          vec3 col = mix(diffuseColor.rgb, uLid, cover);
+          float lash = (1.0 - smoothstep(0.012, 0.03, abs(vMapUv.y - edge))) * smoothstep(0.05, 0.2, b);
+          diffuseColor.rgb = mix(col, vec3(0.025, 0.025, 0.03), lash);
+        }`,
+      )
+  }
+  mat.customProgramCacheKey = () => 'eyelid'
+  mat.userData.blink = blink
+  return blink
+}
+
+/** How shut each of the wearer's eyes is (0 open .. 1 shut), on screen
+ *  left and right, from the lid gap over the eye's width. Calibrates
+ *  itself to how wide this wearer's eyes open, and settles quickly but
+ *  without flicker on a live feed. */
+class Blinker {
+  private open = { left: 0.28, right: 0.28 }
+  private shut = { left: 0, right: 0 }
+
+  update(rig: Rig): { left: number; right: number } {
+    const P = rig.world
+    const ratio = (up: number, lo: number, a: number, b: number) => Math.hypot(P[up].x - P[lo].x, P[up].y - P[lo].y) / Math.max(1e-6, Math.hypot(P[a].x - P[b].x, P[a].y - P[b].y))
+    const eyes = [
+      { r: ratio(159, 145, 33, 133), x: rig.local(33).x + rig.local(133).x },
+      { r: ratio(386, 374, 362, 263), x: rig.local(362).x + rig.local(263).x },
+    ]
+    for (const e of eyes) {
+      const k = e.x < 0 ? 'left' : 'right'
+      // This wearer's open eye: the widest seen lately.
+      this.open[k] = Math.max(0.18, Math.max(e.r, this.open[k] - (rig.live ? 0.0008 : 0)))
+      const target = 1 - ss(e.r / this.open[k], 0.3, 0.72)
+      this.shut[k] = rig.live ? this.shut[k] + (target - this.shut[k]) * 0.7 : target
+    }
+    return this.shut
   }
 }
