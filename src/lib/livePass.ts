@@ -57,6 +57,9 @@ function blurSmall(source: HTMLCanvasElement, radiusPx: number): ImageData {
   return ctx.getImageData(0, 0, canvas.width, canvas.height)
 }
 
+/** The frame size (long side) the blur radii here were tuned at. */
+const TUNED_SIZE = 1600
+
 export function applyLiveTonePass(canvas: HTMLCanvasElement, mask: HTMLCanvasElement, params: LiveToneParams, bounds: { minX: number; minY: number; maxX: number; maxY: number }): void {
   const bx = Math.max(0, Math.floor(bounds.minX))
   const by = Math.max(0, Math.floor(bounds.minY))
@@ -83,7 +86,9 @@ export function applyLiveTonePass(canvas: HTMLCanvasElement, mask: HTMLCanvasEle
   // an already-small bounds rect (e.g. editing a small/cropped photo) the
   // blurs are cheap regardless and downsampling would only cost quality
   // for no real speed gain.
-  const scale = bw * bh > 120_000 ? 2 : 1
+  // And scaled with the frame beyond the size the radii were tuned at, so a
+  // full-resolution photo gets the same look as its editing-size copy.
+  const scale = (bw * bh > 120_000 ? 2 : 1) * Math.max(1, Math.max(canvas.width, canvas.height) / TUNED_SIZE)
   const sw = Math.max(1, Math.round(bw / scale))
   const sh = Math.max(1, Math.round(bh / scale))
 
@@ -126,6 +131,8 @@ export function applyLiveTonePass(canvas: HTMLCanvasElement, mask: HTMLCanvasEle
   }
 
   const out = new ImageData(sw, sh)
+  // (reduced resolution: the change instead, split by sign — see below)
+  const neg = scale === 1 ? null : new ImageData(sw, sh)
   const DEVIATION_THRESHOLD = 16
   const DEVIATION_RANGE = 40
   const wrinkleReduction = params.wrinkleRemoval * 0.7
@@ -186,18 +193,52 @@ export function applyLiveTonePass(canvas: HTMLCanvasElement, mask: HTMLCanvasEle
       b = Math.max(0, Math.min(255, lowB * (1 - amount) + toneB * amount + (b - lowB)))
     }
 
-    out.data[i] = r
-    out.data[i + 1] = g
-    out.data[i + 2] = b
-    out.data[i + 3] = orig.data[i + 3]
+    if (scale === 1) {
+      out.data[i] = r
+      out.data[i + 1] = g
+      out.data[i + 2] = b
+      out.data[i + 3] = orig.data[i + 3]
+    } else {
+      // The change, not the picture: what's added in `out`, what's taken
+      // away in `neg` (clamped bytes can't go below 0).
+      const dr = r - orig.data[i]
+      const dg = g - orig.data[i + 1]
+      const db = b - orig.data[i + 2]
+      out.data[i] = dr
+      out.data[i + 1] = dg
+      out.data[i + 2] = db
+      out.data[i + 3] = 255
+      neg!.data[i] = -dr
+      neg!.data[i + 1] = -dg
+      neg!.data[i + 2] = -db
+      neg!.data[i + 3] = 255
+    }
   }
 
+  const ctx = canvas.getContext('2d')!
   if (scale === 1) {
-    canvas.getContext('2d')!.putImageData(out, bx, by)
-  } else {
-    // Upsample via a hardware-accelerated draw, not another per-pixel
-    // pass — the only extra cost is one GPU draw call, no readback.
-    sctx.putImageData(out, 0, 0)
-    canvas.getContext('2d')!.drawImage(small, 0, 0, sw, sh, bx, by, bw, bh)
+    ctx.putImageData(out, bx, by)
+    return
   }
+  // At reduced resolution it's the change that gets scaled back up and
+  // applied to the full-resolution pixels — the smoothing and toning are
+  // soft by nature, but eyes, brows, lashes and lips inside the face's box
+  // keep every bit of their own detail. (Drawing the reduced picture itself
+  // back over the box blurred all of them.) All on the GPU, no readback:
+  // add with 'lighter'; subtract as invert ('difference' with white), add,
+  // invert back.
+  sctx.putImageData(out, 0, 0)
+  const nctx = smallMask.getContext('2d')!
+  nctx.putImageData(neg!, 0, 0)
+  ctx.save()
+  ctx.fillStyle = '#fff'
+  ctx.globalCompositeOperation = 'difference'
+  ctx.fillRect(bx, by, bw, bh)
+  ctx.globalCompositeOperation = 'lighter'
+  ctx.drawImage(smallMask, 0, 0, sw, sh, bx, by, bw, bh)
+  ctx.globalCompositeOperation = 'difference'
+  ctx.fillRect(bx, by, bw, bh)
+  ctx.globalCompositeOperation = 'lighter'
+  ctx.drawImage(small, 0, 0, sw, sh, bx, by, bw, bh)
+  ctx.restore()
 }

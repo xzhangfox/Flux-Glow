@@ -46,9 +46,9 @@ export function cropRectFor(srcW: number, srcH: number, targetAspect: number | n
  *  long side, optionally mirrored. The front camera's raw stream is a
  *  mirror image (text backwards) unless corrected, and nothing upstream
  *  corrects it — so everything from it is mirrored here once. */
-export function drawFrame(source: HTMLImageElement | HTMLVideoElement, maxDim: number, crop: CropRect, mirror: boolean): HTMLCanvasElement {
-  const w = source instanceof HTMLVideoElement ? source.videoWidth : source.naturalWidth
-  const h = source instanceof HTMLVideoElement ? source.videoHeight : source.naturalHeight
+export function drawFrame(source: HTMLImageElement | HTMLVideoElement | HTMLCanvasElement | ImageBitmap, maxDim: number, crop: CropRect, mirror: boolean): HTMLCanvasElement {
+  const w = source instanceof HTMLVideoElement ? source.videoWidth : source instanceof HTMLImageElement ? source.naturalWidth : source.width
+  const h = source instanceof HTMLVideoElement ? source.videoHeight : source instanceof HTMLImageElement ? source.naturalHeight : source.height
   const cw = w * crop.fw
   const ch = h * crop.fh
   const scale = Math.min(1, maxDim / Math.max(cw, ch))
@@ -56,6 +56,9 @@ export function drawFrame(source: HTMLImageElement | HTMLVideoElement, maxDim: n
   canvas.width = Math.max(1, Math.round(cw * scale))
   canvas.height = Math.max(1, Math.round(ch * scale))
   const ctx = canvas.getContext('2d')!
+  // (a big downscale — a full-resolution still to the editing size —
+  // aliases with the default smoothing)
+  ctx.imageSmoothingQuality = 'high'
   if (mirror) {
     ctx.translate(canvas.width, 0)
     ctx.scale(-1, 1)

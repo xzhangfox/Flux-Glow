@@ -4,6 +4,7 @@ import { detectFaceLandmarks, LiveFaceTracker } from '../lib/faceLandmarker'
 import { processFrame, DEFAULT_PARAMS, faceFocus, type EditParams, type NumericParam } from '../lib/pipeline'
 import { renderFilterThumbnails } from '../lib/filters'
 import { ASPECT_MODES, aspectRatioFor, cropRectFor, drawFrame, remapLandmarks, type AspectMode } from '../lib/frame'
+import { drawStill, grabStill } from '../lib/still'
 import BgProtectToggle from './BgProtectToggle'
 import { loadBgProtect, saveBgProtect } from '../lib/bgProtect'
 import SettingsSheet from './SettingsSheet'
@@ -61,6 +62,8 @@ const LIVE_MAX_DIMENSION = 1280
 // loop, so a slower device just falls short of it instead of backlogging.
 const LIVE_FRAME_INTERVAL_MS = 33
 const TIMER_STEPS = [0, 3, 10] as const
+// How long the zoom ruler stays after a pinch ends.
+const PINCH_RULER_LINGER_MS = 1000
 
 
 export type Source = { kind: 'image'; file: File } | { kind: 'live' }
@@ -208,6 +211,9 @@ export default function Editor({
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user')
   const [zoom, setZoom] = useState(1)
   const [zoomRange, setZoomRange] = useState<ZoomRange>(DIGITAL_ZOOM_RANGE)
+  // A two-finger pinch on the picture is zooming (the zoom ruler shows
+  // while it does, and for a moment after).
+  const [pinching, setPinching] = useState(false)
   const [aspect, setAspect] = useState<AspectMode>('full')
   const [timer, setTimer] = useState<(typeof TIMER_STEPS)[number]>(0)
   const [grid, setGrid] = useState(false)
@@ -240,6 +246,13 @@ export default function Editor({
   const baseRef = useRef<HTMLCanvasElement | null>(null)
   const landmarksRef = useRef<NormalizedLandmark[] | null>(null)
   const resultRef = useRef<HTMLCanvasElement | null>(null)
+  // A photo taken with the camera, at the camera's full resolution (the
+  // editor works on a copy at MAX_DIMENSION; Save and Share render this
+  // with the same edit), and that render for the edit it was made with.
+  const fullBaseRef = useRef<HTMLCanvasElement | null>(null)
+  const fullResultRef = useRef<{ params: EditParams; canvas: HTMLCanvasElement } | null>(null)
+  // The shutter fired and the still is still being taken.
+  const capturingRef = useRef(false)
   const rafRef = useRef(0)
   const lastFrameRef = useRef(0)
   const frameInFlightRef = useRef(false)
@@ -339,6 +352,8 @@ export default function Editor({
 
   const startLive = useCallback(async () => {
     stopLive()
+    fullBaseRef.current = null
+    fullResultRef.current = null
     const gen = liveGenRef.current
     setLive(true)
     setStatus('loading')
@@ -416,7 +431,7 @@ export default function Editor({
   // detection on that exact frame (IMAGE mode, not the live tracker's
   // estimate), then the high-quality retouching pass.
   const loadStill = useCallback(
-    async (base: HTMLCanvasElement, liveLandmarks: NormalizedLandmark[] | null = null) => {
+    async (base: HTMLCanvasElement, liveLandmarks: NormalizedLandmark[] | null = null, fresh = false) => {
       staticBusyRef.current = true
       setProcessing(true)
       baseRef.current = base
@@ -425,8 +440,9 @@ export default function Editor({
       try {
         // A captured frame keeps the live tracker's landmarks — the face fit
         // the viewfinder showed (they're relative to the same crop) — and
-        // only detects afresh if there were none.
-        landmarksRef.current = capturedRef.current && liveLandmarks ? liveLandmarks : ((await detectFaceLandmarks(base, liveLandmarks)) ?? liveLandmarks)
+        // only detects afresh if there were none, or the still is of a
+        // later moment than the frame on screen (a camera photo).
+        landmarksRef.current = capturedRef.current && liveLandmarks && !fresh ? liveLandmarks : ((await detectFaceLandmarks(base, liveLandmarks)) ?? liveLandmarks)
       } catch {
         landmarksRef.current = liveLandmarks
       }
@@ -440,24 +456,41 @@ export default function Editor({
     [render, recomputeStatic],
   )
 
-  const capture = useCallback(() => {
+  const capture = useCallback(async () => {
     const video = videoRef.current
-    if (!video || video.readyState < 2) return
+    if (!video || video.readyState < 2 || capturingRef.current) return
+    capturingRef.current = true
     setFlashKey((k) => k + 1)
     navigator.vibrate?.(15)
     const mirror = facingModeRef.current === 'user'
-    const crop = cropRectFor(video.videoWidth, video.videoHeight, aspectRatioFor(aspectRef.current), cropZoom(zoomRef.current, zoomRangeRef.current))
-    const base = drawFrame(video, MAX_DIMENSION, crop, mirror)
     const liveLandmarks = landmarksRef.current
+    // The viewfinder holds this moment while the camera takes the still
+    // (the live loop stops; the camera keeps running until it's taken).
+    const gen = ++liveGenRef.current
+    cancelAnimationFrame(rafRef.current)
+    const range = zoomRangeRef.current
+    const still = await grabStill(video, zoomTrackRef.current, range.mode === 'hardware' ? Math.max(range.floor, zoomRef.current) : null)
+    capturingRef.current = false
+    if (gen !== liveGenRef.current) {
+      // (the camera was flipped or closed meanwhile)
+      still.release()
+      return
+    }
+    const crop = cropRectFor(still.width, still.height, aspectRatioFor(aspectRef.current), cropZoom(zoomRef.current, range))
+    const full = drawStill(still, crop, mirror)
+    still.release()
+    stopLive()
+    const base = Math.max(full.width, full.height) > MAX_DIMENSION ? drawFrame(full, MAX_DIMENSION, FULL_FRAME, false) : full
+    fullBaseRef.current = base === full ? null : full
+    fullResultRef.current = null
     staticBusyRef.current = true
     capturedRef.current = true
     setCaptured(true)
-    stopLive()
     setLive(false)
     // The last live frame (already retouched at preview quality) stays on
     // screen while the full-quality pass runs, so there's no flash of the
     // untouched photo in between.
-    loadStill(base, liveLandmarks)
+    loadStill(base, liveLandmarks, still.fresh)
   }, [stopLive, loadStill])
 
   // Uploaded photo.
@@ -466,6 +499,8 @@ export default function Editor({
     let cancelled = false
     staticBusyRef.current = true
     capturedRef.current = false
+    fullBaseRef.current = null
+    fullResultRef.current = null
     setCaptured(false)
     setLive(false)
     setStatus('loading')
@@ -775,6 +810,8 @@ export default function Editor({
   // ✕ in review: discard and go back to the camera.
   const handleClose = () => {
     capturedRef.current = false
+    fullBaseRef.current = null
+    fullResultRef.current = null
     setCaptured(false)
     setPanel(null)
     setStickers([])
@@ -803,6 +840,57 @@ export default function Editor({
     }
   }, [])
 
+  // Pinch to zoom, like a phone camera: the zoom follows the fingers'
+  // spread (the ratio of their distance now to when the second one landed).
+  useEffect(() => {
+    const el = previewRef.current
+    if (!el || !live) return
+    const pts = new Map<number, { x: number; y: number }>()
+    let start: { d: number; z: number } | null = null
+    let hide: number | undefined
+    const spread = () => {
+      const [a, b] = [...pts.values()]
+      return Math.max(1, Math.hypot(a.x - b.x, a.y - b.y))
+    }
+    const down = (e: PointerEvent) => {
+      if (e.pointerType === 'mouse') return
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY })
+      if (pts.size === 2) {
+        start = { d: spread(), z: zoomRef.current }
+        clearTimeout(hide)
+        setPinching(true)
+      }
+    }
+    const move = (e: PointerEvent) => {
+      if (!pts.has(e.pointerId)) return
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY })
+      if (start && pts.size === 2) applyZoom(Math.round(start.z * (spread() / start.d) * 100) / 100)
+    }
+    const up = (e: PointerEvent) => {
+      if (!pts.delete(e.pointerId)) return
+      if (start && pts.size < 2) {
+        start = null
+        hide = window.setTimeout(() => setPinching(false), PINCH_RULER_LINGER_MS)
+      }
+    }
+    // (Safari's own page zoom ignores user-scalable=no.)
+    const noPageZoom = (e: Event) => e.preventDefault()
+    el.addEventListener('pointerdown', down)
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+    el.addEventListener('gesturestart', noPageZoom)
+    return () => {
+      clearTimeout(hide)
+      setPinching(false)
+      el.removeEventListener('pointerdown', down)
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+      el.removeEventListener('gesturestart', noPageZoom)
+    }
+  }, [live, applyZoom])
+
   // The zoom range for the current camera and frame shape: zooming out
   // below 1x reaches as far as the camera's whole field of view.
   function updateZoomRange(base: ZoomRange, value: number) {
@@ -823,9 +911,31 @@ export default function Editor({
     updateZoomRange(zoomRangeRef.current, zoomRef.current)
   }
 
-  const exportBlob = (): Promise<Blob | null> => {
-    const src = resultRef.current ?? baseRef.current
-    if (!src) return Promise.resolve(null)
+  /** The edited photo at full resolution: a camera photo is edited at
+   *  MAX_DIMENSION, then rendered again from the camera's full-size still
+   *  (same edit — the landmarks are relative, the passes scale) to save. */
+  const fullResult = async (): Promise<HTMLCanvasElement | null> => {
+    const full = fullBaseRef.current
+    if (!full) return null
+    const params = paramsRef.current
+    if (fullResultRef.current?.params === params) return fullResultRef.current.canvas
+    setProcessing(true)
+    await nextPaint()
+    try {
+      const canvas = processFrame(full, landmarksRef.current, params, !capturedRef.current)
+      fullResultRef.current = { params, canvas }
+      return canvas
+    } catch {
+      // (out of memory, say: the editing-size result is saved instead)
+      return null
+    } finally {
+      setProcessing(false)
+    }
+  }
+
+  const exportBlob = async (): Promise<Blob | null> => {
+    const src = (await fullResult()) ?? resultRef.current ?? baseRef.current
+    if (!src) return null
     let canvas = src
     if (stickers.length) {
       canvas = document.createElement('canvas')
@@ -907,7 +1017,11 @@ export default function Editor({
     <div className="fixed inset-0 overflow-hidden select-none">
       <video ref={videoRef} autoPlay playsInline muted className="hidden" />
 
-      <div ref={previewRef} className={`absolute inset-x-0 flex justify-center ${(live || captured) && !fullBleed ? 'items-start' : 'items-center'}`} style={previewStyle}>
+      <div
+        ref={previewRef}
+        className={`absolute inset-x-0 flex justify-center ${(live || captured) && !fullBleed ? 'items-start' : 'items-center'}`}
+        style={live ? { ...previewStyle, touchAction: 'none' } : previewStyle}
+      >
         <div className="relative" style={{ width: fit.width, height: fit.height }}>
           <canvas ref={displayRef} className="block w-full h-full" />
           {grid && live && <GridOverlay />}
@@ -1049,7 +1163,7 @@ export default function Editor({
 
         {live && !panel && status !== 'loading' && status !== 'error' && countdown === null && (
           <div className="self-center mb-12">
-            <ZoomControl range={zoomRange} value={zoom} onChange={applyZoom} />
+            <ZoomControl range={zoomRange} value={zoom} onChange={applyZoom} pinching={pinching} />
           </div>
         )}
 
