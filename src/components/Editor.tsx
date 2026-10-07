@@ -662,9 +662,11 @@ export default function Editor({
     // the recording above is only what the preview managed live. Best
     // effort: without it the review keeps that one.
     const camTrack = streamRef.current?.getVideoTracks()[0]
-    const video0 = videoRef.current
+    const v0 = videoRef.current
     const view: RecordView = {
-      crop: video0 ? cropRectFor(video0.videoWidth, video0.videoHeight, aspectRatioFor(aspectRef.current), cropZoom(zoomRef.current, zoomRangeRef.current)) : FULL_FRAME,
+      source: v0?.videoWidth ? v0.videoWidth / v0.videoHeight : 0,
+      aspect: aspectRatioFor(aspectRef.current),
+      zoom: cropZoom(zoomRef.current, zoomRangeRef.current),
       mirror: facingModeRef.current === 'user',
     }
     let raw: MediaRecorder | null = null

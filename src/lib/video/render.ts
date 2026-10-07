@@ -1,5 +1,5 @@
 import { ALL_FORMATS, BlobSource, BufferTarget, Conversion, Input, Mp4OutputFormat, Output, QUALITY_HIGH, canEncodeAudio, getFirstEncodableVideoCodec } from 'mediabunny'
-import type { CropRect } from '../frame'
+import { cropRectFor } from '../frame'
 import type { EditParams } from '../pipeline'
 import { analyzeVideo } from './analyze'
 import { exportVideo } from './export'
@@ -13,10 +13,16 @@ import { withFrameDurations } from './source'
 // in it found and tracked, and the look applied — the video editor's own
 // pipeline — then encoded as an MP4.
 
-/** How the preview framed the camera: its crop (normalized) and mirror. */
+/** How the preview framed the camera: the shape it showed (width /
+ *  height, null for the camera's own), its digital zoom, and the mirror.
+ *  The crop is worked out from the recording's own upright size. */
 export interface RecordView {
-  crop: CropRect
+  aspect: number | null
+  zoom: number
   mirror: boolean
+  /** The camera picture's own proportions as the preview showed it
+   *  (width / height, upright). */
+  source: number
 }
 
 /** The long side of the output, at most (1080p in portrait: 1080 × 1920). */
@@ -35,10 +41,22 @@ export async function frameRecording(raw: Blob, view: RecordView, onProgress: (p
   try {
     const vt = await input.getPrimaryVideoTrack()
     if (!vt) throw new Error('This recording has no video.')
-    const dw = vt.displayWidth
-    const dh = vt.displayHeight
-    const cw = Math.round(dw * view.crop.fw)
-    const ch = Math.round(dh * view.crop.fh)
+    // Some phones' recorders store the upright picture in a frame of a
+    // different shape than the camera's (portrait squeezed into a
+    // landscape frame): each frame is stretched back to the proportions
+    // the preview showed before anything else, or it comes out squeezed.
+    let dw = vt.displayWidth
+    let dh = vt.displayHeight
+    if (view.source > 0 && Math.abs(dw / dh - view.source) / view.source > 0.02) {
+      if (view.source < 1) dh = Math.round(dw / view.source)
+      else dw = Math.round(dh * view.source)
+      const s = Math.min(1, 2560 / Math.max(dw, dh))
+      dw = Math.round(dw * s)
+      dh = Math.round(dh * s)
+    }
+    const crop = cropRectFor(dw, dh, view.aspect, view.zoom)
+    const cw = Math.round(dw * crop.fw)
+    const ch = Math.round(dh * crop.fh)
     const k = Math.min(1, OUT_MAX / Math.max(cw, ch))
     // (even sizes: H.264 wants them)
     const W = Math.max(2, Math.round((cw * k) / 2) * 2)
@@ -48,20 +66,40 @@ export async function frameRecording(raw: Blob, view: RecordView, onProgress: (p
     const at = await input.getPrimaryAudioTrack()
     const aac = !!at && at.codec !== 'aac' && (await canEncodeAudio('aac'))
     const output = new Output({ format: new Mp4OutputFormat({ fastStart: 'in-memory' }), target: new BufferTarget() })
+    // Framed by hand: each frame drawn upright first (phones often store a
+    // recording as landscape frames plus a "rotate 90°" flag, which
+    // drawing the sample applies), then cropped and mirrored with plain
+    // canvas operations. Left to the converter, the crop was taken in the
+    // stored orientation on such files, and the result came out squeezed.
+    const upright = document.createElement('canvas')
+    upright.width = dw
+    upright.height = dh
+    const uc = upright.getContext('2d')!
+    const out = document.createElement('canvas')
+    out.width = W
+    out.height = H
+    const oc = out.getContext('2d')!
+    oc.imageSmoothingQuality = 'high'
+    const sx = dw * crop.x0
+    const sy = dh * crop.y0
     const conversion = await Conversion.init({
       input,
       output,
       video: {
-        // The crop is centred, so it's the same before or after the mirror.
-        flip: view.mirror,
-        crop: { left: Math.round(dw * view.crop.x0), top: Math.round(dh * view.crop.y0), width: cw, height: ch },
-        width: W,
-        height: H,
-        fit: 'fill',
         codec,
         quality: QUALITY_HIGH,
         allowTransformationMetadata: false,
         forceTranscode: true,
+        processedWidth: W,
+        processedHeight: H,
+        process: (sample) => {
+          uc.clearRect(0, 0, dw, dh)
+          sample.draw(uc, 0, 0, dw, dh)
+          oc.setTransform(1, 0, 0, 1, 0, 0)
+          if (view.mirror) oc.setTransform(-1, 0, 0, 1, W, 0)
+          oc.drawImage(upright, sx, sy, cw, ch, 0, 0, W, H)
+          return out
+        },
       },
       ...(aac ? { audio: { codec: 'aac' as const } } : {}),
     })
