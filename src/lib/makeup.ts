@@ -172,6 +172,32 @@ function eye(ctx: CanvasRenderingContext2D, P: Pt[], up: number[], lo: number[],
   for (const p of upper.slice().reverse()) ctx.lineTo(p.x, p.y)
   ctx.closePath()
   ctx.fill()
+
+  // Full false lashes: dense, curling up and out, longest at the outer
+  // corner — a fixed pattern, so they don't flicker frame to frame.
+  ctx.strokeStyle = 'rgba(12,8,14,0.9)'
+  ctx.lineCap = 'round'
+  let seed = 3
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647
+  const N = 26
+  for (let i = 0; i < N; i++) {
+    const t = (i + 0.5) / N // 0 inner … 1 outer
+    const base = along(lashLine, t)
+    const lift = thick(t) * 0.7
+    const len = E * (0.05 + 0.09 * t ** 1.3) * (0.85 + rnd() * 0.3)
+    const sweep = 0.15 + 0.75 * t ** 1.5 // leaning outward toward the corner
+    const dx = ux * (1 - sweep) + ox * sweep
+    const dy = uy * (1 - sweep) + oy * sweep
+    const p0 = { x: base.x + ux * lift, y: base.y + uy * lift }
+    const tip = { x: p0.x + dx * len, y: p0.y + dy * len }
+    // (curling: the middle bows away from the eye, the tip back up)
+    const mid = { x: p0.x + dx * len * 0.5 + ux * len * 0.18, y: p0.y + dy * len * 0.5 + uy * len * 0.18 }
+    ctx.lineWidth = Math.max(0.6, E * (0.007 + 0.004 * (1 - t)))
+    ctx.beginPath()
+    ctx.moveTo(p0.x, p0.y)
+    ctx.quadraticCurveTo(mid.x, mid.y, tip.x, tip.y)
+    ctx.stroke()
+  }
   ctx.restore()
 }
 

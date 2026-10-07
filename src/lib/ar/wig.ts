@@ -40,15 +40,15 @@ const hash = (n: number) => {
   const v = Math.sin(n * 127.1 + 311.7) * 43758.5453
   return v - Math.floor(v)
 }
-/** The side part: x where it runs over the crown. */
-const PART_X = 0.3
+/** The part: down the middle of the crown. */
+const PART_X = 0
 /** How far into a clump (rig x, y, z) a point is: 1 on a clump's crest,
  *  0 in the groove between two. */
 function clumpRidge(x: number, y: number, z: number) {
   // Round the head (angle), plus a slow twist down the length; clumps of
   // a few different widths.
   const a = Math.atan2(x, z - HZ)
-  let u = (a / (Math.PI * 2)) * 26 + 0.25 * Math.sin(y * 1.6 + a * 3)
+  let u = (a / (Math.PI * 2)) * 30 + 0.25 * Math.sin(y * 1.6 + a * 3)
   const i = Math.floor(u)
   const w = 0.7 + 0.6 * hash(i)
   u = Math.min(1, (u - i) * w + (1 - w) * 0.5)
@@ -64,7 +64,7 @@ const ridgeAt = (x: number, y: number, z: number) => {
 }
 /** The same across the bangs (they fall straight down the front). */
 function bangsRidge(x: number) {
-  let u = (x + 1) * 5
+  let u = (x + 1) * 6
   const i = Math.floor(u)
   const w = 0.7 + 0.6 * hash(i + 91)
   u = Math.min(1, Math.max(0, (u - i) * w + (1 - w) * 0.5))
@@ -72,9 +72,15 @@ function bangsRidge(x: number) {
 }
 
 /** The bangs' edge and the bob's hem (rig y): each clump a little longer
- *  at its middle, so the ends come to soft points rather than one cut. */
-const bangsAt = (x: number) => 0.31 - 0.04 * (x / 0.9) ** 2 + 0.025 * (1 - bangsRidge(x))
-const hemAt = (x: number, z: number) => -1.53 + 0.05 * (1 - clumpRidge(x, -1.5, z))
+ *  at its middle, so the ends come to soft points rather than one cut.
+ *  The bangs reach the lashes, a touch shorter in the middle and longer
+ *  toward the sides, where they run into the side hair; the hem falls
+ *  just below the chin in front and to the nape at the back. */
+const bangsAt = (x: number) => 0.2 - 0.12 * Math.min(1, Math.abs(x) / 0.86) ** 2 + 0.035 * (1 - bangsRidge(x))
+const hemAt = (x: number, z: number) => -1.84 - 0.08 * clamp01(-(z - HZ) / 1.4) + 0.06 * (1 - clumpRidge(x, -1.8, z))
+/** Half the face opening's width at height y: close round the face — the
+ *  side hair hugs the cheeks and comes in over the jaw. */
+const openingHalf = (y: number) => 0.86 - 0.04 * clamp01((0.2 - y) / 0.8) - 0.15 * clamp01((-0.6 - y) / 1.0) ** 1.2
 
 export function wigSdf(x: number, y: number, z: number) {
   return wigParts(x, y, z).d
@@ -85,21 +91,22 @@ export function wigSdf(x: number, y: number, z: number) {
 function wigParts(x: number, y: number, z: number) {
   const ax = Math.abs(x)
   const zc = z - HZ
-  // The outside: a rounded crown flowing into a bell — fullest by the
-  // cheeks, the ends turning in under the jaw.
-  const dome = ell(ax, y - 0.45, zc, 1.33, 1.38, 1.58)
-  const rx = 1.24 + 0.07 * Math.exp(-(((y + 0.55) / 0.75) ** 2)) - 0.07 * clamp01((-1.05 - y) / 0.45)
-  const side = ell2(ax, zc, rx, rx * 1.2)
-  const body = smax(smax(side, y - 0.55, 0.3), hemAt(x, z) - y, 0.16)
-  let outer = smin(dome, body, 0.4)
+  // The outside: a rounded crown flowing into a full bob — widest by the
+  // cheeks, then curving in toward the ends, which turn under (内扣).
+  const dome = ell(ax, y - 0.4, zc, 1.26, 1.45, 1.55)
+  const rx = 1.22 + 0.12 * Math.exp(-(((y + 0.75) / 0.6) ** 2)) - 0.32 * clamp01((-0.95 - y) / 0.95) ** 1.6
+  const side = ell2(ax, zc, rx, rx * 1.18)
+  const body = smax(smax(side, y - 0.55, 0.3), hemAt(x, z) - y, 0.3)
+  let outer = smin(dome, body, 0.5)
   // Grooves between clumps: deepest down the sides and back, finer over
   // the crown, where the hair lies close; across the bangs, their own.
   const ridge = ridgeAt(x, y, z)
   const depth = 0.02 * Math.min(1, Math.max(0.3, (1.3 - y) / 1.1))
   outer += depth * (1 - ridge)
   // The part: a narrow groove over the crown, front to back.
-  const onTop = clamp01((y - 0.95) / 0.35) * clamp01((z + 2.3) / 0.5) * clamp01((-0.2 - z) / 0.4)
-  outer += 0.03 * Math.exp(-(((x - PART_X) / 0.04) ** 2)) * onTop
+  // (on the crown only: from the front it barely shows)
+  const onTop = clamp01((y - 1.2) / 0.3) * clamp01((z + 2.1) / 0.4) * clamp01((-0.55 - z) / 0.3)
+  outer += 0.025 * Math.exp(-(((x - PART_X) / 0.035) ** 2)) * onTop
   // Solid: no hollow for the head — the face, which occludes, hides
   // whatever is behind it, and a hollow only doubled the triangles — but a
   // channel for the neck under it, so the back hair falls round the neck
@@ -108,9 +115,9 @@ function wigParts(x: number, y: number, z: number) {
   const shell = smax(outer, -neck, 0.08)
   // The face opening: everything in front, between the side curtains and
   // under the bangs; the curtains come in a little toward the jaw.
-  const half = 0.92 - 0.2 * clamp01((-0.5 - y) / 1.0)
+  const half = openingHalf(y)
   // (its top corners rounded: the bangs blend into the sides)
-  const opening = Math.max(smax(ax - half, y - bangsAt(x), 0.14), -(z + 0.9))
+  const opening = Math.max(smax(ax - half, y - bangsAt(x), 0.12), -(z + 0.9))
   return { d: smax(shell, -opening, 0.025), cut: -opening - shell }
 }
 
@@ -133,7 +140,7 @@ export function computeWig(): WigData {
   // (a coarse grid is plenty: the strands are in the texture, not the
   // mesh, and fewer triangles keep live frames quick)
   // (fine enough for the clumps' grooves: several cells across each)
-  const { pos, index } = surfaceNets(wigSdf, { x: -1.75, y: -1.85, z: -3.45 }, { x: 1.75, y: 2.45, z: 0.45 }, 0.039)
+  const { pos, index } = surfaceNets(wigSdf, { x: -1.75, y: -2.15, z: -3.45 }, { x: 1.75, y: 2.3, z: 0.45 }, 0.039)
   const n = pos.length / 3
   const flow = new Float32Array(n * 3)
   const nrm = new Float32Array(n * 3)
@@ -143,9 +150,10 @@ export function computeWig(): WigData {
   // Lilac, a little deeper at the roots and paler at the tips (sRGB hex,
   // to linear for the vertex colours).
   const lin = (hex: number) => [16, 8, 0].map((b) => ((((hex >> b) & 255) / 255 + 0.055) / 1.055) ** 2.4)
-  const root = lin(0x7e60cf)
-  const mid = lin(0x9c80e6)
-  const tip = lin(0xb39cf0)
+  const root = lin(0x6c4fcc)
+  const mid = lin(0x8d6ee6)
+  const tip = lin(0xa98cf0)
+  const scalp = lin(0xcdb3c8)
   for (let i = 0; i < n; i++) {
     const x = pos[i * 3]
     const y = pos[i * 3 + 1]
@@ -168,13 +176,15 @@ export function computeWig(): WigData {
     const under = 0.62 + 0.38 * clamp01(gy * 0.9 + 0.7)
     const wall = 1 - 0.5 * clamp01(wigParts(x, y, z).cut / 0.04 + 0.5)
     // …and the curtains a shade deeper toward the face, where they turn in.
-    const half = 0.92 - 0.2 * clamp01((-0.5 - y) / 1.0)
+    const half = openingHalf(y)
     const rim = y < 0.3 && z > -1.3 ? 0.72 + 0.28 * clamp01((Math.abs(x) - half) / 0.25) : 1
     // The grooves between clumps in shade, the crests catching light: what
     // makes the clumps read.
     const ridge = ridgeAt(x, y, z)
     const groove = 0.8 + 0.2 * ridge
-    col.set(c.map((v) => v * under * wall * rim * groove), i * 3)
+    // The part shows a line of scalp.
+    const partLine = 0.6 * Math.exp(-((x / 0.025) ** 2)) * clamp01((y - 1.3) / 0.3) * clamp01((z + 2.1) / 0.4) * clamp01((-0.6 - z) / 0.3)
+    col.set(c.map((v, k) => v * under * wall * rim * groove * (1 - partLine) + scalp[k] * partLine), i * 3)
     // Flow: over the crown, away from the part to either side; below it,
     // straight down.
     const top = clamp01((y - 0.7) / 0.9)
@@ -312,7 +322,7 @@ function strandMaps() {
 // The face opening's outline (rig x, y), for the hair remover to leave
 // alone; scaled with the wig each frame.
 const OPENING0: [number, number][] = [
-  [-0.92, 0.3], [0.92, 0.3], [0.92, -0.5], [0.72, -1.5], [-0.72, -1.5], [-0.92, -0.5],
+  [-0.84, 0.15], [0.84, 0.15], [0.82, -0.6], [0.68, -1.7], [-0.68, -1.7], [-0.82, -0.6],
 ]
 
 // ---- Wisps -----------------------------------------------------------------------
@@ -400,12 +410,12 @@ function wispGeometry() {
   }
   // Bangs: across the front, just above the blunt edge, a little in front
   // of the hair's surface.
-  for (let x = -0.97; x <= 0.97; x += 0.034) {
+  for (let x = -0.88; x <= 0.88; x += 0.042) {
     const xx = x + (rnd() - 0.5) * 0.01
     const y = bangsAt(xx) + 0.07
     const p = hit(new THREE.Vector3(xx, y, 1.2), new THREE.Vector3(0, 0, -1))
     if (!p) continue
-    const len = 0.1 + rnd() * 0.07
+    const len = 0.08 + rnd() * 0.07
     card(p, new THREE.Vector3(0, -1, 0.08).normalize(), new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 1), 0.07, len)
   }
   // The hem: round the sides and back, hung from just above the edge,
@@ -413,14 +423,14 @@ function wispGeometry() {
   for (let a = -Math.PI; a < Math.PI; a += 0.042) {
     const aa = a + (rnd() - 0.5) * 0.02
     const dir = new THREE.Vector3(Math.sin(aa), 0, Math.cos(aa))
-    const y = -1.4 + (rnd() - 0.5) * 0.03
+    const y = -1.72 - 0.08 * Math.max(0, -Math.cos(aa)) + (rnd() - 0.5) * 0.03
     const from = new THREE.Vector3(0, y, HZ).addScaledVector(dir, 2.4)
     const p = hit(from, dir.clone().negate())
     if (!p) continue
-    if (p.z > -0.95 && Math.abs(p.x) < 1.0) continue
-    const len = 0.13 + rnd() * 0.08
+    if (p.z > -0.95 && Math.abs(p.x) < 0.9) continue
+    const len = 0.14 + rnd() * 0.12
     // (curving in a touch under the bob's turned-in ends)
-    card(p, new THREE.Vector3(0, -1, 0).addScaledVector(dir, -0.15).normalize(), new THREE.Vector3(dir.z, 0, -dir.x), dir, 0.09, len)
+    card(p, new THREE.Vector3(0, -1, 0).addScaledVector(dir, -0.3).normalize(), new THREE.Vector3(dir.z, 0, -dir.x), dir, 0.09, len)
   }
   const g = new THREE.BufferGeometry()
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
@@ -485,7 +495,7 @@ export async function lavenderWig(): Promise<Model> {
         `#include <begin_vertex>
   vStrand = normalize(normalMatrix * aFlow);
   // (the lower half sways, more toward the hem; never the crown)
-  float sw = smoothstep(-0.2, -1.5, position.y);
+  float sw = smoothstep(-0.2, -1.8, position.y);
   transformed = swayed(transformed, sw * sw, position.x * 3.0 + position.z * 2.0);`,
       )
     sh.fragmentShader = sh.fragmentShader
@@ -509,7 +519,7 @@ export async function lavenderWig(): Promise<Model> {
     // the gloss streaks along the lighter fibres.
     float strand = clamp(dot(diffuseColor.rgb, vec3(0.333)) / max(dot(vColor.rgb, vec3(0.333)), 1e-3), 0.0, 1.4);
     float streak = smoothstep(0.55, 1.0, strand);
-    outgoingLight += directionalLights[0].color * lit * (s1 * 0.22 * streak * vec3(0.96, 0.92, 1.0) + s2 * 0.14 * diffuseColor.rgb);
+    outgoingLight += directionalLights[0].color * lit * (s1 * 0.34 * streak * vec3(0.95, 0.9, 1.0) + s2 * 0.18 * diffuseColor.rgb);
   }
 #endif
 #include <opaque_fragment>`,
@@ -525,7 +535,7 @@ export async function lavenderWig(): Promise<Model> {
   // The wisps, drawn after the wig (see-through: blended, not writing
   // depth), lilac like the ends of the hair.
   const lin = (hex: number) => new THREE.Color(hex)
-  const wispMat = new THREE.MeshStandardMaterial({ color: lin(0x8c72da), map: wispTexture(), transparent: true, depthWrite: false, side: THREE.DoubleSide, roughness: 0.45, alphaTest: 0.02 })
+  const wispMat = new THREE.MeshStandardMaterial({ color: lin(0x8466dc), map: wispTexture(), transparent: true, depthWrite: false, side: THREE.DoubleSide, roughness: 0.45, alphaTest: 0.02 })
   wispMat.onBeforeCompile = (sh) => {
     Object.assign(sh.uniforms, motion)
     sh.vertexShader = sh.vertexShader
@@ -534,7 +544,7 @@ export async function lavenderWig(): Promise<Model> {
         '#include <begin_vertex>',
         `#include <begin_vertex>
   // (each wisp hangs from where it meets the hair, which sways too)
-  float base = smoothstep(-0.2, -1.5, position.y);
+  float base = smoothstep(-0.2, -1.8, position.y);
   transformed = swayed(transformed, base * base + aSway * 0.6, aPhase);
   transformed.x += sin(uTime * 3.1 + aPhase) * 0.008 * aSway;`,
       )
@@ -562,7 +572,7 @@ export async function lavenderWig(): Promise<Model> {
 
   // The spring: where the hair's lower half "is" (world), chasing a point
   // under the head.
-  const anchorLocal = new THREE.Vector3(0, -1.4, -1.5)
+  const anchorLocal = new THREE.Vector3(0, -1.7, -1.5)
   const spring = { p: null as THREE.Vector3 | null, v: new THREE.Vector3(), t: 0 }
   const tmp = new THREE.Vector3()
   return {
@@ -573,7 +583,7 @@ export async function lavenderWig(): Promise<Model> {
     occludeFace: true,
     // Hair is painted out above the hem only (just inside it, so the change
     // hides under the wig's edge); hair falling below the wig stays.
-    hidesHead: -1.4,
+    hidesHead: -1.7,
     hairOnly: true,
     // (the face opening, at its natural size — scaled with the wig below)
     keepOpening: OPENING,
