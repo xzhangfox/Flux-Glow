@@ -114,6 +114,8 @@ export interface Roi {
 const FULL: Roi = { x: 0, y: 0, w: 1, h: 1 }
 const isFull = (r: Roi) => r.w > 0.98 && r.h > 0.98
 const ROI_MAX = 640
+/** The whole frame is handed to the tracker at up to this size. */
+const FULL_MAX = 1920
 
 /** A square window `side` px wide, centred on (cx, cy) and kept inside
  *  the frame. */
@@ -177,11 +179,11 @@ function windowAround(lm: NormalizedLandmark[], W: number, H: number): Roi {
 let roiCanvas: HTMLCanvasElement | null = null
 
 /** `r` of `source`, drawn into a reused canvas. */
-function cropOf(source: HTMLVideoElement | HTMLImageElement | HTMLCanvasElement, W: number, H: number, r: Roi) {
+function cropOf(source: HTMLVideoElement | HTMLImageElement | HTMLCanvasElement, W: number, H: number, r: Roi, max = ROI_MAX) {
   roiCanvas ??= document.createElement('canvas')
   const sw = r.w * W
   const sh = r.h * H
-  const k = Math.min(1, ROI_MAX / Math.max(sw, sh))
+  const k = Math.min(1, max / Math.max(sw, sh))
   const cw = Math.max(1, Math.round(sw * k))
   const ch = Math.max(1, Math.round(sh * k))
   if (roiCanvas.width !== cw || roiCanvas.height !== ch) {
@@ -245,7 +247,10 @@ export class LiveFaceTracker {
       roi = this.step % 2 === 0 ? FULL : windows[(this.step >> 1) % windows.length]
       this.step++
     }
-    const res = landmarker.detectForVideo(isFull(roi) ? video : cropOf(video, W, H, roi), timestampMs)
+    // (The whole frame as it comes, unless the camera's is a photo-sized
+    // one: then a copy at a size the models gain nothing beyond.)
+    const input = !isFull(roi) ? cropOf(video, W, H, roi) : Math.max(W, H) > FULL_MAX ? cropOf(video, W, H, FULL, FULL_MAX) : video
+    const res = landmarker.detectForVideo(input, timestampMs)
     const raw = res.faceLandmarks[0]
     if (!raw) {
       this.misses++

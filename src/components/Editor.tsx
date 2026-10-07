@@ -4,7 +4,7 @@ import { detectFaceLandmarks, LiveFaceTracker } from '../lib/faceLandmarker'
 import { processFrame, DEFAULT_PARAMS, faceFocus, type EditParams, type NumericParam } from '../lib/pipeline'
 import { renderFilterThumbnails } from '../lib/filters'
 import { ASPECT_MODES, aspectRatioFor, cropRectFor, drawFrame, remapLandmarks, type AspectMode } from '../lib/frame'
-import { drawStill, grabStill } from '../lib/still'
+import { STILL_MAX, cameraConstraints, settlePhotoMode, switchCamera } from '../lib/camera'
 import BgProtectToggle from './BgProtectToggle'
 import { loadBgProtect, saveBgProtect } from '../lib/bgProtect'
 import SettingsSheet from './SettingsSheet'
@@ -251,8 +251,6 @@ export default function Editor({
   // with the same edit), and that render for the edit it was made with.
   const fullBaseRef = useRef<HTMLCanvasElement | null>(null)
   const fullResultRef = useRef<{ params: EditParams; canvas: HTMLCanvasElement } | null>(null)
-  // The shutter fired and the still is still being taken.
-  const capturingRef = useRef(false)
   const rafRef = useRef(0)
   const lastFrameRef = useRef(0)
   const frameInFlightRef = useRef(false)
@@ -358,15 +356,11 @@ export default function Editor({
     setLive(true)
     setStatus('loading')
     try {
-      // No `height` constraint: pinning both dimensions makes the browser
-      // center-crop the lens's real field of view before our own framing
-      // ever runs. A 4:3 shape instead: phone sensors are natively 4:3, and
-      // the 16:9 modes browsers otherwise pick cut a quarter of the width
-      // off a portrait selfie.
-      // Up to 1920 on the long side and 60 fps where the camera has them:
-      // recordings are taken straight from this stream (the live preview
-      // works on a scaled-down copy, so it costs it nothing).
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facingModeRef.current, width: { ideal: 1920 }, aspectRatio: { ideal: 4 / 3 }, frameRate: { ideal: 60 } } })
+      // Photo mode: the camera's largest 4:3 size, so the shutter keeps the
+      // frame on screen at full resolution (see camera.ts); recording
+      // switches it to 1080p60. The live preview works on a scaled-down
+      // copy either way.
+      const stream = await navigator.mediaDevices.getUserMedia({ video: cameraConstraints('photo', facingModeRef.current) })
       if (gen !== liveGenRef.current) {
         stream.getTracks().forEach((t) => t.stop())
         return
@@ -375,6 +369,8 @@ export default function Editor({
       const video = videoRef.current!
       video.srcObject = stream
       await video.play()
+      if (gen !== liveGenRef.current) return
+      await settlePhotoMode(stream.getVideoTracks()[0], video, null)
       if (gen !== liveGenRef.current) return
 
       // Real optical/sensor zoom when the browser exposes it beats a
@@ -431,7 +427,7 @@ export default function Editor({
   // detection on that exact frame (IMAGE mode, not the live tracker's
   // estimate), then the high-quality retouching pass.
   const loadStill = useCallback(
-    async (base: HTMLCanvasElement, liveLandmarks: NormalizedLandmark[] | null = null, fresh = false) => {
+    async (base: HTMLCanvasElement, liveLandmarks: NormalizedLandmark[] | null = null) => {
       staticBusyRef.current = true
       setProcessing(true)
       baseRef.current = base
@@ -440,9 +436,8 @@ export default function Editor({
       try {
         // A captured frame keeps the live tracker's landmarks — the face fit
         // the viewfinder showed (they're relative to the same crop) — and
-        // only detects afresh if there were none, or the still is of a
-        // later moment than the frame on screen (a camera photo).
-        landmarksRef.current = capturedRef.current && liveLandmarks && !fresh ? liveLandmarks : ((await detectFaceLandmarks(base, liveLandmarks)) ?? liveLandmarks)
+        // only detects afresh if there were none.
+        landmarksRef.current = capturedRef.current && liveLandmarks ? liveLandmarks : ((await detectFaceLandmarks(base, liveLandmarks)) ?? liveLandmarks)
       } catch {
         landmarksRef.current = liveLandmarks
       }
@@ -456,41 +451,29 @@ export default function Editor({
     [render, recomputeStatic],
   )
 
-  const capture = useCallback(async () => {
+  const capture = useCallback(() => {
     const video = videoRef.current
-    if (!video || video.readyState < 2 || capturingRef.current) return
-    capturingRef.current = true
+    if (!video || video.readyState < 2) return
     setFlashKey((k) => k + 1)
     navigator.vibrate?.(15)
     const mirror = facingModeRef.current === 'user'
-    const liveLandmarks = landmarksRef.current
-    // The viewfinder holds this moment while the camera takes the still
-    // (the live loop stops; the camera keeps running until it's taken).
-    const gen = ++liveGenRef.current
-    cancelAnimationFrame(rafRef.current)
-    const range = zoomRangeRef.current
-    const still = await grabStill(video, zoomTrackRef.current, range.mode === 'hardware' ? Math.max(range.floor, zoomRef.current) : null)
-    capturingRef.current = false
-    if (gen !== liveGenRef.current) {
-      // (the camera was flipped or closed meanwhile)
-      still.release()
-      return
-    }
-    const crop = cropRectFor(still.width, still.height, aspectRatioFor(aspectRef.current), cropZoom(zoomRef.current, range))
-    const full = drawStill(still, crop, mirror)
-    still.release()
-    stopLive()
-    const base = Math.max(full.width, full.height) > MAX_DIMENSION ? drawFrame(full, MAX_DIMENSION, FULL_FRAME, false) : full
+    // This very frame, at the camera's full resolution: the moment the
+    // viewfinder freezes on is the one saved.
+    const crop = cropRectFor(video.videoWidth, video.videoHeight, aspectRatioFor(aspectRef.current), cropZoom(zoomRef.current, zoomRangeRef.current))
+    const full = drawFrame(video, STILL_MAX, crop, mirror, 'high')
+    const base = Math.max(full.width, full.height) > MAX_DIMENSION ? drawFrame(full, MAX_DIMENSION, FULL_FRAME, false, 'high') : full
     fullBaseRef.current = base === full ? null : full
     fullResultRef.current = null
+    const liveLandmarks = landmarksRef.current
     staticBusyRef.current = true
     capturedRef.current = true
     setCaptured(true)
+    stopLive()
     setLive(false)
     // The last live frame (already retouched at preview quality) stays on
     // screen while the full-quality pass runs, so there's no flash of the
     // untouched photo in between.
-    loadStill(base, liveLandmarks, still.fresh)
+    loadStill(base, liveLandmarks)
   }, [stopLive, loadStill])
 
   // Uploaded photo.
@@ -511,7 +494,7 @@ export default function Editor({
       try {
         const img = await loadImage(source.file)
         if (cancelled) return
-        await loadStill(drawFrame(img, MAX_DIMENSION, FULL_FRAME, false))
+        await loadStill(drawFrame(img, MAX_DIMENSION, FULL_FRAME, false, 'high'))
       } catch {
         if (!cancelled) {
           staticBusyRef.current = false
@@ -664,6 +647,16 @@ export default function Editor({
     }
     setPanel(null)
     const stream = canvas.captureStream(30)
+    // The camera to video mode (1080p60, from photo mode's full size) while
+    // the microphone is set up; back again if nothing gets recorded.
+    const cam = streamRef.current?.getVideoTracks()[0]
+    const camVideo = videoRef.current
+    const zr = zoomRangeRef.current
+    const hwZoom = zr.mode === 'hardware' ? Math.max(zr.floor, zoomRef.current) : null
+    const toVideoMode = cam && camVideo ? switchCamera(cam, camVideo, 'video', hwZoom) : Promise.resolve()
+    const backToPhotoMode = () => {
+      if (cam && camVideo && cam.readyState === 'live') void switchCamera(cam, camVideo, 'photo', hwZoom)
+    }
     // Sound too, if the microphone is allowed; a silent video otherwise.
     let audio: MediaStream | null = null
     try {
@@ -672,9 +665,11 @@ export default function Editor({
     } catch {
       audio = null
     }
+    await toVideoMode
     if (!pressHandledRef.current) {
       // Let go while the microphone was being set up: nothing to record.
       audio?.getTracks().forEach((t) => t.stop())
+      backToPhotoMode()
       return
     }
     // MP4 with H.264 where it's offered (Safari, current Chrome): it plays
@@ -688,12 +683,12 @@ export default function Editor({
       rec = new MediaRecorder(stream, opts(6_000_000))
     } catch {
       audio?.getTracks().forEach((t) => t.stop())
+      backToPhotoMode()
       showToast("Video recording isn't supported in this browser")
       return
     }
-    // The camera's own stream, recorded as it comes: full resolution, its
-    // full frame rate (60 fps where it has it), the phone's hardware
-    // encoder. The look is rendered onto it afterwards, frame by frame —
+    // The camera's own stream, recorded as it comes: 1080p at 60 fps
+    // where it has them (video mode), the phone's hardware encoder. The look is rendered onto it afterwards, frame by frame —
     // the recording above is only what the preview managed live. Best
     // effort: without it the review keeps that one.
     const camTrack = streamRef.current?.getVideoTracks()[0]

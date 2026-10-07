@@ -43,10 +43,10 @@ export function cropRectFor(srcW: number, srcH: number, targetAspect: number | n
 }
 
 /** Draws `source` cropped to `crop`, downscaled to at most `maxDim` on its
- *  long side, optionally mirrored. The front camera's raw stream is a
+ *  long side (with `smoothing`), optionally mirrored. The front camera's raw stream is a
  *  mirror image (text backwards) unless corrected, and nothing upstream
  *  corrects it — so everything from it is mirrored here once. */
-export function drawFrame(source: HTMLImageElement | HTMLVideoElement | HTMLCanvasElement | ImageBitmap, maxDim: number, crop: CropRect, mirror: boolean): HTMLCanvasElement {
+export function drawFrame(source: HTMLImageElement | HTMLVideoElement | HTMLCanvasElement | ImageBitmap, maxDim: number, crop: CropRect, mirror: boolean, smoothing: ImageSmoothingQuality = 'low'): HTMLCanvasElement {
   const w = source instanceof HTMLVideoElement ? source.videoWidth : source instanceof HTMLImageElement ? source.naturalWidth : source.width
   const h = source instanceof HTMLVideoElement ? source.videoHeight : source instanceof HTMLImageElement ? source.naturalHeight : source.height
   const cw = w * crop.fw
@@ -56,9 +56,9 @@ export function drawFrame(source: HTMLImageElement | HTMLVideoElement | HTMLCanv
   canvas.width = Math.max(1, Math.round(cw * scale))
   canvas.height = Math.max(1, Math.round(ch * scale))
   const ctx = canvas.getContext('2d')!
-  // (a big downscale — a full-resolution still to the editing size —
-  // aliases with the default smoothing)
-  ctx.imageSmoothingQuality = 'high'
+  // ('high' for a still's big downscale, which aliases with the default;
+  // live frames keep the cheap one)
+  ctx.imageSmoothingQuality = smoothing
   if (mirror) {
     ctx.translate(canvas.width, 0)
     ctx.scale(-1, 1)
