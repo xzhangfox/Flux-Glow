@@ -96,6 +96,11 @@ export function protectBackground(source: HTMLCanvasElement, warped: HTMLCanvasE
     rgb[i * 3 + 2] = px.data[i * 4 + 2]
   }
   const fill = pushPull(rgb, wt, w, h)
+  // The warped person is cut out a little wider than the fill reaches, so
+  // where nothing moved, the person's own edge (and a sliver of the
+  // background right next to it) shows — not a ring of fill: only where
+  // slimming pulled the cheek in further than that does the fill appear.
+  const cutMatte = dilate(person, w, h, 4)
   const matte = new ImageData(w, h)
   for (let i = 0; i < n; i++) {
     px.data[i * 4] = fill[i * 3]
@@ -103,7 +108,7 @@ export function protectBackground(source: HTMLCanvasElement, warped: HTMLCanvasE
     px.data[i * 4 + 2] = fill[i * 3 + 2]
     px.data[i * 4 + 3] = (1 - wt[i]) * 255
     matte.data[i * 4] = matte.data[i * 4 + 1] = matte.data[i * 4 + 2] = 255
-    matte.data[i * 4 + 3] = person[i] * 255
+    matte.data[i * 4 + 3] = cutMatte[i] * 255
   }
   wc.putImageData(px, 0, 0)
 
@@ -126,15 +131,35 @@ export function protectBackground(source: HTMLCanvasElement, warped: HTMLCanvasE
   cc.drawImage(warpedMask, box.x * mk, box.y * mk, box.w * mk, box.h * mk, 0, 0, box.w, box.h)
 
   // Original background, the person filled out of it, the warped person
-  // on top.
+  // on top — over the box only, faded out toward its edges: the warp
+  // moves nothing out there, so it meets the plain warped frame without a
+  // seam (a hard-edged paste left a faint rectangle round the face).
+  const prot = canvas(box.w, box.h)
+  const pc = prot.getContext('2d')!
+  pc.drawImage(source, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h)
+  pc.imageSmoothingQuality = 'high'
+  pc.drawImage(work, 0, 0, w, h, 0, 0, box.w, box.h)
+  pc.drawImage(cut, 0, 0)
+  pc.globalCompositeOperation = 'destination-in'
+  pc.imageSmoothingEnabled = true
+  pc.drawImage(featherMask(), 0, 0, box.w, box.h)
   const out = canvas(W, H)
   const ctx = out.getContext('2d')!
   ctx.drawImage(warped, 0, 0)
-  ctx.drawImage(source, box.x, box.y, box.w, box.h, box.x, box.y, box.w, box.h)
-  ctx.imageSmoothingQuality = 'high'
-  ctx.drawImage(work, 0, 0, w, h, box.x, box.y, box.w, box.h)
-  ctx.drawImage(cut, box.x, box.y)
+  ctx.drawImage(prot, box.x, box.y)
   return out
+}
+
+// Opaque in the middle, fading to nothing over the outer eighth of each
+// side (a tiny canvas, stretched: its interpolation makes the ramps).
+let feather: HTMLCanvasElement | null = null
+function featherMask() {
+  if (feather) return feather
+  feather = canvas(16, 16)
+  const g = feather.getContext('2d')!
+  g.fillStyle = '#fff'
+  g.fillRect(2, 2, 12, 12)
+  return feather
 }
 
 // The switch is remembered: someone who wants it wants it every time.

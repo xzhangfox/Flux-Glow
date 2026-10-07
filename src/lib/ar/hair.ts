@@ -374,4 +374,17 @@ export const personSegmenterReady = () => !!segmenters.person
 
 /** The person's confidence over `box` of `frame`, at w × h (for background
  *  protection; live frames reuse it every other frame). */
-export const personMatte = (frame: HTMLCanvasElement, box: Box, w: number, h: number, live: boolean) => matte('protect', frame, box, w, h, live)
+// Live, its edge is smoothed over time — a fresh matte each frame jitters
+// by a pixel or two, which made the protected edge shimmer.
+let lastProtect: { m: Float32Array; w: number; h: number; box: Box } | null = null
+export function personMatte(frame: HTMLCanvasElement, box: Box, w: number, h: number, live: boolean) {
+  const m = matte('protect', frame, box, w, h, live)
+  if (!m || !live) return m
+  const p = lastProtect
+  const out = new Float32Array(m.length)
+  if (p && p.w === w && p.h === h && Math.abs(p.box.x - box.x) < box.w * 0.03 && Math.abs(p.box.y - box.y) < box.h * 0.03)
+    for (let i = 0; i < m.length; i++) out[i] = m[i] * 0.55 + p.m[i] * 0.45
+  else out.set(m)
+  lastProtect = { m: out, w, h, box: { ...box } }
+  return out
+}
