@@ -1,4 +1,4 @@
-import { ALL_FORMATS, BlobSource, BufferTarget, Conversion, Input, Mp4OutputFormat, Output, QUALITY_HIGH, getFirstEncodableVideoCodec } from 'mediabunny'
+import { ALL_FORMATS, BlobSource, BufferTarget, Conversion, Input, Mp4OutputFormat, Output, QUALITY_HIGH, canEncodeAudio, getFirstEncodableVideoCodec } from 'mediabunny'
 import { processFaces, type EditParams, type FaceEdit } from '../pipeline'
 import type { VideoAnalysis } from './analyze'
 
@@ -55,9 +55,14 @@ export async function exportVideo(
     const ctx = canvas.getContext('2d')!
     const hq = opts.quality === 'high'
 
+    // AAC sound where this browser can encode it (a recording's Opus is
+    // carried over otherwise): chat apps only play MP4s with AAC inline.
+    const at = await input.getPrimaryAudioTrack()
+    const aac = !!at && at.codec !== 'aac' && (await canEncodeAudio('aac'))
     const conversion = await Conversion.init({
       input,
       output,
+      ...(aac ? { audio: { codec: 'aac' as const } } : {}),
       video: {
         width: W,
         height: H,

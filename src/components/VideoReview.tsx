@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { extFor, saveBlob, shareBlob, timestampedName } from '../lib/save'
-import { IconCheck, IconClose, IconDownload, IconPause, IconPlay, IconShare, IconWand } from './icons'
+import { IconCheck, IconClose, IconDownload, IconPause, IconPlay, IconShare, IconSpinner, IconWand } from './icons'
 
 // A finished video, played back before anything is saved: watch it first,
 // then save it, share it, take it into the editor, or throw it away. Shown
@@ -43,7 +43,18 @@ export default function VideoReview({
       live = false
     }
   }, [blob, playable])
-  const out = playable ?? blob
+  // What's saved and shared: a standard MP4 (H.264 + AAC, index up front),
+  // which WeChat and other chat apps show as a playable video, not a file.
+  // Made in the background as soon as the review opens — iOS only opens
+  // the share sheet straight from a tap, so it has to be ready by then.
+  const [shareFile, setShareFile] = useState<Blob | null>(null)
+  useEffect(() => {
+    let live = true
+    import('../lib/video/source').then(({ toShareableMp4 }) => toShareableMp4(blob)).then((b) => live && setShareFile(b), () => live && setShareFile(blob))
+    return () => {
+      live = false
+    }
+  }, [blob])
   // (Made and revoked in one effect: a URL made during render would be
   // revoked by React's dev-mode effect double run and never remade.)
   const [url, setUrl] = useState<string | null>(null)
@@ -61,7 +72,8 @@ export default function VideoReview({
   const [saved, setSaved] = useState(false)
   const [askDiscard, setAskDiscard] = useState(false)
   const [toast, setToast] = useState<{ key: number; text: string } | null>(null)
-  const name = useRef(timestampedName(extFor(blob)))
+  const stamp = useRef(timestampedName('x').replace(/\.x$/, ''))
+  const nameFor = (b: Blob) => `${stamp.current}.${extFor(b)}`
 
 
 
@@ -79,14 +91,16 @@ export default function VideoReview({
   }
 
   const save = async () => {
-    const r = await saveBlob(out, name.current)
+    if (!shareFile) return
+    const r = await saveBlob(shareFile, nameFor(shareFile))
     if (r !== 'dismissed') {
       setSaved(true)
       if (r === 'saved') setToast({ key: Date.now(), text: 'Video saved' })
     }
   }
   const share = async () => {
-    const r = await shareBlob(out, name.current)
+    if (!shareFile) return
+    const r = await shareBlob(shareFile, nameFor(shareFile))
     if (r !== 'dismissed') setSaved(true)
     if (r === 'saved') setToast({ key: Date.now(), text: 'Sharing unavailable — saved instead' })
   }
@@ -161,11 +175,11 @@ export default function VideoReview({
               {editLabel}
             </button>
           )}
-          <button onClick={save} className="h-12 px-6 rounded-full bg-primary text-black text-sm font-semibold flex items-center gap-2 shadow-glow">
-            {saved ? <IconCheck className="w-[18px] h-[18px]" /> : <IconDownload className="w-[18px] h-[18px]" />}
-            {saved ? 'Saved' : 'Save'}
+          <button onClick={save} disabled={!shareFile} className="h-12 px-6 rounded-full bg-primary text-black text-sm font-semibold flex items-center gap-2 shadow-glow disabled:opacity-60">
+            {!shareFile ? <IconSpinner className="w-[18px] h-[18px] animate-spin" /> : saved ? <IconCheck className="w-[18px] h-[18px]" /> : <IconDownload className="w-[18px] h-[18px]" />}
+            {!shareFile ? 'Preparing…' : saved ? 'Saved' : 'Save'}
           </button>
-          <button aria-label="Share" onClick={share} className="h-12 w-12 rounded-full bg-white/10 text-white flex items-center justify-center">
+          <button aria-label="Share" onClick={share} disabled={!shareFile} className="h-12 w-12 rounded-full bg-white/10 text-white flex items-center justify-center disabled:opacity-40">
             <IconShare className="w-5 h-5" />
           </button>
         </div>
