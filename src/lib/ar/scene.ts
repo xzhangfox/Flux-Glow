@@ -70,6 +70,9 @@ export interface Model {
   reach?: number
   /** How dark its shadows on the face are, relative to the usual (1). */
   shadow?: number
+  /** Brightly coloured on purpose (a dyed wig): not muted to the photo's
+   *  own saturation when composited. */
+  vivid?: boolean
 }
 
 interface State {
@@ -578,7 +581,7 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
       live,
     )
   }
-  compositeAR(frame, layer, box, live)
+  compositeAR(frame, layer, box, live, model.vivid)
   return true
 }
 

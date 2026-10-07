@@ -1,6 +1,7 @@
 import { FaceLandmarker } from '@mediapipe/tasks-vision'
 import { connectorsToLoop } from './landmarks'
 import { drawGlam, glamReady, loadGlam } from './glam'
+import { drawLavenderMakeup } from './makeup'
 import type { EditParams } from './pipeline'
 import type { P3 } from './ar/scene'
 
@@ -48,6 +49,7 @@ export const EFFECTS: EffectDef[] = [
   { id: 'bunny', label: 'Bunny' },
   { id: 'bear', label: 'Bear' },
   { id: 'glam', label: 'Glam' },
+  { id: 'lavender', label: 'Lavender' },
   { id: 'foxhead', label: 'Fox Head' },
   { id: 'huskyhead', label: 'Husky Head' },
   { id: 'shibahead', label: 'Shiba Head' },
@@ -177,6 +179,7 @@ function sparkle(ctx: CanvasRenderingContext2D, c: Pt, r: number, color: string)
 function builderFor(a: AR, effectId: string, _slot: string): () => import('./ar/scene').Model | Promise<import('./ar/scene').Model> {
   const heads: Record<string, 'shiba' | 'fox' | 'husky'> = { shibahead: 'shiba', foxhead: 'fox', huskyhead: 'husky' }
   if (heads[effectId]) return () => a.animalHeadAsync(heads[effectId])
+  if (effectId === 'lavender') return a.lavenderWig
   const special: Record<string, () => import('./ar/scene').Model> = { spider: a.spiderMask, bat: a.batCowl, custom: () => a.faceSticker(() => custom) }
   return special[effectId] ?? (() => a.buildModel(effectId))
 }
@@ -224,7 +227,7 @@ function watchGlam() {
     .finally(() => readyListeners.forEach((fn) => fn()))
 }
 
-const THREE_D = new Set(['foxhead', 'huskyhead', 'shibahead', 'kitty', 'fox', 'bunny', 'bear', 'spider', 'bat', 'sport', 'wayfarer', 'crown', 'faun', 'angel', 'stars', 'custom'])
+const THREE_D = new Set(['lavender', 'foxhead', 'huskyhead', 'shibahead', 'kitty', 'fox', 'bunny', 'bear', 'spider', 'bat', 'sport', 'wayfarer', 'crown', 'faun', 'angel', 'stars', 'custom'])
 
 // The Custom effect's picture: a square the user cropped from their own
 // photo, worn in front of the face. Bumped version = a new picture.
@@ -243,6 +246,9 @@ export function drawEffect(canvas: HTMLCanvasElement, P: P3[], effectId: string,
   if (effectId === 'none') return
   const ctx = canvas.getContext('2d')!
   const f = faceGeometry(P)
+  // Makeup, painted on the face under the 3D layer (the wig's bangs fall
+  // over it).
+  if (effectId === 'lavender') drawLavenderMakeup(ctx, P)
   // Painted eyes and lips: 2D, worn over the face.
   if (effectId === 'glam') {
     if (!glamReady()) watchGlam()

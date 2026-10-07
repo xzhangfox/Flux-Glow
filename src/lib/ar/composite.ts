@@ -132,7 +132,9 @@ export function readLayer(layer: CanvasImageSource, layerScale: number, box: Box
 }
 
 /** Blends `layer` (from readLayer) into `frame` within `box`. */
-export function compositeAR(frame: HTMLCanvasElement, layer: HTMLCanvasElement, box: Box, live = false) {
+/** `vivid`: keep the layer's own saturation (a coloured wig is meant to be
+ *  brighter than the photo). */
+export function compositeAR(frame: HTMLCanvasElement, layer: HTMLCanvasElement, box: Box, live = false, vivid = false) {
   const fctx = frame.getContext('2d', { willReadFrequently: true })!
   const { x, y, w, h } = box
   if (w < 2 || h < 2) return
@@ -149,7 +151,7 @@ export function compositeAR(frame: HTMLCanvasElement, layer: HTMLCanvasElement, 
   let seed = (Math.random() * 2 ** 31) | 0
   // A muted photo mutes the props too (CG colour is cleaner than any
   // camera's): pull saturation toward the photo's own.
-  const desat = Math.min(0.45, Math.max(0, 0.32 - st.sat) * 1.6)
+  const desat = vivid ? 0 : Math.min(0.45, Math.max(0, 0.32 - st.sat) * 1.6)
   // Light wrap: near the layer's outline, the background's own light
   // bleeds over the edge, as it does round anything photographed against
   // it. Both at quarter resolution — it's all soft.
