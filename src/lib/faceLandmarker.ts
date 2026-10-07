@@ -1,4 +1,4 @@
-import { FaceLandmarker, FilesetResolver, type NormalizedLandmark } from '@mediapipe/tasks-vision'
+import { FaceLandmarker, FilesetResolver, type Classifications, type NormalizedLandmark } from '@mediapipe/tasks-vision'
 
 // Self-hosted (copied from node_modules/@mediapipe/tasks-vision/wasm at
 // install time — see scripts/copy-mediapipe-wasm.js) rather than pulled
@@ -11,6 +11,39 @@ const WASM_BASE_URL = '/mediapipe/wasm'
 // once from Google's own model repo and committed here) for the same
 // reason as the WASM runtime above.
 const MODEL_URL = '/mediapipe/face_landmarker.task'
+
+// ---- Eye closure ----
+//
+// The face model also scores expressions ("blendshapes"); its eyeBlink
+// scores say how shut each eye is far more reliably than the gap between
+// lid landmarks (which shifts with eye size, gaze and perspective). They
+// ride along on the landmark array as a non-enumerable property, so every
+// copy step (cropping, mirroring, reshaping) can carry them across.
+
+/** How shut each eye is, 0..1, by anatomy: `r` the eye at landmarks 33 /
+ *  133 (the subject's right), `l` the one at 362 / 263 (their left). */
+export interface EyeClosure {
+  r: number
+  l: number
+}
+
+export function eyeClosureOf(lm: readonly unknown[] | null | undefined): EyeClosure | undefined {
+  return (lm as { eyes?: EyeClosure } | null | undefined)?.eyes
+}
+
+/** Tags `lm` with `eyes` (returns `lm`). */
+export function withEyeClosure<T extends object>(lm: T, eyes: EyeClosure | undefined): T {
+  if (eyes) Object.defineProperty(lm, 'eyes', { value: eyes, enumerable: false, configurable: true })
+  return lm
+}
+
+/** The eye closure in a landmarker result's blendshapes for face `i`. */
+export function closureFrom(shapes: Classifications[] | undefined, i: number): EyeClosure | undefined {
+  const cats = shapes?.[i]?.categories
+  if (!cats?.length) return undefined
+  const get = (name: string) => cats.find((c) => c.categoryName === name)?.score ?? 0
+  return { r: get('eyeBlinkRight'), l: get('eyeBlinkLeft') }
+}
 
 let landmarkerPromise: Promise<FaceLandmarker> | null = null
 let currentMode: 'IMAGE' | 'VIDEO' = 'IMAGE'
@@ -26,6 +59,7 @@ export async function createLandmarker(runningMode: 'IMAGE' | 'VIDEO', numFaces:
     baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
     runningMode,
     numFaces,
+    outputFaceBlendshapes: true,
     minFaceDetectionConfidence: 0.35,
     minFacePresenceConfidence: 0.4,
     minTrackingConfidence: 0.35,
@@ -39,6 +73,7 @@ function getLandmarker(): Promise<FaceLandmarker> {
         baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
         runningMode: 'IMAGE',
         numFaces: 1,
+        outputFaceBlendshapes: true,
         // Lenient (defaults are 0.5): a face half hidden behind the phone
         // in a mirror selfie, or small and far away, still counts, and the
         // tracker holds on to a face it has found through partial cover.
@@ -169,13 +204,15 @@ const sizeOf = (src: HTMLImageElement | HTMLCanvasElement | HTMLVideoElement) =>
  *  whole frame. */
 export async function detectFaceLandmarks(image: HTMLImageElement | HTMLCanvasElement, hint?: NormalizedLandmark[] | null): Promise<NormalizedLandmark[] | null> {
   const landmarker = await inMode('IMAGE')
-  const found = landmarker.detect(image).faceLandmarks[0]
-  if (found) return found
+  const res = landmarker.detect(image)
+  const found = res.faceLandmarks[0]
+  if (found) return withEyeClosure(found, closureFrom(res.faceBlendshapes, 0))
   const [W, H] = sizeOf(image)
   const tries = [...(hint ? [windowAround(hint, W, H)] : []), ...searchWindows(W, H), ...gridWindows(W, H)]
   for (const r of tries) {
-    const lm = landmarker.detect(cropOf(image, W, H, r)).faceLandmarks[0]
-    if (lm) return fromRoi(lm, r)
+    const res = landmarker.detect(cropOf(image, W, H, r))
+    const lm = res.faceLandmarks[0]
+    if (lm) return withEyeClosure(fromRoi(lm, r), closureFrom(res.faceBlendshapes, 0))
   }
   return null
 }
@@ -208,12 +245,13 @@ export class LiveFaceTracker {
       roi = this.step % 2 === 0 ? FULL : windows[(this.step >> 1) % windows.length]
       this.step++
     }
-    const raw = landmarker.detectForVideo(isFull(roi) ? video : cropOf(video, W, H, roi), timestampMs).faceLandmarks[0]
+    const res = landmarker.detectForVideo(isFull(roi) ? video : cropOf(video, W, H, roi), timestampMs)
+    const raw = res.faceLandmarks[0]
     if (!raw) {
       this.misses++
       return timestampMs - this.lastAt < HOLD_MS ? this.last : null
     }
-    const lm = fromRoi(raw, roi)
+    const lm = withEyeClosure(fromRoi(raw, roi), closureFrom(res.faceBlendshapes, 0))
     this.roi = this.follow(lm, roi, W, H)
     this.misses = 0
     this.step = 0

@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { eyeClosureOf, type EyeClosure } from '../faceLandmarker'
 import { FaceLandmarker } from '@mediapipe/tasks-vision'
 import { FACE_TRIANGULATION } from '../faceTriangulation'
 import { connectorsToLoop } from '../landmarks'
@@ -45,6 +46,8 @@ export interface Rig {
   world: THREE.Vector3[]
   /** Lip gap relative to mouth width. */
   mouthOpen: number
+  /** How shut each eye is, from the face model, when known. */
+  eyes?: EyeClosure
   live: boolean
 }
 
@@ -399,6 +402,7 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
   st.faceGeo.computeBoundingSphere()
 
   const rig = buildRig(P, live)
+  rig.eyes = eyeClosureOf(P2)
   st.rig.matrix.copy(rig.matrix)
   st.rig.matrixWorldNeedsUpdate = true
   const hp = st.headGeo.getAttribute('position') as THREE.BufferAttribute

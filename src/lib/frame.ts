@@ -1,3 +1,4 @@
+import { eyeClosureOf, withEyeClosure } from './faceLandmarker'
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
 
 /** Output frame shape. 'full' matches the screen itself, so the live
@@ -72,9 +73,11 @@ export function drawFrame(source: HTMLImageElement | HTMLVideoElement, maxDim: n
  *  relighting is built from as the crop tightens. */
 export function remapLandmarks(landmarks: NormalizedLandmark[] | null, crop: CropRect, mirror: boolean): NormalizedLandmark[] | null {
   if (!landmarks) return null
-  return landmarks.map((p) => {
+  const out = landmarks.map((p) => {
     let x = (p.x - crop.x0) / crop.fw
     if (mirror) x = 1 - x
     return { ...p, x, y: (p.y - crop.y0) / crop.fh, z: p.z / crop.fw }
   })
+  // (eye closure is by anatomy, so mirroring leaves it as is)
+  return withEyeClosure(out, eyeClosureOf(landmarks))
 }

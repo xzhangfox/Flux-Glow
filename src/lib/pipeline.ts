@@ -9,6 +9,7 @@ import { drawEffect, withEffectBoost } from './effects'
 import { LEFT_MOUTH_CORNER, RIGHT_MOUTH_CORNER } from './meshWarp'
 import { applyFilter, findPreset } from './filters'
 import { connectorsToLoop, loopBoundsPx } from './landmarks'
+import { eyeClosureOf, withEyeClosure } from './faceLandmarker'
 
 export interface EditParams extends ReshapeParams {
   smoothness: number
@@ -153,7 +154,10 @@ export function processFaces(base: HTMLCanvasElement, faces: FaceEdit[], frame: 
     if (params.effectId === 'none') continue
     // Effects track the face as reshaped, so ears sit on the slimmed head.
     const tg = deformTargets(landmarks, params, base.width / base.height)
-    const pts = Array.from({ length: tg.length / 2 }, (_, i) => ({ x: tg[i * 2] * base.width, y: tg[i * 2 + 1] * base.height, z: landmarks[i].z * base.width }))
+    const pts = withEyeClosure(
+      Array.from({ length: tg.length / 2 }, (_, i) => ({ x: tg[i * 2] * base.width, y: tg[i * 2 + 1] * base.height, z: landmarks[i].z * base.width })),
+      eyeClosureOf(landmarks),
+    )
     drawEffect(reshaped, pts, params.effectId, t ?? (highQuality ? 0.6 : performance.now() / 1000), !highQuality, slot)
   }
   return applyFilter(reshaped, preset, frame.filterStrength)

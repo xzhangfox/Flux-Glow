@@ -1156,27 +1156,54 @@ function withEyelid(mat: THREE.MeshPhysicalMaterial, lid: THREE.Color) {
 }
 
 /** How shut each of the wearer's eyes is (0 open .. 1 shut), on screen
- *  left and right, from the lid gap over the eye's width. Calibrates
- *  itself to how wide this wearer's eyes open, and settles quickly but
- *  without flicker on a live feed. */
+ *  left and right.
+ *
+ *  From the face model's eye-blink scores where it gives them (far more
+ *  reliable than lid geometry), else from the lid gap over the eye's
+ *  width. Either way it calibrates to this wearer's resting eyes (a
+ *  slowly-tracked baseline, so someone looking down at their phone isn't
+ *  read as half asleep), and the two eyes move as one unless they clearly
+ *  differ — a real wink — so one eye never lags the other. */
 class Blinker {
-  private open = { left: 0.28, right: 0.28 }
+  private base = { r: 0.15, l: 0.15 }
   private shut = { left: 0, right: 0 }
+  private wink = 0
 
   update(rig: Rig): { left: number; right: number } {
-    const P = rig.world
-    const ratio = (up: number, lo: number, a: number, b: number) => Math.hypot(P[up].x - P[lo].x, P[up].y - P[lo].y) / Math.max(1e-6, Math.hypot(P[a].x - P[b].x, P[a].y - P[b].y))
-    const eyes = [
-      { r: ratio(159, 145, 33, 133), x: rig.local(33).x + rig.local(133).x },
-      { r: ratio(386, 374, 362, 263), x: rig.local(362).x + rig.local(263).x },
-    ]
-    for (const e of eyes) {
-      const k = e.x < 0 ? 'left' : 'right'
-      // This wearer's open eye: the widest seen lately.
-      this.open[k] = Math.max(0.18, Math.max(e.r, this.open[k] - (rig.live ? 0.0008 : 0)))
-      const target = 1 - ss(e.r / this.open[k], 0.3, 0.72)
-      this.shut[k] = rig.live ? this.shut[k] + (target - this.shut[k]) * 0.7 : target
+    const raw = rig.eyes ?? this.fromGeometry(rig)
+    const live = rig.live
+    const out = { r: 0, l: 0 }
+    for (const k of ['r', 'l'] as const) {
+      // Resting level: follows the score down at once, up only slowly.
+      const v = raw[k]
+      this.base[k] = v < this.base[k] ? v : live ? this.base[k] + (v - this.base[k]) * 0.004 : this.base[k]
+      const base = Math.min(this.base[k], 0.45)
+      out[k] = ss(v - base, 0.12, 0.42)
+    }
+    // Together unless clearly apart (held over a few frames: a wink).
+    const apart = Math.abs(out.r - out.l) > 0.45
+    this.wink = live ? (apart ? Math.min(1, this.wink + 0.34) : Math.max(0, this.wink - 0.5)) : apart ? 1 : 0
+    const both = Math.max(out.r, out.l) * 0.7 + Math.min(out.r, out.l) * 0.3
+    const r = both + (out.r - both) * this.wink
+    const l = both + (out.l - both) * this.wink
+    // Screen sides: the subject's right eye shows on the left unless the
+    // picture is mirrored, so ask where it actually is.
+    const rightOnLeft = rig.local(33).x + rig.local(133).x < 0
+    const target = rightOnLeft ? { left: r, right: l } : { left: l, right: r }
+    // Closing is fast (a blink lasts ~150 ms), opening a touch softer.
+    for (const k of ['left', 'right'] as const) {
+      const a = target[k] > this.shut[k] ? 0.85 : 0.6
+      this.shut[k] = live ? this.shut[k] + (target[k] - this.shut[k]) * a : target[k]
     }
     return this.shut
+  }
+
+  /** Lid gap over eye width, mapped onto a blink-score-like scale. */
+  private fromGeometry(rig: Rig) {
+    const P = rig.world
+    const ratio = (up: number, lo: number, a: number, b: number) => Math.hypot(P[up].x - P[lo].x, P[up].y - P[lo].y) / Math.max(1e-6, Math.hypot(P[a].x - P[b].x, P[a].y - P[b].y))
+    // ~0.3 open .. ~0.08 shut  ->  ~0.1 .. ~0.75
+    const score = (q: number) => Math.min(1, Math.max(0, 1 - q / 0.32))
+    return { r: score(ratio(159, 145, 33, 133)), l: score(ratio(386, 374, 362, 263)) }
   }
 }

@@ -1,6 +1,6 @@
 import { ImageEmbedder, type FaceLandmarker, type NormalizedLandmark } from '@mediapipe/tasks-vision'
 import { ALL_FORMATS, BlobSource, CanvasSink, Input } from 'mediabunny'
-import { createLandmarker, visionFileset } from '../faceLandmarker'
+import { closureFrom, createLandmarker, visionFileset, withEyeClosure, type EyeClosure } from '../faceLandmarker'
 
 // Video analysis for the video editor: every face in every frame, who each
 // one is, and a steady track of each person's face mesh through the clip —
@@ -33,6 +33,8 @@ const WORK_MAX = 960
 /** Landmarks per face (the 468-point mesh and the irises). */
 export const N_LM = 478
 const STRIDE = N_LM * 3
+/** Per face per frame: the landmarks, then how shut each eye is (r, l). */
+const FRAME = STRIDE + 2
 const MAX_FACES = 6
 /** Most of a second's absence still continues a track. */
 const TRACK_GAP_S = 0.8
@@ -113,8 +115,10 @@ const sizeOf = (b: Box) => Math.max(b.x1 - b.x0, b.y1 - b.y0)
 const centreOf = (b: Box) => ({ x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2 })
 const shift = (b: Box, dx: number, dy: number): Box => ({ x0: b.x0 + dx, y0: b.y0 + dy, x1: b.x1 + dx, y1: b.y1 + dy })
 
-function pack(lm: NormalizedLandmark[], roi?: { x: number; y: number; w: number; h: number }): Float32Array {
-  const out = new Float32Array(STRIDE)
+function pack(lm: NormalizedLandmark[], eyes: EyeClosure | undefined, roi?: { x: number; y: number; w: number; h: number }): Float32Array {
+  const out = new Float32Array(FRAME)
+  out[STRIDE] = eyes?.r ?? 0
+  out[STRIDE + 1] = eyes?.l ?? 0
   const n = Math.min(N_LM, lm.length)
   for (let i = 0; i < n; i++) {
     const p = lm[i]
@@ -128,7 +132,7 @@ function pack(lm: NormalizedLandmark[], roi?: { x: number; y: number; w: number;
 function unpack(a: Float32Array): NormalizedLandmark[] {
   const out: NormalizedLandmark[] = new Array(N_LM)
   for (let i = 0; i < N_LM; i++) out[i] = { x: a[i * 3], y: a[i * 3 + 1], z: a[i * 3 + 2], visibility: 1 }
-  return out
+  return withEyeClosure(out, { r: a[STRIDE], l: a[STRIDE + 1] })
 }
 
 /** How squarely the face looks at the camera (1 frontal, 0 profile). */
@@ -334,9 +338,15 @@ function smoothRun(frames: Float32Array[], ts: Float64Array) {
   const series = new Float32Array(n)
   const fwd = new Float32Array(n)
   const bwd = new Float32Array(n)
-  const out = frames.map(() => new Float32Array(STRIDE))
-  for (let c = 0; c < STRIDE; c++) {
+  const out = frames.map(() => new Float32Array(FRAME))
+  for (let c = 0; c < FRAME; c++) {
     for (let i = 0; i < n; i++) series[i] = frames[i][c]
+    // Eye closure as found: a blink is over in a few frames, and smoothing
+    // would wash it out.
+    if (c >= STRIDE) {
+      for (let i = 0; i < n; i++) out[i][c] = series[i]
+      continue
+    }
     // z is noisier and matters less: smoothed harder.
     const isZ = c % 3 === 2
     oneEuro(series, ts, fwd, false, isZ ? 0.8 : 1.4, isZ ? 3 : 9)
@@ -368,8 +378,8 @@ function buildFrames(p: Person, times: Float64Array) {
       const b = raw[i]!
       for (let k = lastIdx + 1; k < i; k++) {
         const f = (times[k] - times[lastIdx]) / (times[i] - times[lastIdx])
-        const m = new Float32Array(STRIDE)
-        for (let c = 0; c < STRIDE; c++) m[c] = a[c] + (b[c] - a[c]) * f
+        const m = new Float32Array(FRAME)
+        for (let c = 0; c < FRAME; c++) m[c] = a[c] + (b[c] - a[c]) * f
         raw[k] = m
       }
     }
@@ -450,8 +460,9 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
 
   const detectIn = (frame: HTMLCanvasElement, r: { x: number; y: number; w: number; h: number }): Det[] => {
     const c = crop(frame, r)
-    return iLm.detect(c).faceLandmarks.map((lm) => {
-      const a = pack(lm, r)
+    const res = iLm.detect(c)
+    return res.faceLandmarks.map((lm, i) => {
+      const a = pack(lm, closureFrom(res.faceBlendshapes, i), r)
       return { lm: a, box: boxOf(a, W, H) }
     })
   }
@@ -466,8 +477,9 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
     const ms = clockBase + timestamp * 1000
 
     // 1. Whole frame.
-    let dets: Det[] = vLm.detectForVideo(frame, ms).faceLandmarks.map((lm) => {
-      const a = pack(lm)
+    const vres = vLm.detectForVideo(frame, ms)
+    let dets: Det[] = vres.faceLandmarks.map((lm, i) => {
+      const a = pack(lm, closureFrom(vres.faceBlendshapes, i))
       return { lm: a, box: boxOf(a, W, H) }
     })
     // Small faces: tiles, now and then (and on the first frame).
@@ -689,8 +701,8 @@ function makeAnalysis(people: Person[], times: Float64Array, W: number, H: numbe
     const b = p.frames[i + 1]
     if (!b || times[i + 1] <= times[i]) return unpack(a)
     const f = Math.min(1, Math.max(0, (t - times[i]) / (times[i + 1] - times[i])))
-    const m = new Float32Array(STRIDE)
-    for (let c = 0; c < STRIDE; c++) m[c] = a[c] + (b[c] - a[c]) * f
+    const m = new Float32Array(FRAME)
+    for (let c = 0; c < FRAME; c++) m[c] = a[c] + (b[c] - a[c]) * f
     return unpack(m)
   }
 
