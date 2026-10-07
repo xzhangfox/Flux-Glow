@@ -1,6 +1,6 @@
 import { FaceLandmarker } from '@mediapipe/tasks-vision'
 import { connectorsToLoop } from './landmarks'
-import { LIPS_LOOP } from './deform'
+import { drawGlam, glamReady, loadGlam } from './glam'
 import type { EditParams } from './pipeline'
 import type { P3 } from './ar/scene'
 
@@ -41,15 +41,13 @@ export interface EffectDef {
   boost?: Partial<Record<keyof EditParams, number>>
 }
 
-const BABY = { eyes: 0.3, eyeHeight: 0.2, noseTip: 0.25, chin: -0.3, face: 0.15, forehead: 0.2, smoothness: 0.15, fillLight: 0.15 }
-
 export const EFFECTS: EffectDef[] = [
   { id: 'none', label: 'None' },
   { id: 'kitty', label: 'Kitty' },
   { id: 'fox', label: 'Fox' },
   { id: 'bunny', label: 'Bunny' },
   { id: 'bear', label: 'Bear' },
-  { id: 'doll', label: 'Doll', boost: { ...BABY, eyes: 0.45, eyeHeight: 0.3, chin: -0.4, whitening: 0.25 } },
+  { id: 'glam', label: 'Glam' },
   { id: 'foxhead', label: 'Fox Head' },
   { id: 'huskyhead', label: 'Husky Head' },
   { id: 'shibahead', label: 'Shiba Head' },
@@ -156,73 +154,6 @@ function faceGeometry(P: Pt[]): Face {
   }
 }
 
-/** Run `fn` in a local frame at `o`, rotated by `rot`, where 1 unit = `s` px. */
-function frame(ctx: CanvasRenderingContext2D, o: Pt, rot: number, s: number, fn: () => void, mirror = false) {
-  ctx.save()
-  ctx.translate(o.x, o.y)
-  ctx.rotate(rot)
-  ctx.scale(mirror ? -s : s, s)
-  fn()
-  ctx.restore()
-}
-
-function radial(ctx: CanvasRenderingContext2D, c: Pt, r: number, inner: string, outer: string) {
-  const g = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, r)
-  g.addColorStop(0, inner)
-  g.addColorStop(1, outer)
-  ctx.fillStyle = g
-  ctx.beginPath()
-  ctx.arc(c.x, c.y, r, 0, Math.PI * 2)
-  ctx.fill()
-}
-
-function blush(ctx: CanvasRenderingContext2D, f: Face, color = 'rgba(255,110,140,0.32)') {
-  for (const [cheek, side] of [[f.cheekL, f.sideL], [f.cheekR, f.sideR]] as const) {
-    const c = add(lerp(cheek, f.nose, 0.42), f.up, -0.12 * f.E)
-    frame(ctx, c, f.roll, f.E * side, () => {
-      ctx.scale(1, 0.62)
-      radial(ctx, { x: 0, y: 0 }, 0.36, color, 'rgba(255,110,140,0)')
-    })
-  }
-}
-
-function doll(ctx: CanvasRenderingContext2D, f: Face) {
-  blush(ctx, f, 'rgba(255,105,140,0.38)')
-  // Lip tint.
-  ctx.save()
-  ctx.globalCompositeOperation = 'multiply'
-  ctx.beginPath()
-  LIPS_LOOP.forEach((i, k) => (k ? ctx.lineTo(f.P[i].x, f.P[i].y) : ctx.moveTo(f.P[i].x, f.P[i].y)))
-  ctx.closePath()
-  ctx.fillStyle = 'rgba(255,90,130,0.35)'
-  ctx.fill()
-  ctx.restore()
-  // Freckles across the nose and cheeks (fixed pattern, so they don't
-  // shimmer frame to frame).
-  frame(ctx, lerp(f.P[168], f.nose, 0.55), f.roll, f.E, () => {
-    let seed = 7
-    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647)
-    ctx.fillStyle = 'rgba(140,70,50,0.5)'
-    for (let i = 0; i < 30; i++) {
-      const side = i % 2 ? 1 : -1
-      const x = side * (0.12 + rnd() * 0.5)
-      const y = -0.05 + rnd() * 0.3 + Math.abs(x) * 0.15
-      ctx.beginPath()
-      ctx.arc(x, y, 0.016 + rnd() * 0.014, 0, Math.PI * 2)
-      ctx.fill()
-    }
-  })
-  // Under-eye glow (aegyo-sal) and a sparkle highlight on each eye.
-  for (const [eye, loop] of [[f.eyeL, f.eyeLoopL], [f.eyeR, f.eyeLoopR]] as const) {
-    const w = Math.max(...loop.map((i) => dist(f.P[i], eye)))
-    frame(ctx, add(eye, f.up, -0.22 * f.E), f.roll, w, () => {
-      ctx.scale(1, 0.32)
-      radial(ctx, { x: 0, y: 0 }, 1, 'rgba(255,235,230,0.35)', 'rgba(255,235,230,0)')
-    })
-    sparkle(ctx, add(add(eye, f.up, 0.05 * f.E), f.right, 0.06 * f.E), f.E * 0.07, 'rgba(255,255,255,0.95)')
-  }
-}
-
 function sparkle(ctx: CanvasRenderingContext2D, c: Pt, r: number, color: string) {
   ctx.save()
   ctx.translate(c.x, c.y)
@@ -275,13 +206,23 @@ function watchReady(effectId: string, slot: string) {
 /** Gets `effectId` ready for face `slot` (loading the 3D engine first if
  *  need be), in the background. Resolves when it can be drawn. */
 export async function prepareEffect(effectId: string, slot = ''): Promise<void> {
+  if (effectId === 'glam') return loadGlam()
   if (!THREE_D.has(effectId)) return
   const a = await preloadAR()
   await a.prepareModel(effectId, slot, builderFor(a, effectId, slot))
 }
 
 /** Is `effectId` ready to draw for face `slot` (no wait on first use)? */
-export const isEffectReady = (effectId: string, slot = '') => !THREE_D.has(effectId) || (!!ar && ar.isModelReady(effectId, slot))
+export const isEffectReady = (effectId: string, slot = '') => (effectId === 'glam' ? glamReady() : !THREE_D.has(effectId) || (!!ar && ar.isModelReady(effectId, slot)))
+
+let glamWatched = false
+function watchGlam() {
+  if (glamWatched) return
+  glamWatched = true
+  loadGlam()
+    .catch((err) => console.warn('Effect failed to load', 'glam', err))
+    .finally(() => readyListeners.forEach((fn) => fn()))
+}
 
 const THREE_D = new Set(['foxhead', 'huskyhead', 'shibahead', 'kitty', 'fox', 'bunny', 'bear', 'spider', 'bat', 'sport', 'wayfarer', 'crown', 'faun', 'angel', 'stars', 'custom'])
 
@@ -302,10 +243,12 @@ export function drawEffect(canvas: HTMLCanvasElement, P: P3[], effectId: string,
   if (effectId === 'none') return
   const ctx = canvas.getContext('2d')!
   const f = faceGeometry(P)
-  ctx.save()
-  // Paint under the 3D layer.
-  if (effectId === 'doll') doll(ctx, f)
-  ctx.restore()
+  // Painted eyes and lips: 2D, worn over the face.
+  if (effectId === 'glam') {
+    if (!glamReady()) watchGlam()
+    drawGlam(ctx, P, slot, live)
+    return
+  }
 
   if (THREE_D.has(effectId)) {
     // First use: start loading the engine; the caller re-renders when it's in.

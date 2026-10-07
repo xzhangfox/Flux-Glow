@@ -311,21 +311,6 @@ function closedSpline(ctrl: [number, number][], per = 12) {
   return out
 }
 
-/** An outline pushed outward by a thickness that can vary round it (an
- *  even offset, not a scale, so a rim is as wide as it says everywhere). */
-function offsetOutline(pts: THREE.Vector2[], th: (p: THREE.Vector2) => number) {
-  const n = pts.length
-  let area = 0
-  for (let i = 0; i < n; i++) area += pts[i].x * pts[(i + 1) % n].y - pts[(i + 1) % n].x * pts[i].y
-  const sign = area > 0 ? 1 : -1
-  return pts.map((p, i) => {
-    const a = pts[(i - 1 + n) % n]
-    const b = pts[(i + 1) % n]
-    const t = new THREE.Vector2(b.x - a.x, b.y - a.y).normalize()
-    return p.clone().addScaledVector(new THREE.Vector2(t.y * sign, -t.x * sign), th(p))
-  })
-}
-
 const mirrorX = (pts: [number, number][]) => pts.map(([x, y]) => [-x, y] as [number, number]).reverse()
 
 /** Bends a flat front (built in x, y, extruded along z) round the face. */
@@ -334,11 +319,6 @@ function bendGeometry(g: THREE.BufferGeometry, z: (x: number, y: number) => numb
   for (let i = 0; i < p.count; i++) p.setZ(i, p.getZ(i) + z(p.getX(i), p.getY(i)))
   g.computeVertexNormals()
   return g
-}
-
-function flatLens(outline: THREE.Vector2[], bend: (x: number, y: number) => number, lift: number) {
-  const g = new THREE.ShapeGeometry(new THREE.Shape(outline), 4)
-  return bendGeometry(g, (x, y) => bend(x, y) + lift)
 }
 
 /** A temple: a side profile (tall at the hinge, tapering, curving down
@@ -362,159 +342,288 @@ function templeArm(profile: (s: THREE.Shape) => void, thickness: number, side: n
   return g
 }
 
-const smokeLens = (o: THREE.MeshPhysicalMaterialParameters = {}) =>
-  physical({ color: 0x1c1e21, roughness: 0.04, metalness: 0.1, transparent: true, opacity: 0.94, clearcoat: 1, clearcoatRoughness: 0.02, envMapIntensity: 1.5, side: THREE.DoubleSide, depthWrite: false, ...o })
+// What eyewear reflects: a photo studio, the way product shots light it —
+// a bright sky band over a sharp horizon, a dark floor, a big overhead
+// softbox and two tall window strips. Lenses and gloss pick up its
+// gradient and crisp edge highlights, which is most of what makes
+// sunglasses read as real (the frame's own environment is just its
+// average colours: fine for skin and fur, flat on a lens).
+let studio: THREE.Texture | null = null
+function studioEnv() {
+  if (studio) return studio
+  const c = document.createElement('canvas')
+  c.width = 512
+  c.height = 256
+  const g = c.getContext('2d')!
+  // Dark all round the horizon — where a surface facing the camera looks —
+  // so black stays black face-on and only edges and curves turned up or
+  // aside catch the light.
+  const sky = g.createLinearGradient(0, 0, 0, 128)
+  sky.addColorStop(0, '#eef1f5')
+  sky.addColorStop(0.3, '#b4bac2')
+  sky.addColorStop(0.5, '#3b3f45')
+  sky.addColorStop(0.75, '#16181b')
+  sky.addColorStop(1, '#0c0d0e')
+  g.fillStyle = sky
+  g.fillRect(0, 0, 512, 128)
+  const floor = g.createLinearGradient(0, 128, 0, 256)
+  floor.addColorStop(0, '#0c0c0c')
+  floor.addColorStop(0.4, '#1d1c1b')
+  floor.addColorStop(1, '#0a0a0a')
+  g.fillStyle = floor
+  g.fillRect(0, 128, 512, 128)
+  g.filter = 'blur(2px)'
+  g.fillStyle = '#ffffff'
+  // A long overhead softbox all the way round (a bright band on every top
+  // edge and the top of each lens)…
+  g.fillRect(0, 14, 512, 14)
+  // …a big key softbox above, and window strips high on either side.
+  g.fillRect(196, 4, 120, 40)
+  g.globalAlpha = 0.8
+  g.fillRect(76, 26, 16, 54)
+  g.fillRect(420, 26, 16, 54)
+  g.globalAlpha = 1
+  g.filter = 'none'
+  const t = new THREE.CanvasTexture(c)
+  t.mapping = THREE.EquirectangularReflectionMapping
+  t.colorSpace = THREE.SRGBColorSpace
+  return (studio = t)
+}
+
+// What a lens reflects: what's in front of the wearer — a bright sky
+// above the horizon fading to the dark ground below — so the top of each
+// curved lens shows the classic bright sheen and the bottom stays dark.
+let sky: THREE.Texture | null = null
+function lensEnv() {
+  if (sky) return sky
+  const c = document.createElement('canvas')
+  c.width = 512
+  c.height = 256
+  const g = c.getContext('2d')!
+  const grad = g.createLinearGradient(0, 0, 0, 256)
+  // (The skyline sits a little below straight ahead: glasses tip forward
+  // on the nose, so a lens facing the camera looks slightly down.)
+  grad.addColorStop(0, '#f2f5f9')
+  grad.addColorStop(0.35, '#d0d6de')
+  grad.addColorStop(0.5, '#a3abb5')
+  grad.addColorStop(0.57, '#68707a')
+  grad.addColorStop(0.61, '#2b2a28')
+  grad.addColorStop(0.75, '#141312')
+  grad.addColorStop(1, '#070707')
+  g.fillStyle = grad
+  g.fillRect(0, 0, 512, 256)
+  // A few soft shapes on the skyline (trees, buildings), so the sheen
+  // isn't a perfect gradient.
+  g.filter = 'blur(4px)'
+  g.fillStyle = 'rgba(40,44,48,0.55)'
+  for (const [x, w, h] of [[40, 60, 18], [150, 30, 30], [300, 80, 14], [420, 40, 24]]) g.fillRect(x, 154 - h, w, h)
+  g.filter = 'none'
+  const t = new THREE.CanvasTexture(c)
+  t.mapping = THREE.EquirectangularReflectionMapping
+  t.colorSpace = THREE.SRGBColorSpace
+  return (sky = t)
+}
+
+/** A lens: a fan of rings from its centre out to `outline`, so it has
+ *  vertices all over and really follows the curve (a flat triangulation
+ *  only bends at its edge). `tint(y)`: rgba by height, for gradient
+ *  lenses. */
+function lensGeometry(outline: THREE.Vector2[], bend: (x: number, y: number) => number, lift: number, tint: (y: number) => [number, number, number, number]) {
+  const c = outline.reduce((a, p) => a.add(p), new THREE.Vector2()).divideScalar(outline.length)
+  const R = 10
+  const n = outline.length
+  // A real lens is curved both ways (its base curve), not just round the
+  // face: it's what spreads the sky's reflection down it.
+  const curve = (x: number, y: number) => bend(x, y) - 0.45 * (y - c.y) ** 2 - 0.1 * (x - c.x) ** 2
+  const pos: number[] = []
+  const col: number[] = []
+  const idx: number[] = []
+  pos.push(c.x, c.y, curve(c.x, c.y) + lift)
+  col.push(...tint(c.y))
+  for (let r = 1; r <= R; r++)
+    for (let i = 0; i < n; i++) {
+      const p = c.clone().lerp(outline[i], r / R)
+      pos.push(p.x, p.y, curve(p.x, p.y) + lift)
+      col.push(...tint(p.y))
+    }
+  const at = (r: number, i: number) => (r === 0 ? 0 : 1 + (r - 1) * n + (i % n))
+  for (let i = 0; i < n; i++) idx.push(0, at(1, i), at(1, i + 1))
+  for (let r = 1; r < R; r++)
+    for (let i = 0; i < n; i++) idx.push(at(r, i), at(r + 1, i), at(r + 1, i + 1), at(r, i), at(r + 1, i + 1), at(r, i + 1))
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 4))
+  g.setIndex(idx)
+  g.computeVertexNormals()
+  // (Facing the camera whichever way the outline ran.)
+  const nz = g.getAttribute('normal').getZ(0)
+  if (nz < 0) {
+    g.setIndex(idx.map((_, k) => idx[k - (k % 3) + 2 - (k % 3)]))
+    g.computeVertexNormals()
+  }
+  return g
+}
+
+/** Coated sunglass lens: the glass itself nearly opaque (the vertex
+ *  alpha), its surface a smooth grey reflector — the coating sends back
+ *  about a quarter of the light, which is what puts the sky's sheen on
+ *  real sunglasses (plain glass, 4%, barely shows; the colour is sRGB, so
+ *  0x8a8f96 is ~25% linear) — and a clear coat for
+ *  the white Fresnel rim at grazing angles. */
+const lensGlass = (o: THREE.MeshPhysicalMaterialParameters = {}) =>
+  physical({
+    color: 0x8a8f96,
+    vertexColors: true,
+    metalness: 1,
+    roughness: 0.035,
+    clearcoat: 1,
+    clearcoatRoughness: 0.02,
+    envMap: lensEnv(),
+    envMapIntensity: 1.1,
+    transparent: true,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    ...o,
+  })
+
+/** A one-piece front from a right-half outline (top centre round to the
+ *  bridge) and the right lens opening, mirrored, extruded and bent. */
+function frontGeometry(outerR: [number, number][], holeR: [number, number][], depth: number, bevel: number, bend: (x: number, y: number) => number) {
+  const half = outerR.filter(([x]) => x > 1e-6)
+  const outer = closedSpline([[0, outerR[0][1]], ...half, [0, outerR[outerR.length - 1][1]], ...mirrorX(half)], 10)
+  const hole = closedSpline(holeR, 12)
+  const holeL = hole.map((v) => new THREE.Vector2(-v.x, v.y)).reverse()
+  const shape = new THREE.Shape(outer)
+  // Holes wind against the outline.
+  const area = (pts: THREE.Vector2[]) => pts.reduce((s, p, i) => s + p.x * pts[(i + 1) % pts.length].y - pts[(i + 1) % pts.length].x * p.y, 0)
+  const against = (pts: THREE.Vector2[]) => (Math.sign(area(pts)) === Math.sign(area(outer)) ? pts.slice().reverse() : pts)
+  shape.holes.push(new THREE.Path(against(hole)), new THREE.Path(against(holeL)))
+  const g = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: true, bevelThickness: bevel, bevelSize: bevel * 0.85, bevelSegments: 6, curveSegments: 14 })
+  g.translate(0, 0, -depth)
+  bendGeometry(g, bend)
+  return { geometry: g, hole, holeL }
+}
 
 /** Sport wraparound, after the first photo: one continuous matte-black
- *  front, a straight thick brow bar, wide lenses whose outer ends wrap
- *  hard round to the temples and whose lower edge sweeps down and in to a
- *  narrow nose bridge; thick, tall temples with grey rubber inlays along
- *  their lower outer side and grey tips. */
+ *  front — a heavy straight brow bar, a slim rim under the lens — wrapping
+ *  hard round to the temples; big dark polarised lenses whose lower edge
+ *  sweeps up to a narrow bridge; tall temples with grey rubber inlays
+ *  along their lower outer side and grey tips. */
 function sportGlasses(): Model {
-  // Right half of the front's outline, from the top centre round to the
-  // nose; mirrored for the left.
   const outerR: [number, number][] = [
-    [0, 0.34], [0.55, 0.36], [0.95, 0.34], [1.1, 0.25], [1.15, 0.05], [1.08, -0.16],
-    [0.9, -0.31], [0.62, -0.4], [0.36, -0.37], [0.2, -0.24], [0.12, -0.04], [0.07, 0.1], [0.03, 0.14],
+    [0, 0.31], [0.5, 0.35], [0.98, 0.34], [1.15, 0.25], [1.19, 0.04], [1.12, -0.19],
+    [0.93, -0.35], [0.64, -0.43], [0.38, -0.42], [0.21, -0.33], [0.12, -0.15], [0.08, 0.02], [0.04, 0.08], [0, 0.09],
   ]
-  const outer = closedSpline([...outerR, ...mirrorX(outerR)], 10)
   const holeR: [number, number][] = [
-    [0.17, 0.22], [0.55, 0.24], [0.92, 0.22], [1.04, 0.13], [1.05, -0.04], [0.96, -0.2],
-    [0.78, -0.3], [0.57, -0.33], [0.38, -0.3], [0.25, -0.2], [0.18, -0.03],
+    [0.16, 0.19], [0.55, 0.215], [0.95, 0.2], [1.09, 0.11], [1.12, -0.04], [1.05, -0.18],
+    [0.88, -0.31], [0.63, -0.385], [0.39, -0.375], [0.25, -0.29], [0.18, -0.13], [0.155, 0.04],
   ]
-  const hole = closedSpline(holeR, 10)
-  const holeL = hole.map((v) => new THREE.Vector2(-v.x, v.y)).reverse()
-  // Strong wrap: gentle across the front, then sweeping back at the ends.
-  const bend = (x: number, y: number) => -0.2 * x * x - 0.9 * Math.max(0, Math.abs(x) - 0.8) ** 2 - 0.03 * y * y
-  const front = new THREE.Shape(outer)
-  front.holes.push(new THREE.Path(hole), new THREE.Path(holeL))
-  const depth = 0.07
-  const fg = new THREE.ExtrudeGeometry(front, { depth, bevelEnabled: true, bevelThickness: 0.02, bevelSize: 0.018, bevelSegments: 4, curveSegments: 12 })
-  fg.translate(0, 0, -depth)
-  bendGeometry(fg, bend)
-  const matte = physical({ color: 0x141518, roughness: 0.55, clearcoat: 0.3, clearcoatRoughness: 0.5, envMapIntensity: 0.7, vertexColors: false })
+  // An 8-base wrap: curved all the way across, sweeping back at the ends.
+  const bend = (x: number, y: number) => -0.2 * x * x - 1.25 * Math.max(0, Math.abs(x) - 0.72) ** 2 - 0.05 * y * y
+  const { geometry, hole, holeL } = frontGeometry(outerR, holeR, 0.075, 0.016, bend)
+  const env = studioEnv()
+  const matte = physical({ color: 0x18191c, roughness: 0.42, metalness: 0, clearcoat: 0.35, clearcoatRoughness: 0.35, envMap: env, envMapIntensity: 2 })
   const glasses = new THREE.Group()
-  glasses.add(new THREE.Mesh(fg, matte))
-  const lensMat = smokeLens()
+  glasses.add(new THREE.Mesh(geometry, matte))
+  // Solid dark polarised lenses, a shade lighter low down.
+  const lensMat = lensGlass()
   for (const h of [hole, holeL]) {
-    const lens = new THREE.Mesh(flatLens(h, bend, -0.035), lensMat)
+    const lens = new THREE.Mesh(lensGeometry(h, bend, -0.03, (y) => [1, 1, 1, 0.9 + 0.06 * THREE.MathUtils.smoothstep(y, -0.35, 0.2)]), lensMat)
     lens.renderOrder = 5
-    lens.castShadow = false
     glasses.add(lens)
   }
   // Temples: tall at the hinge (as deep as the front's end), tapering back.
-  const black = new THREE.Color(0x141518)
-  const grey = new THREE.Color(0x8e9196)
-  const templeMat = physical({ vertexColors: true, roughness: 0.55, clearcoat: 0.25, clearcoatRoughness: 0.5, envMapIntensity: 0.7 })
+  const black = new THREE.Color(0x18191c)
+  const grey = new THREE.Color(0x9a9da2)
+  const templeMat = physical({ vertexColors: true, roughness: 0.45, clearcoat: 0.3, clearcoatRoughness: 0.35, envMap: env, envMapIntensity: 2 })
   for (const side of [-1, 1]) {
     const g = templeArm(
       (s) => {
-        s.moveTo(0, 0.17)
-        s.bezierCurveTo(0.35, 0.15, 0.7, 0.07, 1.0, 0.05)
+        s.moveTo(0, 0.16)
+        s.bezierCurveTo(0.35, 0.14, 0.7, 0.07, 1.0, 0.05)
         s.quadraticCurveTo(1.14, 0.04, 1.2, -0.04)
         s.lineTo(1.16, -0.08)
         s.quadraticCurveTo(1.1, -0.02, 0.98, -0.02)
-        s.bezierCurveTo(0.7, -0.03, 0.35, -0.12, 0, -0.17)
-        s.lineTo(0, 0.17)
+        s.bezierCurveTo(0.7, -0.03, 0.35, -0.11, 0, -0.16)
+        s.lineTo(0, 0.16)
       },
       0.055,
       side,
       (along, up, outerFace) => {
-        // Grey rubber: a long inlay on the lower half of the outer side,
-        // and the whole tip behind the ear.
         if (along > 1.02) return grey
         if (outerFace && along > 0.12 && along < 0.9 && up < 0.02 - 0.06 * along) return grey
         return black
       },
     )
     const t = new THREE.Mesh(g, templeMat)
-    const hx = 1.11
-    t.position.set(side * hx, 0.06, bend(hx, 0.06) - 0.05)
-    t.rotation.y = side * 0.05
+    const hx = 1.14
+    t.position.set(side * hx, 0.05, bend(hx, 0.05) - 0.06)
+    t.rotation.y = side * 0.06
     glasses.add(t)
   }
-  return glassesModel(glasses, 0.15)
+  return glassesModel(glasses, 0.16)
 }
 
-/** Square wayfarer-style smart glasses, after the second photo: glossy
- *  black, thick acetate, broad slightly trapezoid lenses with rounded
- *  corners, a heavy straight brow, a keyhole bridge, chunky end pieces
- *  with a camera lens in each top outer corner, and thick flat temples. */
+/** Square smart glasses, after the second photo: thick glossy black
+ *  acetate with softly rounded edges, a heavy straight brow, broad lenses
+ *  a little wider at the top, a keyhole bridge, chunky end pieces with a
+ *  camera lens at each top outer corner, and thick flat temples; grey
+ *  lenses that darken towards the top. */
 function wayfarerGlasses(): Model {
-  // Right lens, in its own frame (centred), outer side at +x.
-  const lens = closedSpline(
-    [
-      [-0.4, 0.25], [0, 0.27], [0.4, 0.26], [0.45, 0.17], [0.43, -0.12], [0.36, -0.25],
-      [0.0, -0.27], [-0.3, -0.25], [-0.39, -0.14], [-0.41, 0.12],
-    ],
-    12,
-  )
-  // Rim: heavy along the top and at the outer end piece.
-  const rim = offsetOutline(lens, (p) => 0.065 + 0.05 * THREE.MathUtils.smoothstep(p.y, 0.05, 0.25) + 0.03 * THREE.MathUtils.smoothstep(p.x, 0.25, 0.45))
-  const cx = 0.58
-  const bend = (x: number, y: number) => -0.07 * x * x - 0.02 * y * y
-  const gloss = physical({ color: 0x08080a, roughness: 0.12, clearcoat: 1, clearcoatRoughness: 0.04, envMapIntensity: 1.1 })
+  const outerR: [number, number][] = [
+    [0, 0.355], [0.5, 0.375], [0.95, 0.38], [1.05, 0.34], [1.08, 0.22], [1.07, -0.08], [1.03, -0.27],
+    [0.93, -0.37], [0.74, -0.41], [0.5, -0.415], [0.3, -0.38], [0.18, -0.29], [0.13, -0.13], [0.11, 0.05], [0.07, 0.15], [0.03, 0.18], [0, 0.185],
+  ]
+  const holeR: [number, number][] = [
+    [0.2, 0.25], [0.56, 0.275], [0.9, 0.27], [0.97, 0.21], [0.99, 0.08], [0.98, -0.1], [0.94, -0.24],
+    [0.84, -0.32], [0.62, -0.345], [0.4, -0.33], [0.27, -0.27], [0.21, -0.15], [0.195, 0.02], [0.2, 0.15], [0.235, 0.23],
+  ]
+  const bend = (x: number, y: number) => -0.075 * x * x - 0.03 * Math.max(0, Math.abs(x) - 0.9) - 0.02 * y * y
+  const { geometry, hole, holeL } = frontGeometry(outerR, holeR, 0.105, 0.03, bend)
+  const env = studioEnv()
+  // (The studio is a plain picture, no brighter than white; real softboxes
+  // are many times that, which is why gloss shows such crisp highlights.)
+  const gloss = physical({ color: 0x060607, roughness: 0.16, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.03, envMap: env, envMapIntensity: 3.2 })
   const glasses = new THREE.Group()
-  const depth = 0.1
-  const place = (pts: THREE.Vector2[], side: number) => pts.map((v) => new THREE.Vector2(side * v.x + side * cx, v.y))
+  glasses.add(new THREE.Mesh(geometry, gloss))
+  // Grey gradient lenses: dark at the top, the eyes faintly through below.
+  const lensMat = lensGlass({ color: 0x868a90 })
+  for (const h of [hole, holeL]) {
+    const lens = new THREE.Mesh(lensGeometry(h, bend, -0.05, (y) => [1, 1, 1, 0.8 + 0.16 * THREE.MathUtils.smoothstep(y, -0.3, 0.25)]), lensMat)
+    lens.renderOrder = 5
+    glasses.add(lens)
+  }
+  // The cameras: a dark glass disc in a satin ring, top outer corners.
   for (const side of [-1, 1]) {
-    const o = place(rim, side)
-    const h = place(lens, side)
-    const shape = new THREE.Shape(side > 0 ? o : o.slice().reverse())
-    shape.holes.push(new THREE.Path(side > 0 ? h.slice().reverse() : h))
-    const g = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: true, bevelThickness: 0.018, bevelSize: 0.012, bevelSegments: 4, curveSegments: 12 })
-    g.translate(0, 0, -depth)
-    glasses.add(new THREE.Mesh(bendGeometry(g, bend), gloss))
-    const l = new THREE.Mesh(flatLens(h, bend, -0.05), smokeLens({ color: 0x24272b }))
-    l.renderOrder = 5
-    l.castShadow = false
-    glasses.add(l)
-    // The camera in the top outer corner: a dark glass disc in a ring.
-    const top = o.reduce((a, b) => (b.x * side > 0.85 && b.y > a.y ? b : a), o[0])
     const cam = new THREE.Group()
-    const ring = new THREE.Mesh(new THREE.CylinderGeometry(0.036, 0.036, 0.012, 24), physical({ color: 0x2a2b2e, metalness: 0.8, roughness: 0.25 }))
-    const glass = new THREE.Mesh(new THREE.CylinderGeometry(0.024, 0.024, 0.016, 24), physical({ color: 0x050608, roughness: 0.02, clearcoat: 1, envMapIntensity: 2 }))
+    const ring = new THREE.Mesh(new THREE.CylinderGeometry(0.034, 0.034, 0.012, 28), physical({ color: 0x3a3b3f, metalness: 0.9, roughness: 0.3, envMap: env }))
+    const glass = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.016, 28), physical({ color: 0x030405, roughness: 0.02, clearcoat: 1, envMap: env, envMapIntensity: 2 }))
     ring.rotation.x = glass.rotation.x = Math.PI / 2
     cam.add(ring, glass)
-    cam.position.set(top.x - side * 0.08, top.y - 0.085, bend(top.x, top.y) + 0.035)
+    const x = side * 1.04
+    cam.position.set(x, 0.33, bend(x, 0.33) + 0.045)
     glasses.add(cam)
   }
-  // Keyhole bridge joining the rims across the top.
-  const innerEdge = cx - Math.max(...rim.map((v) => -v.x))
-  const gap = innerEdge + 0.05
-  // Its top continues the brow line straight across.
-  const browTop = Math.max(...rim.map((v) => v.y)) - 0.01
-  const bs = new THREE.Shape()
-  bs.moveTo(-gap, browTop)
-  bs.lineTo(gap, browTop)
-  bs.lineTo(gap, 0.1)
-  bs.quadraticCurveTo(0, 0.22, -gap, 0.1)
-  bs.lineTo(-gap, browTop)
-  const bg = new THREE.ExtrudeGeometry(bs, { depth, bevelEnabled: true, bevelThickness: 0.018, bevelSize: 0.012, bevelSegments: 4 })
-  bg.translate(0, 0, -depth)
-  glasses.add(new THREE.Mesh(bendGeometry(bg, bend), gloss))
   // Thick, flat temples, hooking down at the end.
-  const outerX = cx + Math.max(...rim.map((v) => v.x))
   for (const side of [-1, 1]) {
     const g = templeArm(
       (s) => {
-        s.moveTo(0, 0.075)
+        s.moveTo(0, 0.08)
         s.lineTo(0.95, 0.06)
         s.quadraticCurveTo(1.12, 0.055, 1.2, -0.08)
         s.lineTo(1.15, -0.11)
         s.quadraticCurveTo(1.08, -0.02, 0.95, -0.03)
-        s.lineTo(0, -0.07)
-        s.lineTo(0, 0.075)
+        s.lineTo(0, -0.075)
+        s.lineTo(0, 0.08)
       },
-      0.065,
+      0.07,
       side,
     )
     const t = new THREE.Mesh(g, gloss)
-    t.position.set(side * (outerX - 0.04), 0.16, bend(outerX, 0.16) - 0.06)
+    t.position.set(side * 1.06, 0.2, bend(1.06, 0.2) - 0.08)
     t.rotation.y = side * -0.04
     glasses.add(t)
   }
-  glasses.scale.setScalar(0.88)
   return glassesModel(glasses, 0.14)
 }
 
@@ -528,6 +637,8 @@ function glassesModel(glasses: THREE.Group, forward: number): Model {
   root.add(glasses)
   return {
     root,
+    // Thin frames and tinted glass: a light, close shadow, not a band.
+    shadow: 0.38,
     update(rig) {
       const a = anchors(rig)
       // Glasses ride on the nose: lenses centred a little below the eyes.

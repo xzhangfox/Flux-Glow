@@ -68,6 +68,8 @@ export interface Model {
   /** How far below the eyes the model reaches (rig units), when that's
    *  further than a head (a hood's neck). */
   reach?: number
+  /** How dark its shadows on the face are, relative to the usual (1). */
+  shadow?: number
 }
 
 interface State {
@@ -383,6 +385,12 @@ function updateEnvironment(st: State, frame: HTMLCanvasElement, force: boolean) 
 // to the renderer; until then renderAR() just leaves the effect off.
 
 const pending = new Map<string, Promise<void>>()
+const pmremCache = new WeakMap<THREE.Texture, THREE.Texture>()
+function pmremOf(st: State, tex: THREE.Texture) {
+  let t = pmremCache.get(tex)
+  if (!t) pmremCache.set(tex, (t = st.pmrem.fromEquirectangular(tex).texture))
+  return t
+}
 const idle = () => new Promise<void>((r) => (typeof requestIdleCallback === 'function' ? requestIdleCallback(() => r(), { timeout: 200 }) : setTimeout(r, 0)))
 
 export const modelKey = (effectId: string, slot = '') => (slot ? `${slot}:${effectId}` : effectId)
@@ -401,6 +409,15 @@ export function prepareModel(effectId: string, slot: string, build: () => Model 
     await idle()
     const model = await build()
     model.root.visible = true
+    // A model's own reflections (eyewear's studio) are pictures: convert
+    // them here, once, as the scene's own environment is — left to the
+    // renderer, they came out black in this pipeline.
+    model.root.traverse((o) => {
+      for (const mat of ([] as THREE.Material[]).concat((o as THREE.Mesh).material ?? [])) {
+        const m = mat as THREE.MeshStandardMaterial
+        if (m.envMap?.mapping === THREE.EquirectangularReflectionMapping) m.envMap = pmremOf(st, m.envMap)
+      }
+    })
     // Compile its shaders against the scene's lights a mesh at a time,
     // with a frame between each: without parallel compiling in the browser
     // a shader compiles synchronously, and the whole model's at once (a
@@ -489,6 +506,8 @@ export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, b
   for (const [id, m] of st.models) m.root.visible = id === key
   model.update?.(rig, t)
   st.headParts.forEach((o, i) => (o.visible = model.occludeFace ? i < 2 : !model.fullHead))
+  ;((st.headParts[1] as THREE.Mesh).material as THREE.ShadowMaterial).opacity = 0.26 * (model.shadow ?? 1)
+  ;((st.headParts[3] as THREE.Mesh).material as THREE.ShadowMaterial).opacity = 0.34 * (model.shadow ?? 1)
 
   // Shadows land only on the face and head catchers: a model that hides
   // them (a full head) needs no shadow map at all. Live frames use a
