@@ -197,8 +197,16 @@ export function applyFilter(source: HTMLCanvasElement, preset: FilterPreset, str
 
 /** A small square preview of every preset, cropped around `focus` (the
  *  face, when there is one) — what the filter strip shows instead of
- *  text-only chips, so picking a look doesn't take trial and error. */
-export function renderFilterThumbnails(source: HTMLCanvasElement, focus: { x: number; y: number; size: number } | null, px = 112): Map<string, string> {
+ *  text-only chips, so picking a look doesn't take trial and error. Handed
+ *  to `onThumb` one at a time, with a task between each, so opening the
+ *  strip never freezes the page while they're made. */
+export async function renderFilterThumbnails(
+  source: HTMLCanvasElement,
+  focus: { x: number; y: number; size: number } | null,
+  onThumb: (id: string, url: string) => void,
+  cancelled: () => boolean,
+  px = 112,
+): Promise<void> {
   const side = focus ? Math.min(focus.size, source.width, source.height) : Math.min(source.width, source.height)
   const cx = focus ? focus.x : source.width / 2
   const cy = focus ? focus.y : source.height / 2
@@ -208,7 +216,9 @@ export function renderFilterThumbnails(source: HTMLCanvasElement, focus: { x: nu
   crop.width = px
   crop.height = px
   crop.getContext('2d')!.drawImage(source, sx, sy, side, side, 0, 0, px, px)
-  const out = new Map<string, string>()
-  for (const preset of FILTER_PRESETS) out.set(preset.id, applyFilter(crop, preset).toDataURL('image/jpeg', 0.8))
-  return out
+  for (const preset of FILTER_PRESETS) {
+    if (cancelled()) return
+    onThumb(preset.id, applyFilter(crop, preset).toDataURL('image/jpeg', 0.8))
+    await new Promise((r) => setTimeout(r, 0))
+  }
 }

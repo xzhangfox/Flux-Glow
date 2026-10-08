@@ -392,8 +392,15 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
     snap.height = work.height
     snap.getContext('2d')!.drawImage(work, 0, 0)
     const lm = analysisRef.current?.facesAt(videoRef.current?.currentTime ?? 0)[0]?.landmarks ?? null
-    const t = setTimeout(() => setFilterThumbs(renderFilterThumbnails(snap, faceFocus(lm, snap.width, snap.height))), 30)
-    return () => clearTimeout(t)
+    let cancelled = false
+    const t = setTimeout(() => {
+      const made = new Map<string, string>()
+      void renderFilterThumbnails(snap, faceFocus(lm, snap.width, snap.height), (id, url) => made.set(id, url), () => cancelled).then(() => !cancelled && setFilterThumbs(made))
+    }, 30)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+    }
   }, [panel])
 
   // ---- People ----

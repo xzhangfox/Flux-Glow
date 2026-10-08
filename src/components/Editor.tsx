@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ComponentType, type ReactNode, type RefObject, type SVGProps } from 'react'
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
 import { detectFaceLandmarks, LiveFaceTracker } from '../lib/faceLandmarker'
-import { processFrame, DEFAULT_PARAMS, faceFocus, type EditParams, type NumericParam } from '../lib/pipeline'
+import { processFrame, processFrameInSteps, DEFAULT_PARAMS, faceFocus, type EditParams, type NumericParam } from '../lib/pipeline'
 import { renderFilterThumbnails } from '../lib/filters'
 import { ASPECT_MODES, aspectRatioFor, cropRectFor, drawFrame, remapLandmarks, type AspectMode } from '../lib/frame'
 import { STILL_MAX, cameraConstraints, settlePhotoMode, switchCamera } from '../lib/camera'
+import { nextTask } from '../lib/schedule'
 import BgProtectToggle from './BgProtectToggle'
 import { loadBgProtect, saveBgProtect } from '../lib/bgProtect'
 import SettingsSheet from './SettingsSheet'
@@ -297,7 +298,11 @@ export default function Editor({
       const target = e.target as Element
       if (panelRef.current?.contains(target)) return
       if (target.closest?.('[data-panel-toggle], [data-keep-panel]')) return
-      setPanel(null)
+      // (decided now, done once the tap has been handled: closing it at
+      // once swapped the slim bar under the panel for the full tray before
+      // the tapped button — the shutter, Save, Album — got its click, so
+      // the tap did nothing but close the panel)
+      setTimeout(() => setPanel(null), 0)
     }
     document.addEventListener('click', onClick, true)
     return () => document.removeEventListener('click', onClick, true)
@@ -326,12 +331,17 @@ export default function Editor({
     render()
   }, [showBefore, stickers, render])
 
-  const recomputeStatic = useCallback(() => {
-    const base = baseRef.current
-    if (!base) return
-    resultRef.current = processFrame(base, landmarksRef.current, paramsRef.current, !capturedRef.current)
-    render()
-  }, [render])
+  // `quick`: the fast retouch (the live one) even for a still that gets the
+  // full-quality pass — while a control is moving.
+  const recomputeStatic = useCallback(
+    (quick = false) => {
+      const base = baseRef.current
+      if (!base) return
+      resultRef.current = processFrame(base, landmarksRef.current, paramsRef.current, !capturedRef.current && !quick)
+      render()
+    },
+    [render],
+  )
 
   const cancelCountdown = useCallback(() => {
     if (countdownTimerRef.current !== null) clearTimeout(countdownTimerRef.current)
@@ -396,26 +406,38 @@ export default function Editor({
         if (now - lastFrameRef.current < LIVE_FRAME_INTERVAL_MS) return
         lastFrameRef.current = now
         frameInFlightRef.current = true
-        const mirror = facingModeRef.current === 'user'
-        // Hardware zoom already zoomed the sensor output — cropping again
-        // on top of it would double-zoom.
-        const crop = cropRectFor(video.videoWidth, video.videoHeight, aspectRatioFor(aspectRef.current), cropZoom(zoomRef.current, zoomRangeRef.current))
-        const base = drawFrame(video, LIVE_MAX_DIMENSION, crop, mirror)
-        tracker
-          .detect(video, now, { x: crop.x0, y: crop.y0, w: crop.fw, h: crop.fh })
-          .then((raw) => {
+        // The frame's work runs in tasks of its own, after this callback:
+        // inside it, the browser could paint nothing — a tap's response
+        // included — until the whole retouch was done. And it yields between
+        // the face tracking and the retouch, so a tap or a slider move
+        // waiting to be handled goes first.
+        void (async () => {
+          try {
+            await nextTask()
+            if (gen !== liveGenRef.current) return
+            const mirror = facingModeRef.current === 'user'
+            // Hardware zoom already zoomed the sensor output — cropping again
+            // on top of it would double-zoom.
+            const crop = cropRectFor(video.videoWidth, video.videoHeight, aspectRatioFor(aspectRef.current), cropZoom(zoomRef.current, zoomRangeRef.current))
+            const base = drawFrame(video, LIVE_MAX_DIMENSION, crop, mirror)
+            const raw = await tracker.detect(video, now, { x: crop.x0, y: crop.y0, w: crop.fw, h: crop.fh })
+            await nextTask()
             if (gen !== liveGenRef.current) return
             const landmarks = remapLandmarks(raw, crop, mirror)
+            // (each stage of the retouch a task of its own, too)
+            const result = await processFrameInSteps(base, landmarks, paramsRef.current, nextTask)
+            if (gen !== liveGenRef.current) return
             baseRef.current = base
             landmarksRef.current = landmarks
-            resultRef.current = processFrame(base, landmarks, paramsRef.current, false)
+            resultRef.current = result
             setStatus(landmarks ? 'ready' : 'no-face')
             render()
-          })
-          .catch(() => {})
-          .finally(() => {
+          } catch {
+            // (a frame lost; the next one tries again)
+          } finally {
             if (gen === liveGenRef.current) frameInFlightRef.current = false
-          })
+          }
+        })()
       }
       loop()
     } catch {
@@ -519,12 +541,24 @@ export default function Editor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [source])
 
-  // Re-run the full-quality pass on any control change while editing a
-  // still (the live loop picks up paramsRef on its own every frame).
+  // A still follows its controls as they move (the live loop picks up
+  // paramsRef on its own every frame): the retouch reruns on the latest
+  // values once a frame at most, in a task after the frame's paint, never
+  // queued up behind itself. A photo that gets the slower full-quality
+  // pass (an upload) gets the quick one while a control moves, and the full
+  // one once it's been let go. (It used to wait for the control to stop
+  // moving, so the picture lagged behind the finger.)
   useEffect(() => {
     if (live || staticBusyRef.current || !baseRef.current) return
-    const t = setTimeout(recomputeStatic, 60)
-    return () => clearTimeout(t)
+    let cancelled = false
+    const twoPass = !capturedRef.current
+    const f = requestAnimationFrame(() => void nextTask().then(() => !cancelled && recomputeStatic(twoPass)))
+    const t = twoPass ? setTimeout(() => !cancelled && recomputeStatic(), 280) : undefined
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(f)
+      clearTimeout(t)
+    }
   }, [params, live, recomputeStatic])
 
   // Filter thumbnails are rendered from the current frame whenever the
@@ -534,8 +568,16 @@ export default function Editor({
     if (panel !== 'filter') return
     const base = baseRef.current
     if (!base) return
-    const t = setTimeout(() => setThumbs(renderFilterThumbnails(base, faceFocus(landmarksRef.current, base.width, base.height))), 30)
-    return () => clearTimeout(t)
+    let cancelled = false
+    const t = setTimeout(() => {
+      // (all at once, not one re-render each: the strip shows them together)
+      const made = new Map<string, string>()
+      void renderFilterThumbnails(base, faceFocus(landmarksRef.current, base.width, base.height), (id, url) => made.set(id, url), () => cancelled).then(() => !cancelled && setThumbs(made))
+    }, 30)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+    }
   }, [panel, frameVersion, frameReady])
 
   // Effects load in the background — the camera keeps running, the effect

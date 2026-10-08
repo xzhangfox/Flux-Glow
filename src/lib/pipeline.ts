@@ -111,6 +111,29 @@ export interface FaceEdit {
  * (animated props), defaulting to now for live frames.
  */
 export function processFaces(base: HTMLCanvasElement, faces: FaceEdit[], frame: Pick<EditParams, 'filterId' | 'filterStrength'>, highQuality = true, t?: number): HTMLCanvasElement {
+  const steps = faceSteps(base, faces, frame, highQuality, t)
+  let r = steps.next()
+  while (!r.done) r = steps.next()
+  return r.value
+}
+
+/** processFrame for the live camera, with `pause` awaited between its
+ *  stages (tone, reshape, effects, filter): each is a task of its own, so
+ *  a tap or a slider move waiting to be handled doesn't wait for the
+ *  whole frame. Every stage makes its own output, so whatever runs in
+ *  between can't disturb it. */
+export async function processFrameInSteps(base: HTMLCanvasElement, landmarks: NormalizedLandmark[] | null, params: EditParams, pause: () => Promise<void>): Promise<HTMLCanvasElement> {
+  const steps = faceSteps(base, landmarks ? [{ landmarks, params }] : [], params, false)
+  let r = steps.next()
+  while (!r.done) {
+    await pause()
+    r = steps.next()
+  }
+  return r.value
+}
+
+/** The pipeline's stages, one `yield` between each. */
+function* faceSteps(base: HTMLCanvasElement, faces: FaceEdit[], frame: Pick<EditParams, 'filterId' | 'filterStrength'>, highQuality: boolean, t?: number): Generator<void, HTMLCanvasElement> {
   const preset = findPreset(frame.filterId)
   if (!faces.length) return applyFilter(base, preset, frame.filterStrength)
 
@@ -152,8 +175,10 @@ export function processFaces(base: HTMLCanvasElement, faces: FaceEdit[], frame: 
       applyMouthCornerSmoothing(working, corners, radius, params.mouthCornerSmooth)
     }
   }
+  yield
   let reshaped = working
   for (const { landmarks, params } of prepared) reshaped = applyReshape(reshaped, landmarks, params, params.protectBackground, !highQuality)
+  yield
   for (const { landmarks, params, slot } of prepared) {
     if (params.effectId === 'none') continue
     // Effects track the face as reshaped, so ears sit on the slimmed head.
@@ -164,5 +189,6 @@ export function processFaces(base: HTMLCanvasElement, faces: FaceEdit[], frame: 
     )
     drawEffect(reshaped, pts, params.effectId, t ?? (highQuality ? 0.6 : performance.now() / 1000), !highQuality, slot)
   }
+  if (preset.id !== 'none') yield
   return applyFilter(reshaped, preset, frame.filterStrength)
 }
