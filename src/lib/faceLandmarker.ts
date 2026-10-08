@@ -1,16 +1,7 @@
-import { FaceLandmarker, FilesetResolver, type Classifications, type NormalizedLandmark } from '@mediapipe/tasks-vision'
+import { FaceLandmarker, FilesetResolver, type NormalizedLandmark } from '@mediapipe/tasks-vision'
+import { closureFrom, LIVE_OPTIONS, MODEL_URL, WASM_BASE_URL } from './landmarkerConfig'
 
-// Self-hosted (copied from node_modules/@mediapipe/tasks-vision/wasm at
-// install time — see scripts/copy-mediapipe-wasm.js) rather than pulled
-// from jsdelivr at runtime: one less third-party dependency for a page
-// whose whole pitch is "nothing leaves your device," and it has to match
-// the installed npm package's own version exactly (the WASM binary and
-// the JS API driving it are version-locked to each other).
-const WASM_BASE_URL = '/mediapipe/wasm'
-// Also self-hosted (public/mediapipe/face_landmarker.task, ~3.6MB, fetched
-// once from Google's own model repo and committed here) for the same
-// reason as the WASM runtime above.
-const MODEL_URL = '/mediapipe/face_landmarker.task'
+export { closureFrom }
 
 // ---- Eye closure ----
 //
@@ -37,13 +28,6 @@ export function withEyeClosure<T extends object>(lm: T, eyes: EyeClosure | undef
   return lm
 }
 
-/** The eye closure in a landmarker result's blendshapes for face `i`. */
-export function closureFrom(shapes: Classifications[] | undefined, i: number): EyeClosure | undefined {
-  const cats = shapes?.[i]?.categories
-  if (!cats?.length) return undefined
-  const get = (name: string) => cats.find((c) => c.categoryName === name)?.score ?? 0
-  return { r: get('eyeBlinkRight'), l: get('eyeBlinkLeft') }
-}
 
 let landmarkerPromise: Promise<FaceLandmarker> | null = null
 let currentMode: 'IMAGE' | 'VIDEO' = 'IMAGE'
@@ -70,16 +54,9 @@ function getLandmarker(): Promise<FaceLandmarker> {
   if (!landmarkerPromise) {
     landmarkerPromise = (async () => {
       return FaceLandmarker.createFromOptions(await visionFileset(), {
+        ...LIVE_OPTIONS,
         baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
         runningMode: 'IMAGE',
-        numFaces: 1,
-        outputFaceBlendshapes: true,
-        // Lenient (defaults are 0.5): a face half hidden behind the phone
-        // in a mirror selfie, or small and far away, still counts, and the
-        // tracker holds on to a face it has found through partial cover.
-        minFaceDetectionConfidence: 0.3,
-        minFacePresenceConfidence: 0.35,
-        minTrackingConfidence: 0.3,
       })
     })()
   }
@@ -219,6 +196,95 @@ export async function detectFaceLandmarks(image: HTMLImageElement | HTMLCanvasEl
   return null
 }
 
+// ---- Tracking off the main thread ----
+//
+// The live tracker runs in a worker of its own where the browser allows
+// (trackerWorker.ts): the page draws each frame's region small, hands it
+// over, and goes on retouching the frame before meanwhile. Where the
+// worker can't start (or stops), tracking stays on the page, as before.
+
+type Found = { lm: NormalizedLandmark[]; eyes?: EyeClosure } | null
+let worker: Worker | null = null
+let workerStart: Promise<boolean> | null = null
+const waiting = new Map<number, (f: Found) => void>()
+let nextId = 1
+let lastTs = -Infinity
+
+function dropWorker(w: Worker) {
+  w.terminate()
+  if (worker === w) worker = null
+  waiting.forEach((resolve) => resolve(null))
+  waiting.clear()
+}
+
+/** Starts the tracker's worker (once); whether it's up. */
+function startWorker(): Promise<boolean> {
+  workerStart ??= new Promise<boolean>((resolve) => {
+    let w: Worker
+    try {
+      w = new Worker(new URL('./trackerWorker.ts', import.meta.url), { type: 'module' })
+    } catch {
+      resolve(false)
+      return
+    }
+    const fail = () => {
+      clearTimeout(timer)
+      dropWorker(w)
+      resolve(false)
+    }
+    const timer = setTimeout(fail, 20000)
+    w.onmessage = (e: MessageEvent<{ type: 'ready' | 'failed' | 'result'; id?: number; out?: Found }>) => {
+      const m = e.data
+      if (m.type === 'ready') {
+        clearTimeout(timer)
+        worker = w
+        resolve(true)
+      } else if (m.type === 'failed') fail()
+      else {
+        waiting.get(m.id!)?.(m.out ?? null)
+        waiting.delete(m.id!)
+      }
+    }
+    // (a crash, before or after it was up: the page takes over)
+    w.onerror = fail
+    w.postMessage({ type: 'init' })
+  })
+  return workerStart
+}
+
+let snapCanvas: OffscreenCanvas | null = null
+/** `r` of the video's current frame at up to `max` px, as a picture that
+ *  can be handed to the worker — taken now, synchronously, so it's the
+ *  very frame the page is retouching. */
+function snapshot(video: HTMLVideoElement, W: number, H: number, r: Roi, max: number): ImageBitmap | Promise<ImageBitmap> {
+  const sw = r.w * W
+  const sh = r.h * H
+  const k = Math.min(1, max / Math.max(sw, sh))
+  const cw = Math.max(1, Math.round(sw * k))
+  const ch = Math.max(1, Math.round(sh * k))
+  if (typeof OffscreenCanvas !== 'undefined') {
+    snapCanvas ??= new OffscreenCanvas(cw, ch)
+    if (snapCanvas.width !== cw || snapCanvas.height !== ch) {
+      snapCanvas.width = cw
+      snapCanvas.height = ch
+    }
+    snapCanvas.getContext('2d')!.drawImage(video, r.x * W, r.y * H, sw, sh, 0, 0, cw, ch)
+    return snapCanvas.transferToImageBitmap()
+  }
+  return createImageBitmap(cropOf(video, W, H, r, max))
+}
+
+async function detectInWorker(w: Worker, image: ImageBitmap | Promise<ImageBitmap>, ts: number): Promise<Found> {
+  const bmp = await image
+  // (the landmarker wants its timestamps strictly increasing)
+  lastTs = Math.max(ts, lastTs + 1)
+  const id = nextId++
+  return new Promise((resolve) => {
+    waiting.set(id, resolve)
+    w.postMessage({ type: 'detect', id, image: bmp, ts: lastTs }, [bmp])
+  })
+}
+
 // A face lost for a moment (a hand or the phone sweeping past) keeps its
 // last landmarks this long, so effects don't flicker off and on.
 const HOLD_MS = 300
@@ -237,8 +303,13 @@ export class LiveFaceTracker {
   private last: NormalizedLandmark[] | null = null
   private lastAt = -Infinity
 
+  /** Resolves once tracking can start: its worker is up, or (where it
+   *  can't be) the page's own landmarker is. */
+  async ready(): Promise<void> {
+    if (!(await startWorker())) await inMode('VIDEO')
+  }
+
   async detect(video: HTMLVideoElement, timestampMs: number, view: Roi = FULL): Promise<NormalizedLandmark[] | null> {
-    const landmarker = await inMode('VIDEO')
     const W = video.videoWidth
     const H = video.videoHeight
     let roi = this.roi
@@ -247,16 +318,23 @@ export class LiveFaceTracker {
       roi = this.step % 2 === 0 ? FULL : windows[(this.step >> 1) % windows.length]
       this.step++
     }
-    // (The whole frame as it comes, unless the camera's is a photo-sized
-    // one: then a copy at a size the models gain nothing beyond.)
-    const input = !isFull(roi) ? cropOf(video, W, H, roi) : Math.max(W, H) > FULL_MAX ? cropOf(video, W, H, FULL, FULL_MAX) : video
-    const res = landmarker.detectForVideo(input, timestampMs)
-    const raw = res.faceLandmarks[0]
-    if (!raw) {
+    let found: Found
+    const w = worker
+    if (w) {
+      found = await detectInWorker(w, snapshot(video, W, H, roi, isFull(roi) ? FULL_MAX : ROI_MAX), timestampMs)
+    } else {
+      const landmarker = await inMode('VIDEO')
+      // (The whole frame as it comes, unless the camera's is a photo-sized
+      // one: then a copy at a size the models gain nothing beyond.)
+      const input = !isFull(roi) ? cropOf(video, W, H, roi) : Math.max(W, H) > FULL_MAX ? cropOf(video, W, H, FULL, FULL_MAX) : video
+      const res = landmarker.detectForVideo(input, timestampMs)
+      found = res.faceLandmarks[0] ? { lm: res.faceLandmarks[0], eyes: closureFrom(res.faceBlendshapes, 0) } : null
+    }
+    if (!found) {
       this.misses++
       return timestampMs - this.lastAt < HOLD_MS ? this.last : null
     }
-    const lm = withEyeClosure(fromRoi(raw, roi), closureFrom(res.faceBlendshapes, 0))
+    const lm = withEyeClosure(fromRoi(found.lm, roi), found.eyes)
     this.roi = this.follow(lm, roi, W, H)
     this.misses = 0
     this.step = 0

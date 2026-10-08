@@ -4,7 +4,7 @@ import { detectFaceLandmarks, LiveFaceTracker } from '../lib/faceLandmarker'
 import { processFrame, processFrameInSteps, DEFAULT_PARAMS, faceFocus, type EditParams, type NumericParam } from '../lib/pipeline'
 import { renderFilterThumbnails } from '../lib/filters'
 import { ASPECT_MODES, aspectRatioFor, cropRectFor, drawFrame, remapLandmarks, type AspectMode } from '../lib/frame'
-import { STILL_MAX, cameraConstraints, settlePhotoMode, switchCamera } from '../lib/camera'
+import { STILL_MAX, cameraConstraints, previewCopy, settlePhotoMode, switchCamera } from '../lib/camera'
 import { nextTask } from '../lib/schedule'
 import BgProtectToggle from './BgProtectToggle'
 import { loadBgProtect, saveBgProtect } from '../lib/bgProtect'
@@ -234,6 +234,11 @@ export default function Editor({
 
   const displayRef = useRef<HTMLCanvasElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
+  // A photo-sized camera at full size, for the shutter, while the preview
+  // (videoRef) plays a smaller copy of it (see previewCopy); unused (no
+  // source) when the preview plays the camera itself.
+  const stillVideoRef = useRef<HTMLVideoElement>(null)
+  const previewTrackRef = useRef<MediaStreamTrack | null>(null)
   const previewRef = useRef<HTMLDivElement>(null)
   const trayRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
@@ -254,7 +259,6 @@ export default function Editor({
   const fullResultRef = useRef<{ params: EditParams; canvas: HTMLCanvasElement } | null>(null)
   const rafRef = useRef(0)
   const lastFrameRef = useRef(0)
-  const frameInFlightRef = useRef(false)
   // Bumped on every stop/start of the camera. A live frame whose detection
   // is still in flight when the shutter fires (or the camera flips) must
   // not land afterwards and overwrite the captured photo with a stale,
@@ -354,8 +358,10 @@ export default function Editor({
     cancelAnimationFrame(rafRef.current)
     streamRef.current?.getTracks().forEach((t) => t.stop())
     streamRef.current = null
+    previewTrackRef.current?.stop()
+    previewTrackRef.current = null
+    if (stillVideoRef.current) stillVideoRef.current.srcObject = null
     zoomTrackRef.current = null
-    frameInFlightRef.current = false
   }, [])
 
   const startLive = useCallback(async () => {
@@ -368,19 +374,31 @@ export default function Editor({
     try {
       // Photo mode: the camera's largest 4:3 size, so the shutter keeps the
       // frame on screen at full resolution (see camera.ts); recording
-      // switches it to 1080p60. The live preview works on a scaled-down
-      // copy either way.
+      // switches it to 1080p60.
       const stream = await navigator.mediaDevices.getUserMedia({ video: cameraConstraints('photo', facingModeRef.current) })
       if (gen !== liveGenRef.current) {
         stream.getTracks().forEach((t) => t.stop())
         return
       }
       streamRef.current = stream
-      const video = videoRef.current!
-      video.srcObject = stream
-      await video.play()
+      const still = stillVideoRef.current!
+      still.srcObject = stream
+      await still.play()
       if (gen !== liveGenRef.current) return
-      await settlePhotoMode(stream.getVideoTracks()[0], video, null)
+      await settlePhotoMode(stream.getVideoTracks()[0], still, null)
+      if (gen !== liveGenRef.current) return
+      // The preview plays a 1440p copy of a photo-sized camera — a fraction
+      // of the pixels to handle every frame — or the camera itself.
+      const copy = await previewCopy(stream.getVideoTracks()[0], still, null)
+      if (gen !== liveGenRef.current) {
+        copy?.stop()
+        return
+      }
+      previewTrackRef.current = copy
+      const video = videoRef.current!
+      video.srcObject = copy ? new MediaStream([copy]) : stream
+      if (!copy) still.srcObject = null
+      await video.play()
       if (gen !== liveGenRef.current) return
 
       // Real optical/sensor zoom when the browser exposes it beats a
@@ -394,23 +412,50 @@ export default function Editor({
       if (range.mode === 'hardware') track.applyConstraints({ advanced: [{ zoom: initial } as unknown as MediaTrackConstraintSet] }).catch(() => {})
       updateZoomRange(range, initial)
       const tracker = new LiveFaceTracker()
+      await tracker.ready()
+      if (gen !== liveGenRef.current) return
+
+      // Two stages, side by side: the tracker finds the face in the newest
+      // frame (in a worker of its own, where it has one) while the page
+      // retouches the frame before it — so the preview keeps up with the
+      // slower of the two, not both added together. A tracked frame waits
+      // for the retouch only while the one before is still in it, and no
+      // further frame is tracked meanwhile (nothing tracked to be dropped).
+      // Both run in tasks of their own, outside the frame callback, broken
+      // up between stages, so taps and slider moves are handled — and
+      // painted — in between instead of waiting for a whole frame.
+      let tracking = false
+      let retouching = false
+      let tracked: { base: HTMLCanvasElement; landmarks: NormalizedLandmark[] | null } | null = null
+      const retouchNext = async () => {
+        if (retouching || !tracked || gen !== liveGenRef.current) return
+        const job = tracked
+        tracked = null
+        retouching = true
+        try {
+          const result = await processFrameInSteps(job.base, job.landmarks, paramsRef.current, nextTask)
+          if (gen !== liveGenRef.current) return
+          baseRef.current = job.base
+          landmarksRef.current = job.landmarks
+          resultRef.current = result
+          setStatus(job.landmarks ? 'ready' : 'no-face')
+          render()
+        } catch {
+          // (a frame lost; the next one tries again)
+        } finally {
+          retouching = false
+          void retouchNext()
+        }
+      }
 
       const loop = () => {
         if (gen !== liveGenRef.current) return
         rafRef.current = requestAnimationFrame(loop)
-        // Only start a new detect+process cycle once the previous one has
-        // finished — otherwise slow frames overlap, pile up, and the
-        // preview drifts further and further behind real time.
-        if (frameInFlightRef.current || video.readyState < 2) return
+        if (tracking || tracked || video.readyState < 2) return
         const now = performance.now()
         if (now - lastFrameRef.current < LIVE_FRAME_INTERVAL_MS) return
         lastFrameRef.current = now
-        frameInFlightRef.current = true
-        // The frame's work runs in tasks of its own, after this callback:
-        // inside it, the browser could paint nothing — a tap's response
-        // included — until the whole retouch was done. And it yields between
-        // the face tracking and the retouch, so a tap or a slider move
-        // waiting to be handled goes first.
+        tracking = true
         void (async () => {
           try {
             await nextTask()
@@ -419,23 +464,16 @@ export default function Editor({
             // Hardware zoom already zoomed the sensor output — cropping again
             // on top of it would double-zoom.
             const crop = cropRectFor(video.videoWidth, video.videoHeight, aspectRatioFor(aspectRef.current), cropZoom(zoomRef.current, zoomRangeRef.current))
+            // (the frame's picture and the tracker's copy, taken together)
             const base = drawFrame(video, LIVE_MAX_DIMENSION, crop, mirror)
             const raw = await tracker.detect(video, now, { x: crop.x0, y: crop.y0, w: crop.fw, h: crop.fh })
-            await nextTask()
             if (gen !== liveGenRef.current) return
-            const landmarks = remapLandmarks(raw, crop, mirror)
-            // (each stage of the retouch a task of its own, too)
-            const result = await processFrameInSteps(base, landmarks, paramsRef.current, nextTask)
-            if (gen !== liveGenRef.current) return
-            baseRef.current = base
-            landmarksRef.current = landmarks
-            resultRef.current = result
-            setStatus(landmarks ? 'ready' : 'no-face')
-            render()
+            tracked = { base, landmarks: remapLandmarks(raw, crop, mirror) }
+            void retouchNext()
           } catch {
             // (a frame lost; the next one tries again)
           } finally {
-            if (gen === liveGenRef.current) frameInFlightRef.current = false
+            tracking = false
           }
         })()
       }
@@ -474,7 +512,8 @@ export default function Editor({
   )
 
   const capture = useCallback(() => {
-    const video = videoRef.current
+    // (the camera at full size, where the preview plays a smaller copy)
+    const video = stillVideoRef.current?.srcObject ? stillVideoRef.current : videoRef.current
     if (!video || video.readyState < 2) return
     setFlashKey((k) => k + 1)
     navigator.vibrate?.(15)
@@ -692,7 +731,7 @@ export default function Editor({
     // The camera to video mode (1080p60, from photo mode's full size) while
     // the microphone is set up; back again if nothing gets recorded.
     const cam = streamRef.current?.getVideoTracks()[0]
-    const camVideo = videoRef.current
+    const camVideo = stillVideoRef.current?.srcObject ? stillVideoRef.current : videoRef.current
     const zr = zoomRangeRef.current
     const hwZoom = zr.mode === 'hardware' ? Math.max(zr.floor, zoomRef.current) : null
     const toVideoMode = cam && camVideo ? switchCamera(cam, camVideo, 'video', hwZoom) : Promise.resolve()
@@ -1053,6 +1092,7 @@ export default function Editor({
     // background shows through.)
     <div className="fixed inset-0 overflow-hidden select-none">
       <video ref={videoRef} autoPlay playsInline muted className="hidden" />
+      <video ref={stillVideoRef} autoPlay playsInline muted className="hidden" />
 
       <div
         ref={previewRef}

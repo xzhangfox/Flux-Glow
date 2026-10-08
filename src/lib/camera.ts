@@ -21,6 +21,8 @@ const MODES: Record<CameraMode, MediaTrackConstraints> = {
   photo: { width: { ideal: STILL_MAX }, height: { ideal: (STILL_MAX * 3) / 4 }, aspectRatio: { ideal: 4 / 3 }, frameRate: { ideal: 30 } },
   video: { width: { ideal: 1920 }, height: { ideal: 1440 }, aspectRatio: { ideal: 4 / 3 }, frameRate: { ideal: 60 } },
 }
+/** The live preview's copy of a photo-sized camera (see previewCopy). */
+const PREVIEW: MediaTrackConstraints = { width: { ideal: 1920 }, height: { ideal: 1440 }, aspectRatio: { ideal: 4 / 3 }, frameRate: { ideal: 30 } }
 
 /** getUserMedia's video constraints for `mode`. */
 export const cameraConstraints = (mode: CameraMode, facingMode: string): MediaTrackConstraints => ({ facingMode, ...MODES[mode] })
@@ -62,4 +64,35 @@ export async function settlePhotoMode(track: MediaStreamTrack, video: HTMLVideoE
 export async function switchCamera(track: MediaStreamTrack, video: HTMLVideoElement, mode: CameraMode, zoom: number | null): Promise<void> {
   await apply(track, video, MODES[mode], zoom)
   if (mode === 'photo') await settlePhotoMode(track, video, zoom)
+}
+
+/** The live preview's own copy of a photo-sized camera, at 1440p: the
+ *  browser scales each frame down itself, off the page's thread, so every
+ *  live frame the page handles is a fraction of the size (handling the
+ *  full 12 MP frames cost the preview most of its frame rate) — while the
+ *  camera, and the track the shutter draws from, stay at full size. Null
+ *  when the camera isn't photo-sized, or when this browser can't size a
+ *  copy apart from its camera (the camera itself would drop with it: then
+ *  it's put back). `fullVideo` plays the full-size track. */
+export async function previewCopy(full: MediaStreamTrack, fullVideo: HTMLVideoElement, zoom: number | null): Promise<MediaStreamTrack | null> {
+  const w0 = fullVideo.videoWidth
+  const h0 = fullVideo.videoHeight
+  if (Math.max(w0, h0) <= 2400) return null
+  const before = full.getSettings()
+  const copy = full.clone()
+  try {
+    await copy.applyConstraints(PREVIEW)
+  } catch {
+    copy.stop()
+    return null
+  }
+  // (a few frames for a camera that would follow the copy down)
+  for (let i = 0; i < 6; i++) await nextFrame()
+  const s = copy.getSettings()
+  const now = full.getSettings()
+  const kept = fullVideo.videoWidth === w0 && fullVideo.videoHeight === h0 && now.width === before.width && now.height === before.height
+  if (kept && !!s.width && !!s.height && s.width * s.height < w0 * h0 * 0.6) return copy
+  copy.stop()
+  if (!kept) await apply(full, fullVideo, MODES.photo, zoom)
+  return null
 }
