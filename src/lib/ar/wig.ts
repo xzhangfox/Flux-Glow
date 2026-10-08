@@ -22,6 +22,10 @@ const smax = (a: number, b: number, k: number) => -smin(-a, -b, k)
 const ell = (x: number, y: number, z: number, rx: number, ry: number, rz: number) => (Math.hypot(x / rx, y / ry, z / rz) - 1) * Math.min(rx, ry, rz)
 const ell2 = (x: number, z: number, rx: number, rz: number) => (Math.hypot(x / rx, z / rz) - 1) * Math.min(rx, rz)
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v))
+const sstep = (a: number, b: number, v: number) => {
+  const t = clamp01((v - a) / (b - a))
+  return t * t * (3 - 2 * t)
+}
 
 /** The head's centre line (front to back), rig z. */
 const HZ = -1.55
@@ -48,11 +52,12 @@ function clumpRidge(x: number, y: number, z: number) {
   // Round the head (angle), plus a slow twist down the length; clumps of
   // a few different widths.
   const a = Math.atan2(x, z - HZ)
-  let u = (a / (Math.PI * 2)) * 30 + 0.25 * Math.sin(y * 1.6 + a * 3)
+  const u = (a / (Math.PI * 2)) * 30 + 0.25 * Math.sin(y * 1.6 + a * 3)
   const i = Math.floor(u)
-  const w = 0.7 + 0.6 * hash(i)
-  u = Math.min(1, (u - i) * w + (1 - w) * 0.5)
-  return Math.sin(Math.PI * Math.min(1, Math.max(0, u)))
+  // (0 at both edges of every clump, so the field has no steps — a step
+  // between clumps of different widths shaded as dark specks — each clump
+  // rounder or sharper-crested than the next)
+  return Math.sin(Math.PI * (u - i)) ** (0.6 + 0.9 * hash(i))
 }
 /** How much a point is "bangs" (0..1), blended gently into the rest so
  *  the two clump patterns meet without a seam. */
@@ -64,11 +69,9 @@ const ridgeAt = (x: number, y: number, z: number) => {
 }
 /** The same across the bangs (they fall straight down the front). */
 function bangsRidge(x: number) {
-  let u = (x + 1) * 6
+  const u = (x + 1) * 6
   const i = Math.floor(u)
-  const w = 0.7 + 0.6 * hash(i + 91)
-  u = Math.min(1, Math.max(0, (u - i) * w + (1 - w) * 0.5))
-  return Math.sin(Math.PI * u)
+  return Math.sin(Math.PI * (u - i)) ** (0.6 + 0.9 * hash(i + 91))
 }
 
 /** The bangs' edge and the bob's hem (rig y): each clump a little longer
@@ -78,6 +81,47 @@ function bangsRidge(x: number) {
  *  just below the chin in front and to the nape at the back. */
 const bangsAt = (x: number) => 0.2 - 0.12 * Math.min(1, Math.abs(x) / 0.86) ** 2 + 0.035 * (1 - bangsRidge(x))
 const hemAt = (x: number, z: number) => -1.84 - 0.08 * clamp01(-(z - HZ) / 1.4) + 0.06 * (1 - clumpRidge(x, -1.8, z))
+// ---- Splits ------------------------------------------------------------------------
+//
+// The ends don't form one sheet: here and there, between two clumps, the
+// hair parts near its ends (分缝) — the bangs into a few pieces, the bob's
+// ends into locks — a V-shaped gap, open at the end and closing a little
+// way up, each its own length and width.
+
+/** How far inside a split a point is (> 0: inside — no hair there). */
+function splitAt(x: number, y: number, z: number) {
+  let s = -1
+  // Round the ends of the bob, between its clumps.
+  if (y < -1.15) {
+    const zc = z - HZ
+    const a = Math.atan2(x, zc)
+    const u = (a / (Math.PI * 2)) * 30 + 0.25 * Math.sin(y * 1.6 + a * 3)
+    const j = Math.round(u)
+    const jj = ((j % 30) + 30) % 30
+    if (hash(jj + 17) < 0.62) {
+      const len = 0.36 + 0.26 * hash(jj + 33)
+      const w = 0.055 + 0.04 * hash(jj + 51)
+      // (opening wide soon after it starts: the ends turn under, so the
+      // part that shows is well above the very tips)
+      const t = clamp01((hemAt(x, z) + len - y) / len) ** 0.6
+      if (t > 0) s = Math.max(s, w * t - (Math.abs(u - j) * Math.PI * 2 * Math.hypot(x, zc)) / 30)
+    }
+  }
+  // Across the bangs, between theirs.
+  if (z > -1.0 && y > -0.2 && y < 0.8) {
+    const j = Math.round((x + 1) * 6)
+    if (j >= 1 && j <= 11 && hash(j + 7) < 0.62) {
+      const len = 0.16 + 0.22 * hash(j + 61)
+      const w = 0.04 + 0.03 * hash(j + 23)
+      const t = clamp01((bangsAt(j / 6 - 1) + len - y) / len)
+      // (leaning a little, as a parting does)
+      const xb = j / 6 - 1 + (hash(j + 3) - 0.5) * 0.12 * t
+      if (t > 0) s = Math.max(s, w * t - Math.abs(x - xb))
+    }
+  }
+  return s
+}
+
 /** Half the face opening's width at height y: close round the face — the
  *  side hair hugs the cheeks and comes in over the jaw. */
 const openingHalf = (y: number) => 0.86 - 0.04 * clamp01((0.2 - y) / 0.8) - 0.15 * clamp01((-0.6 - y) / 1.0) ** 1.2
@@ -91,12 +135,15 @@ export function wigSdf(x: number, y: number, z: number) {
 function wigParts(x: number, y: number, z: number) {
   const ax = Math.abs(x)
   const zc = z - HZ
-  // The outside: a rounded crown flowing into a full bob — widest by the
-  // cheeks, then curving in toward the ends, which turn under (内扣).
+  // The outside: a rounded crown over a bell, like a jellyfish — from the
+  // temples the hair swells outward as it falls (its volume), fullest just
+  // above the ends, and there the ends curl back in under (内扣), the bottom
+  // edge rounded off like a turned-under lip.
   const dome = ell(ax, y - 0.4, zc, 1.26, 1.45, 1.55)
-  const rx = 1.22 + 0.12 * Math.exp(-(((y + 0.75) / 0.6) ** 2)) - 0.32 * clamp01((-0.95 - y) / 0.95) ** 1.6
-  const side = ell2(ax, zc, rx, rx * 1.18)
-  const body = smax(smax(side, y - 0.55, 0.3), hemAt(x, z) - y, 0.3)
+  const rx = 1.2 + 0.38 * sstep(0.1, -1.4, y) - 0.36 * clamp01((-1.48 - y) / 0.4) ** 1.7
+  // (front to back it swells a little less: the ends hang round the neck)
+  const side = ell2(ax, zc, rx, 1.42 + (rx - 1.2) * 0.85)
+  const body = smax(smax(side, y - 0.55, 0.3), hemAt(x, z) - y, 0.36)
   let outer = smin(dome, body, 0.5)
   // Grooves between clumps: deepest down the sides and back, finer over
   // the crown, where the hair lies close; across the bangs, their own.
@@ -118,7 +165,9 @@ function wigParts(x: number, y: number, z: number) {
   const half = openingHalf(y)
   // (its top corners rounded: the bangs blend into the sides)
   const opening = Math.max(smax(ax - half, y - bangsAt(x), 0.12), -(z + 0.9))
-  return { d: smax(shell, -opening, 0.025), cut: -opening - shell }
+  const d = smax(shell, -opening, 0.025)
+  const split = splitAt(x, y, z)
+  return { d: split > -0.05 ? smax(d, split, 0.012) : d, cut: -opening - shell }
 }
 
 export interface WigData {
@@ -140,7 +189,7 @@ export function computeWig(): WigData {
   // (a coarse grid is plenty: the strands are in the texture, not the
   // mesh, and fewer triangles keep live frames quick)
   // (fine enough for the clumps' grooves: several cells across each)
-  const { pos, index } = surfaceNets(wigSdf, { x: -1.75, y: -2.15, z: -3.45 }, { x: 1.75, y: 2.3, z: 0.45 }, 0.039)
+  const { pos, index } = surfaceNets(wigSdf, { x: -1.85, y: -2.15, z: -3.5 }, { x: 1.85, y: 2.3, z: 0.45 }, 0.044)
   const n = pos.length / 3
   const flow = new Float32Array(n * 3)
   const nrm = new Float32Array(n * 3)
@@ -181,7 +230,8 @@ export function computeWig(): WigData {
     // The grooves between clumps in shade, the crests catching light: what
     // makes the clumps read.
     const ridge = ridgeAt(x, y, z)
-    const groove = 0.8 + 0.2 * ridge
+    // (and deepest inside a split, between two locks)
+    const groove = (0.8 + 0.2 * ridge) * (1 - 0.5 * clamp01((splitAt(x, y, z) + 0.05) / 0.05))
     // The part shows a line of scalp.
     const partLine = 0.6 * Math.exp(-((x / 0.025) ** 2)) * clamp01((y - 1.3) / 0.3) * clamp01((z + 2.1) / 0.4) * clamp01((-0.6 - z) / 0.3)
     col.set(c.map((v, k) => v * under * wall * rim * groove * (1 - partLine) + scalp[k] * partLine), i * 3)
@@ -413,6 +463,9 @@ function wispGeometry() {
   for (let x = -0.88; x <= 0.88; x += 0.042) {
     const xx = x + (rnd() - 0.5) * 0.01
     const y = bangsAt(xx) + 0.07
+    // Strands come in with their clump: none in a split or the groove
+    // between two (they'd fill it back in).
+    if (splitAt(xx, y - 0.04, 0) > -0.035 || bangsRidge(xx) < 0.3) continue
     const p = hit(new THREE.Vector3(xx, y, 1.2), new THREE.Vector3(0, 0, -1))
     if (!p) continue
     const len = 0.08 + rnd() * 0.07
@@ -428,9 +481,10 @@ function wispGeometry() {
     const p = hit(from, dir.clone().negate())
     if (!p) continue
     if (p.z > -0.95 && Math.abs(p.x) < 0.9) continue
-    const len = 0.14 + rnd() * 0.12
-    // (curving in a touch under the bob's turned-in ends)
-    card(p, new THREE.Vector3(0, -1, 0).addScaledVector(dir, -0.3).normalize(), new THREE.Vector3(dir.z, 0, -dir.x), dir, 0.09, len)
+    if (splitAt(p.x, p.y - 0.03, p.z) > -0.035 || clumpRidge(p.x, p.y, p.z) < 0.3) continue
+    const len = 0.12 + rnd() * 0.12
+    // (curving in under the bob's turned-in ends)
+    card(p, new THREE.Vector3(0, -1, 0).addScaledVector(dir, -0.5).normalize(), new THREE.Vector3(dir.z, 0, -dir.x), dir, 0.09, len)
   }
   const g = new THREE.BufferGeometry()
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))

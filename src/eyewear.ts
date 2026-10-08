@@ -21,7 +21,9 @@ glasses.position.set(0, 0, 0)
 const pivot = new THREE.Group(); pivot.add(glasses); scene.add(pivot)
 const big = q.get('id') === 'lavender'
 const cam = big ? new THREE.OrthographicCamera(-2.4, 2.4, 2.3, -2.4, -50, 50) : new THREE.OrthographicCamera(-1.6, 1.6, 1.15, -1.15, -50, 50); cam.position.set(0, 0, 10)
-;[[0, 0], [0.75, 0.15], [big ? 2.6 : 1.45, 0.05]].forEach(([yaw, pitch], i) => {
+// (?views=yaw,pitch;yaw,pitch;… for other angles)
+const views = q.get('views')?.split(';').map((v) => v.split(',').map(Number)) ?? [[0, 0], [0.75, 0.15], [big ? 2.6 : 1.45, 0.05]]
+;views.forEach(([yaw, pitch], i) => {
   pivot.rotation.set(pitch, yaw, 0)
   renderer.setViewport(i * W, 0, W, H); renderer.setScissor(i * W, 0, W, H)
   renderer.render(scene, cam)
