@@ -239,6 +239,8 @@ export default function Editor({
   // source) when the preview plays the camera itself.
   const stillVideoRef = useRef<HTMLVideoElement>(null)
   const previewTrackRef = useRef<MediaStreamTrack | null>(null)
+  // The microphone has been asked for (with the camera, the first time).
+  const micAskedRef = useRef(false)
   const previewRef = useRef<HTMLDivElement>(null)
   const trayRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
@@ -375,7 +377,25 @@ export default function Editor({
       // Photo mode: the camera's largest 4:3 size, so the shutter keeps the
       // frame on screen at full resolution (see camera.ts); recording
       // switches it to 1080p60.
-      const stream = await navigator.mediaDevices.getUserMedia({ video: cameraConstraints('photo', facingModeRef.current) })
+      // The first time, the microphone is asked for along with the camera —
+      // one prompt for both, up front, instead of a second one the first
+      // time a video is recorded — and let go of at once (it's only used
+      // while recording; asked again then, it's already allowed).
+      const askMic = !micAskedRef.current
+      micAskedRef.current = true
+      const video0 = cameraConstraints('photo', facingModeRef.current)
+      let stream: MediaStream
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: video0, audio: askMic })
+      } catch (err) {
+        if (!askMic) throw err
+        // (no microphone, or it was refused: the camera on its own)
+        stream = await navigator.mediaDevices.getUserMedia({ video: video0 })
+      }
+      stream.getAudioTracks().forEach((t) => {
+        t.stop()
+        stream.removeTrack(t)
+      })
       if (gen !== liveGenRef.current) {
         stream.getTracks().forEach((t) => t.stop())
         return
@@ -882,6 +902,35 @@ export default function Editor({
     }
     countdownTimerRef.current = window.setTimeout(tick, 1000)
   }
+
+  // The volume buttons take a photo, as in the phone's own camera (and so
+  // does a Bluetooth shutter remote, which sends Volume Up, a phone's
+  // camera key, or Enter / Space on a keyboard) — wherever the browser
+  // passes those keys on to the page. (Safari on iPhone never does: there a
+  // page can't see the volume buttons at all.)
+  const shutterKeyRef = useRef<{ ready: () => boolean; shoot: () => void }>({ ready: () => false, shoot: () => {} })
+  shutterKeyRef.current = {
+    ready: () => live && status !== 'loading' && status !== 'error' && recordingSince === null && !settingsOpen && !cropFile,
+    shoot: handleShutter,
+  }
+  useEffect(() => {
+    const keys = new Set(['AudioVolumeUp', 'AudioVolumeDown', 'VolumeUp', 'VolumeDown', 'Camera'])
+    const onKey = (e: KeyboardEvent) => {
+      // (Enter and Space only where they'd do nothing else: not on a
+      // button, a slider or a text field)
+      const onControl = !!(e.target as Element | null)?.closest?.('input, textarea, select, button, [contenteditable="true"]')
+      const shutter = keys.has(e.key) || e.keyCode === 174 || e.keyCode === 175 || (!onControl && (e.key === 'Enter' || e.key === ' '))
+      if (!shutter) return
+      const k = shutterKeyRef.current
+      // (elsewhere — a video playing, say — the keys do what they normally do)
+      if (!k.ready()) return
+      e.preventDefault()
+      // (held down, a key repeats: one photo a press)
+      if (!e.repeat) k.shoot()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   // ✕ in review: discard and go back to the camera.
   const handleClose = () => {
