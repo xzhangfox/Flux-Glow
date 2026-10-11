@@ -58,6 +58,12 @@ const RATE_LONG = 15
 const LONG_CLIP_S = 10 * 60
 /** Videos up to this long can be edited. */
 export const MAX_DURATION_S = 4 * 60 * 60
+/** A fixed camera (an interview, a talk show): people stay in their seats,
+ *  so far fewer analysed frames tell who is where. */
+const RATE_FIXED = 8
+/** …and someone in their seat is still there across a gap this long (their
+ *  face turned away, a hand over it). */
+const FIXED_BRIDGE_S = 4
 /** The clearest view of each face is kept as a crop this big (px). */
 const BEST_PX = 288
 
@@ -85,6 +91,8 @@ export interface VideoAnalysis {
   fps: number
   /** Seconds between analysed frames. */
   interval: number
+  /** Analysed as a fixed camera (people in fixed seats). */
+  fixed: boolean
   people: PersonInfo[]
   /** Where each person on screen at `t` is (their face's box, in fractions
    *  of the frame), from the analysed frames either side. */
@@ -101,7 +109,7 @@ export interface AnalyzeProgress {
 
 // ---- Models ------------------------------------------------------------------------
 
-let models: Promise<{ video: FaceLandmarker; image: FaceLandmarker; embedder: ImageEmbedder | null }> | null = null
+let models: Promise<{ video: FaceLandmarker; image: FaceLandmarker; lenient: FaceLandmarker; embedder: ImageEmbedder | null }> | null = null
 let delegate: 'GPU' | 'CPU' = 'GPU'
 /** Dev tests only (a machine whose GPU is software): run the models on the
  *  CPU. Before anything loads them. */
@@ -110,7 +118,9 @@ export const runModelsOnCpu = () => void (delegate = 'CPU')
  *  one looking at single frames and crops, and the identity embedder. */
 export function loadVideoModels() {
   models ??= (async () => {
-    const [video, image] = await Promise.all([createLandmarker('VIDEO', MAX_FACES, delegate), createLandmarker('IMAGE', MAX_FACES, delegate)])
+    // (`lenient`: for a seat someone is known to be in — a face turned half
+    // away or partly covered still counts there)
+    const [video, image, lenient] = await Promise.all([createLandmarker('VIDEO', MAX_FACES, delegate), createLandmarker('IMAGE', MAX_FACES, delegate), createLandmarker('IMAGE', 2, delegate, 0.2)])
     let embedder: ImageEmbedder | null = null
     try {
       embedder = await ImageEmbedder.createFromOptions(await visionFileset(), {
@@ -123,7 +133,7 @@ export function loadVideoModels() {
       // Without it, identity rests on face shape and on position over time.
       embedder = null
     }
-    return { video, image, embedder }
+    return { video, image, lenient, embedder }
   })()
   return models
 }
@@ -341,7 +351,8 @@ function dedupe(dets: Det[]): Det[] {
 // ---- The pass --------------------------------------------------------------------
 
 /** Analyses `file`. Rejects with an AbortError if `signal` aborts. */
-export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) => void, signal?: AbortSignal): Promise<VideoAnalysis> {
+export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) => void, signal?: AbortSignal, opts: { fixed?: boolean } = {}): Promise<VideoAnalysis> {
+  const fixed = !!opts.fixed
   const { video: vLm, image: iLm, embedder } = await loadVideoModels()
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
   try {
@@ -356,7 +367,7 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
     const W = Math.max(2, Math.round(dw * k))
     const H = Math.max(2, Math.round(dh * k))
     const fps = (await track.computePacketStats(90).catch(() => null))?.averagePacketRate || 30
-    const step = Math.max(1, Math.round(fps / (duration > LONG_CLIP_S ? RATE_LONG : RATE_SHORT)))
+    const step = Math.max(1, Math.round(fps / (fixed ? RATE_FIXED : duration > LONG_CLIP_S ? RATE_LONG : RATE_SHORT)))
     const rate = fps / step
     const gapFrames = Math.max(3, Math.round(TRACK_GAP_S * rate))
     const tileEvery = Math.max(1, Math.min(TILE_EVERY, Math.round(TILE_EVERY_S * rate)))
@@ -552,8 +563,8 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
 
     if (!times.length) throw new Error("Couldn't read any frames from this video.")
     const T = Float64Array.from(times)
-    const people = groupIntoPeople(done, T, W, H)
-    return await makeAnalysis(people, T, W, H, duration, fps, step / fps, tileEvery)
+    const people = groupIntoPeople(done, T, W, H, fixed)
+    return await makeAnalysis(people, T, W, H, duration, fps, step / fps, tileEvery, fixed)
   } finally {
     input.dispose()
   }
@@ -568,44 +579,131 @@ interface Person {
   tl: Timeline
 }
 
-/** Joins tracks into people. */
-function groupIntoPeople(tracks: Track[], times: Float64Array, W: number, H: number): Person[] {
-  const info = tracks.map((t) => ({ t, emb: t.embSum && t.embN ? t.embSum.map((v) => v / t.embN) : null, sig: medianSig(t.sigs) }))
+/** Where a face sits through its frames: the middle of its box, and its
+ *  size (px of the working frame; medians, so a lean or a stretch doesn't
+ *  move it). */
+interface Seat {
+  x: number
+  y: number
+  size: number
+}
+function seatOf(tl: Timeline, W: number, H: number): Seat {
+  const xs: number[] = []
+  const ys: number[] = []
+  const ss: number[] = []
+  const k = Math.max(1, Math.floor(tl.n / 200))
+  for (let i = 0; i < tl.n; i += k) {
+    const b = tl.boxAt(i)
+    xs.push(((b.x0 + b.x1) / 2) * W)
+    ys.push(((b.y0 + b.y1) / 2) * H)
+    ss.push(Math.max((b.x1 - b.x0) * W, (b.y1 - b.y0) * H))
+  }
+  const med = (v: number[]) => v.sort((a, b) => a - b)[v.length >> 1]
+  return { x: med(xs), y: med(ys), size: med(ss) }
+}
+/** 0..1: how surely two seats are the same place (and face size). */
+function sameSeat(a: Seat, b: Seat) {
+  const d = Math.hypot(a.x - b.x, a.y - b.y) / Math.max(1, a.size, b.size)
+  const r = Math.max(a.size, b.size) / Math.max(1, Math.min(a.size, b.size))
+  return Math.max(0, 1 - d / 1.1) * Math.max(0, Math.min(1, (2 - r) / 0.6))
+}
+
+interface Group {
+  p: Person
+  embs: Float32Array[]
+  sigs: Float32Array[]
+  seats: Seat[]
+}
+type TrackInfo = { t: Track; emb: Float32Array | null; sig: Float32Array | null; seat: Seat }
+
+/** Joins tracks into people. A fixed camera adds where each one sits: a
+ *  track in someone's seat is very likely them — and then there are only
+ *  as many people as there are seats in use. */
+function groupIntoPeople(tracks: Track[], times: Float64Array, W: number, H: number, fixed: boolean): Person[] {
+  const info: TrackInfo[] = tracks.map((t) => ({ t, emb: t.embSum && t.embN ? t.embSum.map((v) => v / t.embN) : null, sig: medianSig(t.sigs), seat: seatOf(t.tl, W, H) }))
   // Longest first: the best-known faces anchor the people.
   info.sort((a, b) => b.t.tl.n - a.t.tl.n)
-  const people: { p: Person; embs: Float32Array[]; sigs: Float32Array[] }[] = []
+  const groups: Group[] = []
   for (const it of info) {
-    let best: (typeof people)[number] | null = null
+    let best: Group | null = null
     let bestScore = 0
-    for (const cand of people) {
+    for (const cand of groups) {
       // Never two tracks of one person in the same frame.
       if (cand.p.tracks.some((o) => o.tl.shared(it.t.tl) > 2)) continue
-      const s = sameness(cand, it, times, W, H)
+      const s = sameness(cand, it, times, W, H, fixed)
       if (s > bestScore) {
         bestScore = s
         best = cand
       }
     }
-    if (best && bestScore >= 0.5) {
-      best.p.tracks.push(it.t)
-      // (a sample is enough: tracks come longest first, so these are the
-      // clearest looks at them)
-      if (it.emb && best.embs.length < MAX_LOOKS) best.embs.push(it.emb)
-      if (it.sig && best.sigs.length < MAX_LOOKS) best.sigs.push(it.sig)
-    } else people.push({ p: { id: 0, tracks: [it.t], tl: it.t.tl }, embs: it.emb ? [it.emb] : [], sigs: it.sig ? [it.sig] : [] })
+    if (best && bestScore >= (fixed ? 0.45 : 0.5)) join(best, it)
+    else groups.push({ p: { id: 0, tracks: [it.t], tl: it.t.tl }, embs: it.emb ? [it.emb] : [], sigs: it.sig ? [it.sig] : [], seats: [it.seat] })
   }
+  for (const g of groups) g.p.tl = Timeline.merge(g.p.tracks.map((t) => t.tl))
+  if (fixed) consolidate(groups, times.length)
   // Number people by when they first appear.
-  const out = people.map((x) => x.p)
-  for (const p of out) p.tl = Timeline.merge(p.tracks.map((t) => t.tl))
+  const out = groups.map((x) => x.p)
   out.sort((a, b) => a.tl.first - b.tl.first)
   out.forEach((p, i) => (p.id = i + 1))
   return out
 }
 
+function join(g: Group, it: { t: Track; emb: Float32Array | null; sig: Float32Array | null; seat?: Seat }) {
+  g.p.tracks.push(it.t)
+  // (a sample is enough: tracks come longest first, so these are the
+  // clearest looks at them)
+  if (it.emb && g.embs.length < MAX_LOOKS) g.embs.push(it.emb)
+  if (it.sig && g.sigs.length < MAX_LOOKS) g.sigs.push(it.sig)
+  if (it.seat && g.seats.length < MAX_LOOKS) g.seats.push(it.seat)
+}
+
+/** A fixed camera: there are as many people as faces on screen together
+ *  (most of the time — a few frames with an extra face don't count). Anyone
+ *  beyond that who never shares a frame with someone else is folded into
+ *  whoever they most likely are: the same seat, or the same look. */
+function consolidate(groups: Group[], frames: number) {
+  const together = new Uint8Array(frames)
+  for (const g of groups) for (let k = 0; k < g.p.tl.n; k++) together[g.p.tl.idx[k]]++
+  const atLeast = new Array(MAX_FACES + 2).fill(0)
+  for (const n of together) for (let c = 1; c <= Math.min(n, MAX_FACES + 1); c++) atLeast[c]++
+  let seats = 1
+  for (let c = 2; c <= MAX_FACES + 1; c++) if (atLeast[c] >= frames * 0.03) seats = c
+  for (;;) {
+    if (groups.length <= seats) return
+    // The least seen first.
+    const order = [...groups].sort((a, b) => a.p.tl.n - b.p.tl.n)
+    let merged = false
+    for (const g of order) {
+      let best: Group | null = null
+      let bestScore = 0.15
+      for (const o of groups) {
+        if (o === g || o.p.tl.shared(g.p.tl) > Math.max(2, g.p.tl.n * 0.01)) continue
+        const seat = Math.max(...o.seats.map((a) => Math.max(...g.seats.map((b) => sameSeat(a, b)))))
+        const look = g.embs.length && o.embs.length ? Math.max(...g.embs.map((a) => Math.max(...o.embs.map((b) => cosine(a, b))))) : 0
+        const score = 0.65 * seat + 0.35 * Math.min(1, Math.max(0, (look - 0.5) / 0.3))
+        if (score > bestScore) {
+          bestScore = score
+          best = o
+        }
+      }
+      if (!best) continue
+      for (const t of g.p.tracks) join(best, { t, emb: null, sig: null })
+      best.embs.push(...g.embs.slice(0, Math.max(0, MAX_LOOKS - best.embs.length)))
+      best.seats.push(...g.seats.slice(0, Math.max(0, MAX_LOOKS - best.seats.length)))
+      best.p.tl = Timeline.merge([best.p.tl, g.p.tl])
+      groups.splice(groups.indexOf(g), 1)
+      merged = true
+      break
+    }
+    if (!merged) return
+  }
+}
+
 /** 0..1: how sure we are that track `it` is person `cand`. Appearance
- *  carries most of it; face shape backs it up; and a track that starts
- *  right where and when the person's last one ended is very likely them. */
-function sameness(cand: { p: Person; embs: Float32Array[]; sigs: Float32Array[] }, it: { t: Track; emb: Float32Array | null; sig: Float32Array | null }, times: Float64Array, W: number, H: number) {
+ *  carries most of it; face shape backs it up; a track that starts right
+ *  where and when the person's last one ended is very likely them; and
+ *  with a fixed camera, so is one in their seat. */
+function sameness(cand: Group, it: TrackInfo, times: Float64Array, W: number, H: number, fixed: boolean) {
   let s = 0
   let wsum = 0
   if (it.emb && cand.embs.length) {
@@ -620,6 +718,10 @@ function sameness(cand: { p: Person; embs: Float32Array[]; sigs: Float32Array[] 
     const d = Math.min(...cand.sigs.map((c) => Math.sqrt(c.reduce((acc, v, i) => acc + (v - sig[i]) ** 2, 0) / c.length)))
     s += 1.5 * Math.min(1, Math.max(0, 1 - d / 0.09))
     wsum += 1.5
+  }
+  if (fixed) {
+    s += 3 * Math.max(...cand.seats.map((c) => sameSeat(c, it.seat)))
+    wsum += 3
   }
   // Continuity: the end of a track of theirs just before this one began.
   let cont = 0
@@ -665,7 +767,7 @@ function loadCanvas(url: string): Promise<HTMLCanvasElement> {
   })
 }
 
-async function makeAnalysis(people: Person[], times: Float64Array, W: number, H: number, duration: number, fps: number, interval: number, tileEvery: number): Promise<VideoAnalysis> {
+async function makeAnalysis(people: Person[], times: Float64Array, W: number, H: number, duration: number, fps: number, interval: number, tileEvery: number, fixed: boolean): Promise<VideoAnalysis> {
   const byId = new Map(people.map((p) => [p.id, p]))
   // A person is on screen this far either side of an analysed frame they're
   // in, and across gaps up to FILL_GAP_S. And they're looked for a little
@@ -674,7 +776,7 @@ async function makeAnalysis(people: Person[], times: Float64Array, W: number, H:
   // up to that long already.
   const reach = interval * 0.75
   const lead = Math.max(reach, tileEvery * interval)
-  const bridge = FILL_GAP_S + interval
+  const bridge = fixed ? FIXED_BRIDGE_S : FILL_GAP_S + interval
 
   const bestOf = (p: Person) => p.tracks.reduce((a, b) => (b.best.score > a.best.score ? b : a))
   // Each person's clearest view, back from its JPEG. (Merging two people
@@ -737,6 +839,7 @@ async function makeAnalysis(people: Person[], times: Float64Array, W: number, H:
     duration,
     fps,
     interval,
+    fixed,
     get people() {
       return cached
     },

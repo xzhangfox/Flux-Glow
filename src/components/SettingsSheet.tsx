@@ -1,12 +1,16 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { ThemePicker } from './ThemePicker'
+import SwitchRow from './Switch'
+import { effectsBlink, setEffectsBlink } from '../lib/effectPrefs'
+import { effectsChanged } from '../lib/effects'
 import OtherApps from './OtherApps'
 import ShareAppButton from './ShareAppButton'
 import { IconClose } from './icons'
 
 // Settings: the family's sheet — app theme, share this app, the other Flux
-// apps — plus Glow's privacy note.
+// apps — plus Glow's own: how effects behave, and the privacy note.
 export default function SettingsSheet({ onClose }: { onClose: () => void }) {
+  const [blink, setBlink] = useState(effectsBlink)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
     window.addEventListener('keydown', onKey)
@@ -22,6 +26,19 @@ export default function SettingsSheet({ onClose }: { onClose: () => void }) {
           </button>
         </div>
         <ThemePicker />
+        <div>
+          <h3 className="text-xs font-bold uppercase tracking-widest text-[var(--text-secondary)] mb-4 px-1">Effects</h3>
+          <SwitchRow
+            label="Animal heads blink"
+            hint="Their eyes close when yours do. Off: they stay open, whatever your eyes do."
+            on={blink}
+            onChange={(on) => {
+              setBlink(on)
+              setEffectsBlink(on)
+              effectsChanged()
+            }}
+          />
+        </div>
         <ShareAppButton />
         <OtherApps />
         <p className="text-xs leading-relaxed text-muted">Everything runs on this device: photos and videos never leave your browser.</p>

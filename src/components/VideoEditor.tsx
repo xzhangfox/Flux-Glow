@@ -7,7 +7,8 @@ import { boxOf, unpack } from '../lib/video/faces'
 import { freeSpace, removeTemp, sweepTemp } from '../lib/video/disk'
 import { ensureSeekable } from '../lib/video/source'
 import { holdScreenOn } from '../lib/wakeLock'
-import { EFFECTS, EFFECT_THUMBS, findEffect, onEffectReady, prepareEffect } from '../lib/effects'
+import { EFFECTS, EFFECT_THUMBS, effectsChanged, findEffect, onEffectReady, prepareEffect } from '../lib/effects'
+import { effectsBlink, setEffectsBlink } from '../lib/effectPrefs'
 import { LOOKS, applyLook, findLook } from '../lib/looks'
 import { renderFaceThumbs } from '../lib/thumbs'
 import { renderFilterThumbnails } from '../lib/filters'
@@ -73,6 +74,22 @@ function fmtLeft(s: number) {
   if (s < 60) return 'under a minute'
   const m = Math.round(s / 60)
   return m < 60 ? `about ${m} min` : `about ${Math.floor(m / 60)} h ${m % 60} min`
+}
+
+const FIXED_KEY = 'glow_fixed_camera'
+function loadFixedCamera() {
+  try {
+    return localStorage.getItem(FIXED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+function saveFixedCamera(on: boolean) {
+  try {
+    localStorage.setItem(FIXED_KEY, on ? '1' : '0')
+  } catch {
+    // (private mode: just this session)
+  }
 }
 
 function fmtBytes(b: number) {
@@ -156,6 +173,10 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
   const [found, setFound] = useState(0)
   const [source, setSource] = useState<Blob | null>(null)
   const [srcInfo, setSrcInfo] = useState<SourceInfo | null>(null)
+  // A fixed camera (interviews, talk shows): analysed knowing people stay
+  // in their seats. Remembered: whoever edits those edits them every time.
+  const [fixedCam, setFixedCam] = useState(loadFixedCamera)
+  const [askReanalyze, setAskReanalyze] = useState(false)
   const [url, setUrl] = useState<string | null>(null)
   const [analyzeStart, setAnalyzeStart] = useState(0)
   const analysisRef = useRef<VideoAnalysis | null>(null)
@@ -172,6 +193,7 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
   const [per, setPer] = useState<Record<number, EditParams>>({})
   const [off, setOff] = useState<Record<number, boolean>>({})
   const [target, setTarget] = useState<Target>('all')
+  const [blink, setBlink] = useState(effectsBlink)
   const [lookSel, setLookSel] = useState<Record<string, { id: string | null; strength: number }>>({})
   const [panel, setPanel] = useState<Panel | null>(null)
   const [mergeFrom, setMergeFrom] = useState<number | null>(null)
@@ -230,12 +252,10 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
     return () => document.removeEventListener('click', onClick, true)
   }, [])
 
-  // ---- Load and analyse ----
+  // ---- Load ----
   useEffect(() => {
     const ac = new AbortController()
     let objectUrl: string | null = null
-    // (an hour-long clip takes a while: the screen stays on meanwhile)
-    const release = holdScreenOn()
     ;(async () => {
       try {
         preloadVideoModels().catch(() => {})
@@ -246,13 +266,43 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
         setSource(src)
         setUrl(objectUrl)
         probeSource(src).then((i) => !ac.signal.aborted && setSrcInfo(i), () => {})
+      } catch (e) {
+        if ((e as Error).name === 'AbortError') return
+        setError((e as Error).message || "Couldn't open this video.")
+        setPhase('error')
+      }
+    })()
+    return () => {
+      ac.abort()
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [file])
+
+  // ---- Analyse ---- (again if the camera kind changes)
+  useEffect(() => {
+    if (!source) return
+    const ac = new AbortController()
+    // (an hour-long clip takes a while: the screen stays on meanwhile)
+    const release = holdScreenOn()
+    ;(async () => {
+      try {
+        analysisRef.current = null
+        finderRef.current = null
+        shownRef.current = null
+        setPeople([])
+        setTags([])
+        setTarget('all')
+        setMergeFrom(null)
+        setPanel(null)
+        setProgress(0)
+        setFound(0)
         setPhase('analyzing')
         setAnalyzeStart(performance.now())
         // (a few updates a second: re-rendering the editor for every frame
         // analysed would slow the analysis down)
         let shown = 0
         const an = await analyzeVideo(
-          src,
+          source,
           (p) => {
             const now = performance.now()
             if (now - shown < 200) return
@@ -261,13 +311,17 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
             setFound(p.people)
           },
           ac.signal,
+          { fixed: fixedCam },
         )
         if (ac.signal.aborted) return
         finderRef.current = await FaceFinder.create(an)
         if (ac.signal.aborted) return
         analysisRef.current = an
+        smoother.current = new LiveSmoother()
+        smoother.current.calm = an.fixed
         setPeople(an.people)
         setPer(Object.fromEntries(an.people.map((p) => [p.id, { ...initial }])))
+        setOff({})
         setProgress(1)
         setPhase('ready')
       } catch (e) {
@@ -281,9 +335,12 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
     return () => {
       ac.abort()
       release()
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [file, initial])
+  }, [source, fixedCam, initial])
+  const chooseFixedCam = (on: boolean) => {
+    saveFixedCamera(on)
+    setFixedCam(on)
+  }
 
   // 3D effects load in the background, one model per person wearing one;
   // the (paused) preview redraws as each comes in.
@@ -707,6 +764,17 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
                 {found} {found === 1 ? 'person' : 'people'} found
               </span>
             </div>
+            <div className="mt-4 pt-3.5 border-t border-white/10 text-left">
+              <button role="switch" aria-checked={fixedCam} aria-label="Fixed camera" onClick={() => chooseFixedCam(!fixedCam)} className="w-full flex items-center justify-between gap-3 text-left">
+                <span>
+                  <span className="block text-white text-[12.5px] font-semibold">Fixed camera</span>
+                  <span className="block text-white/50 text-[11px] leading-snug mt-0.5">Interviews, talk shows: people stay in their seats. Fewer mix-ups between people; effects stay on through a turned head.</span>
+                </span>
+                <span className={`relative w-9 h-[22px] flex-shrink-0 rounded-full transition ${fixedCam ? 'bg-primary' : 'bg-white/20'}`}>
+                  <span className={`absolute top-[3px] w-4 h-4 rounded-full bg-white shadow transition-all ${fixedCam ? 'left-[17px]' : 'left-[3px]'}`} />
+                </span>
+              </button>
+            </div>
             <button onClick={onClose} className="mt-4 h-9 px-4 rounded-full bg-white/10 text-white text-[12px] font-semibold">
               Cancel
             </button>
@@ -767,7 +835,27 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
               <div>
                 <div className="flex items-center justify-between h-7 mb-2">
                   <span className="text-[13px] font-semibold text-white">Effects</span>
-                  <span className="text-[10.5px] text-white/45">Tracked on {target === 'all' ? 'every face' : `Person ${target}`}</span>
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-[10.5px] text-white/45">On {target === 'all' ? 'every face' : `Person ${target}`}</span>
+                    {/* (the same switch as in Settings) */}
+                    <button
+                      role="switch"
+                      aria-checked={blink}
+                      aria-label="Animal heads blink"
+                      title="Animal heads close their eyes when the wearer does"
+                      onClick={() => {
+                        setBlink(!blink)
+                        setEffectsBlink(!blink)
+                        effectsChanged()
+                      }}
+                      className="flex items-center gap-1.5 h-7 pl-2.5 pr-1 rounded-full bg-white/[0.07] text-[11px] font-medium text-white/80 transition active:scale-95"
+                    >
+                      Blink
+                      <span className={`relative w-7 h-[18px] rounded-full transition ${blink ? 'bg-primary' : 'bg-white/20'}`}>
+                        <span className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow transition-all ${blink ? 'left-[12px]' : 'left-[2px]'}`} />
+                      </span>
+                    </button>
+                  </div>
                 </div>
                 {!anyFaces ? (
                   <p className="text-xs text-white/60 py-4 text-center">Effects need a face in the video.</p>
@@ -870,9 +958,16 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
             ) : (
               <div className="flex items-center justify-between gap-2 h-6 mb-1 whitespace-nowrap">
                 {target === 'all' ? (
-                  <span className="text-[11px] text-white/60 truncate">
-                    {ready ? (anyFaces ? `${people.length} ${people.length === 1 ? 'person' : 'people'} · tap a face to edit just them` : 'No faces found — the filter still applies') : ' '}
-                  </span>
+                  <>
+                    <span className="text-[11px] text-white/60 truncate">
+                      {ready ? (anyFaces ? `${people.length} ${people.length === 1 ? 'person' : 'people'} · tap a face to edit just them` : 'No faces found — the filter still applies') : ' '}
+                    </span>
+                    {ready && (
+                      <button data-keep-panel onClick={() => setAskReanalyze(true)} className={`h-6 px-2 rounded-full text-[10.5px] font-semibold flex-shrink-0 ${fixedCam ? 'bg-primary/15 text-primary' : 'bg-white/10 text-white/70'}`}>
+                        {fixedCam ? 'Fixed camera' : 'Moving camera'}
+                      </button>
+                    )}
+                  </>
                 ) : (
                   <span className="text-[11px] text-white/60 flex items-center gap-1.5 truncate">
                     <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: colorOf(target) }} />
@@ -1007,6 +1102,33 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
           confirmClose={false}
           notice={exported.droppedAudio ? "This browser couldn't carry the sound across, so the export is silent." : undefined}
         />
+      )}
+
+      {askReanalyze && (
+        <Sheet onDismiss={() => setAskReanalyze(false)}>
+          <p className="text-white text-[15px] font-semibold mb-1">{fixedCam ? 'Analyse for a moving camera?' : 'Analyse for a fixed camera?'}</p>
+          <p className="text-white/60 text-[12px] mb-1.5">
+            {fixedCam
+              ? 'For a camera that moves or cuts between shots, or people who move around.'
+              : 'For interviews and talk shows, where the camera stays put and people stay in their seats: fewer mix-ups between people, and effects stay on through a turned head.'}
+          </p>
+          <p className="text-white/45 text-[11.5px] mb-4">The video is analysed again; settings for individual people start over.</p>
+          <div className="flex gap-3">
+            <button onClick={() => setAskReanalyze(false)} className="flex-1 h-11 rounded-full bg-white/10 text-white text-sm font-semibold">
+              Cancel
+            </button>
+            <button
+              onClick={() => {
+                setAskReanalyze(false)
+                videoRef.current?.pause()
+                chooseFixedCam(!fixedCam)
+              }}
+              className="flex-1 h-11 rounded-full bg-primary text-black text-sm font-semibold"
+            >
+              Analyse again
+            </button>
+          </div>
+        </Sheet>
       )}
 
       {askLeave && (

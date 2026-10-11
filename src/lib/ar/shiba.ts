@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import type { Model, Rig } from './scene'
+import { effectsBlink } from '../effectPrefs'
 import { surfaceNets } from './sdfMesh'
 
 // Stylised animal heads after a toy-like Shiba reference model (front, 3/4,
@@ -1144,7 +1145,8 @@ function assembleHead(id: HeadId, data: HeadData): Model {
     root,
     fullHead: true,
     update(rig: Rig) {
-      const closed = blinker.update(rig)
+      // (Settings can keep the eyes open whatever the wearer's do)
+      const closed = effectsBlink() ? blinker.update(rig) : OPEN_EYES
       for (const l of lids) l.blink.value = l.side < 0 ? closed.left : closed.right
     },
   }
@@ -1184,6 +1186,8 @@ function withEyelid(mat: THREE.MeshPhysicalMaterial, lid: THREE.Color) {
   mat.userData.blink = blink
   return blink
 }
+
+const OPEN_EYES = { left: 0, right: 0 }
 
 /** How shut each of the wearer's eyes is (0 open .. 1 shut), on screen
  *  left and right.

@@ -194,6 +194,11 @@ export function onEffectReady(fn: () => void): () => void {
   readyListeners.add(fn)
   return () => readyListeners.delete(fn)
 }
+/** Something about how effects are drawn changed (a setting): whatever is
+ *  showing a still redraws, as when an effect comes in. */
+export function effectsChanged() {
+  readyListeners.forEach((fn) => fn())
+}
 function watchReady(effectId: string, slot: string) {
   const key = `${slot}:${effectId}`
   if (watching.has(key) || !ar) return

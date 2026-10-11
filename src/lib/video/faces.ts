@@ -152,6 +152,9 @@ const MIN_CUTOFF_XY = 1.4
 const BETA_XY = 9
 const MIN_CUTOFF_Z = 0.8
 const BETA_Z = 3
+/** `calm` (a fixed camera, people sitting): held harder still at rest —
+ *  moving, it follows as fast as ever. */
+const CALM = 0.55
 const alpha = (cutoff: number, dt: number) => 1 / (1 + 1 / (2 * Math.PI * cutoff * dt))
 
 /** One Euro state over every coordinate of one face. */
@@ -160,6 +163,11 @@ export class EuroState {
   readonly deriv = new Float32Array(STRIDE)
   t = 0
   started = false
+  private rest: number
+
+  constructor(calm = false) {
+    this.rest = calm ? CALM : 1
+  }
 
   reset() {
     this.started = false
@@ -183,7 +191,7 @@ export class EuroState {
       const isZ = c % 3 === 2
       const dx = (x[c] - v[c]) / dt
       const d = (this.deriv[c] += ad * (dx - this.deriv[c]))
-      const a = alpha((isZ ? MIN_CUTOFF_Z : MIN_CUTOFF_XY) + (isZ ? BETA_Z : BETA_XY) * Math.abs(d), dt)
+      const a = alpha((isZ ? MIN_CUTOFF_Z : MIN_CUTOFF_XY) * this.rest + (isZ ? BETA_Z : BETA_XY) * Math.abs(d), dt)
       v[c] += a * (x[c] - v[c])
     }
     v[STRIDE] = x[STRIDE]

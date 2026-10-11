@@ -24,25 +24,44 @@ export interface Found {
 
 /** Windows looked through for missing people, per frame, at most. */
 const MAX_RETRIES = 4
+const MAX_FACES = 6
 /** How long a person's own last place still guides where they are now. */
 const RECENT_S = 0.3
+/** A fixed camera: someone in their seat whose face can't be found (turned
+ *  away, a hand over it) keeps their last mesh this long, so their effect
+ *  stays on rather than blinking off. */
+const HOLD_S = 1.5
+/** …and the export bridges gaps up to this long (as the analysis does
+ *  0.6 s for a moving camera): their effect rides through a turned head. */
+const FIXED_FILL_S = 2.5
+/** Someone who doesn't come back within that keeps it this long more. */
+const FIXED_TAIL_S = 1
 
 export class FaceFinder {
   private recent = new Map<number, { box: Box; t: number; vx: number; vy: number }>()
+  private held = new Map<number, { lm: Float32Array; t: number }>()
   private lastT = -Infinity
   private an: VideoAnalysis
   private video: FaceLandmarker
   private image: FaceLandmarker
+  /** For a seat someone is known to be in (fixed camera): looser. */
+  private seat: FaceLandmarker
+  private hold: boolean
 
-  constructor(an: VideoAnalysis, video: FaceLandmarker, image: FaceLandmarker) {
+  constructor(an: VideoAnalysis, video: FaceLandmarker, image: FaceLandmarker, seat: FaceLandmarker, hold: boolean) {
     this.an = an
     this.video = video
     this.image = image
+    this.seat = seat
+    this.hold = hold
   }
 
-  static async create(an: VideoAnalysis) {
-    const { video, image } = await loadVideoModels()
-    return new FaceFinder(an, video, image)
+  /** `hold`: with a fixed camera, keep a seated person's last mesh while
+   *  their face can't be found (the preview; the export bridges gaps
+   *  itself, looking ahead). */
+  static async create(an: VideoAnalysis, hold = an.fixed) {
+    const { video, image, lenient } = await loadVideoModels()
+    return new FaceFinder(an, video, image, an.fixed ? lenient : image, hold)
   }
 
   /** The people in `frame`, at time `t` in the clip. `sequential`: frames
@@ -99,12 +118,12 @@ export class FaceFinder {
     // should be (zoomed in: a small face is plenty big there).
     let tries = 0
     want.forEach((w, wi) => {
-      if (wUsed.has(wi) || tries >= MAX_RETRIES) return
+      if (wUsed.has(wi) || tries >= (this.an.fixed ? MAX_FACES : MAX_RETRIES)) return
       tries++
       const p = w.near ?? w.where
       const c = centreOf(p)
       const r = windowAt(c.x, c.y, Math.min(Math.min(W, H), Math.max(sizeOf(p) * 2.6, 96)), W, H)
-      const rr = this.image.detect(cropOf(frame, r))
+      const rr = this.seat.detect(cropOf(frame, r))
       let best: { lm: Float32Array; box: Box } | null = null
       let bs = 0.1
       rr.faceLandmarks.forEach((lm, i) => {
@@ -143,6 +162,17 @@ export class FaceFinder {
       this.recent.set(f.id, { box, t, vx, vy })
     })
     for (const id of [...this.recent.keys()]) if (!seen.has(id) && t - this.recent.get(id)!.t > RECENT_S) this.recent.delete(id)
+
+    // Fixed camera: whoever is in their seat but not found keeps their last
+    // mesh a while.
+    if (this.hold) {
+      for (const f of out) this.held.set(f.id, { lm: f.lm, t })
+      for (const w of want) {
+        if (seen.has(w.id)) continue
+        const h = this.held.get(w.id)
+        if (h && Math.abs(t - h.t) <= HOLD_S) out.push({ id: w.id, lm: h.lm })
+      }
+    }
     return out
   }
 }
@@ -152,6 +182,8 @@ export class FaceFinder {
 export class LiveSmoother {
   private states = new Map<number, EuroState>()
   private lastT = -Infinity
+  /** (a fixed camera: steadier at rest) */
+  calm = false
 
   apply(found: Found[], t: number): Found[] {
     // A jump (seek, loop): start afresh.
@@ -161,7 +193,7 @@ export class LiveSmoother {
     for (const id of [...this.states.keys()]) if (!ids.has(id)) this.states.delete(id)
     return found.map((f) => {
       let s = this.states.get(f.id)
-      if (!s) this.states.set(f.id, (s = new EuroState()))
+      if (!s) this.states.set(f.id, (s = new EuroState(this.calm)))
       return { id: f.id, lm: Float32Array.from(s.step(f.lm, t)) }
     })
   }
@@ -196,29 +228,38 @@ export class FaceScout {
   private euro = new Map<number, EuroState>()
   private lastSeen = new Map<number, { ts: number; lm: Float32Array }>()
   private lastFilled: Map<number, Float32Array> | undefined
-  private back = new EuroState()
+  private back: EuroState
   private warned = false
+  private an: VideoAnalysis
+  /** Gaps bridged (a fixed camera's are longer), and how long someone who
+   *  doesn't come back keeps their last mesh. */
+  private gap: number
+  private tail: number
   private input: Input
   private iter: AsyncIterator<{ canvas: HTMLCanvasElement | OffscreenCanvas; timestamp: number }>
   private finder: FaceFinder
   /** Half the shortest frame time seen: how close a match must be. */
   private tol = 0.5 / 30
 
-  private constructor(input: Input, iter: FaceScout['iter'], finder: FaceFinder) {
+  private constructor(input: Input, iter: FaceScout['iter'], finder: FaceFinder, an: VideoAnalysis) {
     this.input = input
     this.iter = iter
     this.finder = finder
+    this.an = an
+    this.gap = an.fixed ? FIXED_FILL_S : FILL_GAP_S
+    this.tail = an.fixed ? FIXED_TAIL_S : 0
+    this.back = new EuroState(an.fixed)
   }
 
   /** `workMax`: the long side frames are looked at in. */
   static async open(file: Blob, an: VideoAnalysis, workMax: number): Promise<FaceScout> {
-    const finder = await FaceFinder.create(an)
+    const finder = await FaceFinder.create(an, false)
     const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
     const track = await input.getPrimaryVideoTrack()
     if (!track) throw new Error('This file has no video.')
     const k = Math.min(1, workMax / Math.max(track.displayWidth, track.displayHeight))
     const sink = new CanvasSink(track, { width: Math.max(2, Math.round(track.displayWidth * k)), height: Math.max(2, Math.round(track.displayHeight * k)), fit: 'fill', poolSize: 2 })
-    return new FaceScout(input, sink.canvases()[Symbol.asyncIterator](), finder)
+    return new FaceScout(input, sink.canvases()[Symbol.asyncIterator](), finder, an)
   }
 
   private async pull() {
@@ -236,18 +277,25 @@ export class FaceScout {
   }
 
   /** Bridges short gaps in frame `j` and filters it forwards. Needs the
-   *  frames up to FILL_GAP_S past it (or the end of the clip). */
+   *  frames up to `gap` past it (or the end of the clip). */
   private fill(j: number) {
     const f = this.frames[j]
     const filled = new Map(f.raw)
+    let seated: Set<number> | null = null
     for (const [id, seen] of this.lastSeen) {
-      if (filled.has(id) || f.ts - seen.ts > FILL_GAP_S) continue
+      if (filled.has(id) || f.ts - seen.ts > this.gap) continue
       // Back within the gap? Then they were here all along.
-      for (let k = j + 1; k < this.frames.length && this.frames[k].ts - seen.ts <= FILL_GAP_S; k++) {
+      for (let k = j + 1; k < this.frames.length && this.frames[k].ts - seen.ts <= this.gap; k++) {
         const b = this.frames[k].raw.get(id)
         if (!b) continue
         filled.set(id, lerpFace(seen.lm, b, (f.ts - seen.ts) / Math.max(1e-6, this.frames[k].ts - seen.ts)))
         break
+      }
+      // (a fixed camera: not back, but still in their seat — keep them a
+      // little longer)
+      if (!filled.has(id) && f.ts - seen.ts <= this.tail) {
+        seated ??= new Set(this.an.boxesAt(f.ts).map((e) => e.id))
+        if (seated.has(id)) filled.set(id, seen.lm)
       }
     }
     for (const [id, lm] of f.raw) this.lastSeen.set(id, { ts: f.ts, lm })
@@ -255,7 +303,7 @@ export class FaceScout {
     const fwd = new Map<number, Float32Array>()
     for (const [id, lm] of filled) {
       let s = this.euro.get(id)
-      if (!s) this.euro.set(id, (s = new EuroState()))
+      if (!s) this.euro.set(id, (s = new EuroState(this.an.fixed)))
       if (!prev?.has(id)) s.reset()
       fwd.set(id, Float32Array.from(s.step(lm, f.ts)))
     }
@@ -268,12 +316,12 @@ export class FaceScout {
   /** The people in the source frame at `ts`, their meshes steadied. */
   async at(ts: number): Promise<Found[]> {
     // Read on until this frame's look-ahead is all in.
-    const need = ts + SMOOTH_AHEAD_S + FILL_GAP_S + this.tol
+    const need = ts + SMOOTH_AHEAD_S + this.gap + this.tol
     while (!this.ended && (!this.frames.length || this.frames[this.frames.length - 1].ts < need)) await this.pull()
     if (!this.frames.length) return []
     // Bridge and filter everything whose own look-ahead is in.
     const end = this.frames[this.frames.length - 1].ts
-    while (this.filledTo < this.frames.length && (this.ended || this.frames[this.filledTo].ts + FILL_GAP_S <= end)) this.fill(this.filledTo++)
+    while (this.filledTo < this.frames.length && (this.ended || this.frames[this.filledTo].ts + this.gap <= end)) this.fill(this.filledTo++)
 
     // The frame: the nearest one (frames come in order, so from the front).
     let i = 0
