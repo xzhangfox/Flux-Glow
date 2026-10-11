@@ -1,7 +1,8 @@
-import { ALL_FORMATS, BlobSource, BufferTarget, Conversion, Input, Mp4OutputFormat, Output, QUALITY_HIGH, canEncodeAudio, getFirstEncodableVideoCodec } from 'mediabunny'
+import { ALL_FORMATS, BlobSource, Conversion, Input, Mp4OutputFormat, Output, QUALITY_HIGH, canEncodeAudio, getFirstEncodableVideoCodec } from 'mediabunny'
 import { cropRectFor } from '../frame'
 import type { EditParams } from '../pipeline'
 import { analyzeVideo } from './analyze'
+import { outputSink } from './disk'
 import { exportVideo } from './export'
 import { withFrameDurations } from './source'
 
@@ -65,7 +66,8 @@ export async function frameRecording(raw: Blob, view: RecordView, onProgress: (p
     if (!codec) throw new Error("This browser can't encode video.")
     const at = await input.getPrimaryAudioTrack()
     const aac = !!at && at.codec !== 'aac' && (await canEncodeAudio('aac'))
-    const output = new Output({ format: new Mp4OutputFormat({ fastStart: 'in-memory' }), target: new BufferTarget() })
+    const sink = await outputSink(raw.size * 1.5)
+    const output = new Output({ format: new Mp4OutputFormat({ fastStart: sink.onDisk ? false : 'in-memory' }), target: sink.target })
     // Framed by hand: each frame drawn upright first (phones often store a
     // recording as landscape frames plus a "rotate 90°" flag, which
     // drawing the sample applies), then cropped and mirrored with plain
@@ -109,12 +111,13 @@ export async function frameRecording(raw: Blob, view: RecordView, onProgress: (p
     signal?.addEventListener('abort', abort)
     try {
       await conversion.execute()
+    } catch (e) {
+      await sink.discard()
+      throw e
     } finally {
       signal?.removeEventListener('abort', abort)
     }
-    const buf = (output.target as BufferTarget).buffer
-    if (!buf) throw new Error('Framing produced no data.')
-    return new Blob([buf], { type: 'video/mp4' })
+    return await sink.finish('video/mp4')
   } finally {
     input.dispose()
   }
@@ -132,6 +135,6 @@ export async function renderRecording(
   // Rough shares of the time each step takes.
   const clean = await frameRecording(raw, view, (p) => onProgress({ stage: 'framing', progress: p * 0.15 }), signal)
   const analysis = await analyzeVideo(clean, (p) => onProgress({ stage: 'tracking', progress: 0.15 + 0.45 * (p.progress ?? 0) }), signal)
-  const { blob } = await exportVideo(clean, analysis, () => params, params, { quality: 'fast' }, (p) => onProgress({ stage: 'rendering', progress: 0.6 + 0.4 * p }), signal)
+  const { blob } = await exportVideo(clean, analysis, () => params, params, { size: null, fps: null, bitrate: 'higher', quality: 'fast' }, (p) => onProgress({ stage: 'rendering', progress: 0.6 + 0.4 * p }), signal)
   return { video: blob, clean }
 }

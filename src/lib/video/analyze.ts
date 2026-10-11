@@ -1,13 +1,19 @@
 import { ImageEmbedder, type FaceLandmarker, type NormalizedLandmark } from '@mediapipe/tasks-vision'
-import { ALL_FORMATS, BlobSource, CanvasSink, Input } from 'mediabunny'
-import { closureFrom, createLandmarker, visionFileset, withEyeClosure, type EyeClosure } from '../faceLandmarker'
+import { ALL_FORMATS, BlobSource, Input, VideoSampleSink } from 'mediabunny'
+import { closureFrom, createLandmarker, visionFileset } from '../faceLandmarker'
+import { nextTask } from '../schedule'
+import { area, boxOf, centreOf, cropOf, fitScore, iou, pack, shift, sizeOf, stamp, unpack, windowAt, type Box, type Region } from './faces'
 
-// Video analysis for the video editor: every face in every frame, who each
-// one is, and a steady track of each person's face mesh through the clip —
-// so each person keeps their own retouch and effects, and those stay locked
-// to their face, frame after frame.
+// Video analysis for the video editor: who is in the clip, and where each
+// of them is through it — so each person keeps their own retouch and
+// effects. The face meshes themselves aren't kept: the preview and the
+// export find them again, frame by frame, at the size they work at (see
+// video/follow.ts), using what this pass learned to tell people apart. That
+// keeps memory flat however long the clip — a three-hour video is the same
+// handful of megabytes per person as a short one.
 //
-// One pass over the decoded frames (at a working size), in order:
+// One pass over the decoded frames (at a working size; a long clip at a
+// reduced rate — enough to know who is where), in order:
 //
 //  1. Detect. The landmarker in VIDEO mode finds and tracks up to six faces
 //     on the whole frame. Faces too small for that (a group shot, someone
@@ -24,25 +30,36 @@ import { closureFrom, createLandmarker, visionFileset, withEyeClosure, type EyeC
 //     that never share a frame and look alike (or one picks up where the
 //     other left off) are the same person — so someone who leaves and comes
 //     back, or turns away for a while, keeps their identity and settings.
-//  4. Smooth. Each person's mesh is filled across short gaps and smoothed
-//     in time with a speed-adaptive (One Euro) filter run forwards and
-//     backwards, which removes jitter without lag — possible because the
-//     whole clip is known in advance, unlike a live camera.
+//
+// What's kept per person: their box at each analysed frame (24 bytes), a
+// picture of their clearest view, and the spans they're on screen.
 
 const WORK_MAX = 960
-/** Landmarks per face (the 468-point mesh and the irises). */
-export const N_LM = 478
-const STRIDE = N_LM * 3
-/** Per face per frame: the landmarks, then how shut each eye is (r, l). */
-const FRAME = STRIDE + 2
 const MAX_FACES = 6
 /** Most of a second's absence still continues a track. */
 const TRACK_GAP_S = 0.8
-/** Gaps up to this long inside a person's presence are filled in. */
-const FILL_GAP_S = 0.6
+/** Gaps up to this long inside a person's presence are bridged. */
+export const FILL_GAP_S = 0.6
+/** The tile scan for small faces, every this many analysed frames at most
+ *  — and at least twice a second, whatever the rate. */
 const TILE_EVERY = 10
+const TILE_EVERY_S = 0.5
 const EMBED_EVERY = 12
-export const MAX_DURATION_S = 180
+const EMBED_EVERY_S = 0.8
+/** Shape signatures kept per track (a sample: they go into a median). */
+const MAX_SIGS = 64
+/** Appearances kept per person to compare new tracks with. */
+const MAX_LOOKS = 48
+/** Analysis rate, frames a second: every frame of a short clip (up to
+ *  30 fps), fewer for a long one — identity needs far less than the
+ *  per-frame meshes, which are found again when they're needed. */
+const RATE_SHORT = 30
+const RATE_LONG = 15
+const LONG_CLIP_S = 10 * 60
+/** Videos up to this long can be edited. */
+export const MAX_DURATION_S = 4 * 60 * 60
+/** The clearest view of each face is kept as a crop this big (px). */
+const BEST_PX = 288
 
 const EMBEDDER_URL = '/mediapipe/image_embedder.tflite'
 
@@ -52,25 +69,26 @@ export interface PersonInfo {
   thumb: string
   /** Seconds in the clip where this person is on screen. */
   spans: [number, number][]
-  /** Their clearest frame, and their landmarks in it (for effect and
-   *  look previews). */
+  /** Their clearest view (a crop round their face) and their landmarks
+   *  in it (for effect and look previews). */
   best: { frame: HTMLCanvasElement; landmarks: NormalizedLandmark[] }
   /** Share of the clip they're in (0..1). */
   presence: number
 }
 
 export interface VideoAnalysis {
+  /** The working size the clip was analysed at. */
   width: number
   height: number
   duration: number
-  /** Presentation time of each analysed frame, seconds, ascending. */
-  times: Float64Array
+  /** The clip's frame rate (average). */
+  fps: number
+  /** Seconds between analysed frames. */
+  interval: number
   people: PersonInfo[]
-  /** Smoothed landmarks of `personId` at time `t` (interpolated between
-   *  frames), or null where they're not on screen. */
-  landmarksAt(personId: number, t: number): NormalizedLandmark[] | null
-  /** Every person on screen at `t`. */
-  facesAt(t: number): { id: number; landmarks: NormalizedLandmark[] }[]
+  /** Where each person on screen at `t` is (their face's box, in fractions
+   *  of the frame), from the analysed frames either side. */
+  boxesAt(t: number): { id: number; box: Box }[]
   /** Joins `from` into `into` (the user says they're the same person). */
   merge(from: number, into: number): void
 }
@@ -81,59 +99,39 @@ export interface AnalyzeProgress {
   people: number
 }
 
-// ---- Geometry ---------------------------------------------------------------------
+// ---- Models ------------------------------------------------------------------------
 
-interface Box {
-  x0: number
-  y0: number
-  x1: number
-  y1: number
+let models: Promise<{ video: FaceLandmarker; image: FaceLandmarker; embedder: ImageEmbedder | null }> | null = null
+let delegate: 'GPU' | 'CPU' = 'GPU'
+/** Dev tests only (a machine whose GPU is software): run the models on the
+ *  CPU. Before anything loads them. */
+export const runModelsOnCpu = () => void (delegate = 'CPU')
+/** The video editor's models: a landmarker tracking faces through a clip,
+ *  one looking at single frames and crops, and the identity embedder. */
+export function loadVideoModels() {
+  models ??= (async () => {
+    const [video, image] = await Promise.all([createLandmarker('VIDEO', MAX_FACES, delegate), createLandmarker('IMAGE', MAX_FACES, delegate)])
+    let embedder: ImageEmbedder | null = null
+    try {
+      embedder = await ImageEmbedder.createFromOptions(await visionFileset(), {
+        baseOptions: { modelAssetPath: EMBEDDER_URL, delegate },
+        runningMode: 'IMAGE',
+        l2Normalize: true,
+        quantize: false,
+      })
+    } catch {
+      // Without it, identity rests on face shape and on position over time.
+      embedder = null
+    }
+    return { video, image, embedder }
+  })()
+  return models
 }
 
-function boxOf(lm: Float32Array, W: number, H: number): Box {
-  let x0 = Infinity
-  let y0 = Infinity
-  let x1 = -Infinity
-  let y1 = -Infinity
-  for (let i = 0; i < 468; i++) {
-    const x = lm[i * 3] * W
-    const y = lm[i * 3 + 1] * H
-    if (x < x0) x0 = x
-    if (x > x1) x1 = x
-    if (y < y0) y0 = y
-    if (y > y1) y1 = y
-  }
-  return { x0, y0, x1, y1 }
-}
+/** Warm the models up ahead of time (e.g. when the editor opens). */
+export const preloadVideoModels = () => loadVideoModels().then(() => undefined)
 
-const area = (b: Box) => Math.max(0, b.x1 - b.x0) * Math.max(0, b.y1 - b.y0)
-function iou(a: Box, b: Box) {
-  const i = area({ x0: Math.max(a.x0, b.x0), y0: Math.max(a.y0, b.y0), x1: Math.min(a.x1, b.x1), y1: Math.min(a.y1, b.y1) })
-  return i / Math.max(1e-6, area(a) + area(b) - i)
-}
-const sizeOf = (b: Box) => Math.max(b.x1 - b.x0, b.y1 - b.y0)
-const centreOf = (b: Box) => ({ x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2 })
-const shift = (b: Box, dx: number, dy: number): Box => ({ x0: b.x0 + dx, y0: b.y0 + dy, x1: b.x1 + dx, y1: b.y1 + dy })
-
-function pack(lm: NormalizedLandmark[], eyes: EyeClosure | undefined, roi?: { x: number; y: number; w: number; h: number }): Float32Array {
-  const out = new Float32Array(FRAME)
-  out[STRIDE] = eyes?.r ?? 0
-  out[STRIDE + 1] = eyes?.l ?? 0
-  const n = Math.min(N_LM, lm.length)
-  for (let i = 0; i < n; i++) {
-    const p = lm[i]
-    out[i * 3] = roi ? roi.x + p.x * roi.w : p.x
-    out[i * 3 + 1] = roi ? roi.y + p.y * roi.h : p.y
-    out[i * 3 + 2] = roi ? p.z * roi.w : p.z
-  }
-  return out
-}
-
-function unpack(a: Float32Array): NormalizedLandmark[] {
-  const out: NormalizedLandmark[] = new Array(N_LM)
-  for (let i = 0; i < N_LM; i++) out[i] = { x: a[i * 3], y: a[i * 3 + 1], z: a[i * 3 + 2], visibility: 1 }
-  return withEyeClosure(out, { r: a[STRIDE], l: a[STRIDE + 1] })
-}
+// ---- Identity cues ------------------------------------------------------------------
 
 /** How squarely the face looks at the camera (1 frontal, 0 profile). */
 function frontal(lm: Float32Array) {
@@ -153,62 +151,13 @@ function signature(lm: Float32Array): Float32Array {
   return Float32Array.from(SIG_PAIRS.map(([a, b]) => d(a, b) / e))
 }
 
-// ---- Models ------------------------------------------------------------------------
-
-let models: Promise<{ video: FaceLandmarker; image: FaceLandmarker; embedder: ImageEmbedder | null }> | null = null
-function loadModels() {
-  models ??= (async () => {
-    const [video, image] = await Promise.all([createLandmarker('VIDEO', MAX_FACES), createLandmarker('IMAGE', 3)])
-    let embedder: ImageEmbedder | null = null
-    try {
-      embedder = await ImageEmbedder.createFromOptions(await visionFileset(), {
-        baseOptions: { modelAssetPath: EMBEDDER_URL, delegate: 'GPU' },
-        runningMode: 'IMAGE',
-        l2Normalize: true,
-        quantize: false,
-      })
-    } catch {
-      // Without it, identity rests on face shape and on position over time.
-      embedder = null
-    }
-    return { video, image, embedder }
-  })()
-  return models
-}
-
-/** Warm the models up ahead of time (e.g. when the editor opens). */
-export const preloadVideoModels = () => loadModels().then(() => undefined)
-
-const scratch = { roi: null as HTMLCanvasElement | null, face: null as HTMLCanvasElement | null }
-
-function crop(src: HTMLCanvasElement, r: { x: number; y: number; w: number; h: number }, max = 640) {
-  const c = (scratch.roi ??= document.createElement('canvas'))
-  const sw = r.w * src.width
-  const sh = r.h * src.height
-  const k = Math.min(1, max / Math.max(sw, sh))
-  const cw = Math.max(1, Math.round(sw * k))
-  const ch = Math.max(1, Math.round(sh * k))
-  if (c.width !== cw || c.height !== ch) {
-    c.width = cw
-    c.height = ch
-  }
-  c.getContext('2d')!.drawImage(src, r.x * src.width, r.y * src.height, sw, sh, 0, 0, cw, ch)
-  return c
-}
-
-/** A square region (fractions of the frame) of `side` px round (cx, cy). */
-function windowAt(cx: number, cy: number, side: number, W: number, H: number) {
-  const w = Math.min(1, side / W)
-  const h = Math.min(1, side / H)
-  return { x: Math.min(1 - w, Math.max(0, cx / W - w / 2)), y: Math.min(1 - h, Math.max(0, cy / H - h / 2)), w, h }
-}
-
+let faceCanvas: HTMLCanvasElement | null = null
 /** The face upright (eyes level), roughly a head and shoulders wide: hair
  *  and outline say as much about who someone is as the features do. */
 function alignedFace(frame: HTMLCanvasElement, lm: Float32Array) {
   const W = frame.width
   const H = frame.height
-  const c = (scratch.face ??= document.createElement('canvas'))
+  const c = (faceCanvas ??= document.createElement('canvas'))
   c.width = c.height = 160
   const g = c.getContext('2d')!
   const lx = lm[33 * 3] * W
@@ -232,19 +181,147 @@ function alignedFace(frame: HTMLCanvasElement, lm: Float32Array) {
   return c
 }
 
+/** A square crop round the face (head and some shoulder), and the face's
+ *  landmarks in it. */
+function bestView(frame: HTMLCanvasElement, lm: Float32Array, into: HTMLCanvasElement | null) {
+  const W = frame.width
+  const H = frame.height
+  const b = boxOf(lm, W, H)
+  const side = Math.max(8, sizeOf(b) * 2.3)
+  const c0 = centreOf(b)
+  const x0 = c0.x - side / 2
+  const y0 = c0.y - side / 2 - side * 0.04
+  const px = Math.min(BEST_PX, Math.round(side))
+  const c = into ?? document.createElement('canvas')
+  c.width = c.height = px
+  const g = c.getContext('2d')!
+  g.fillStyle = '#3a3d42'
+  g.fillRect(0, 0, px, px)
+  g.drawImage(frame, x0, y0, side, side, 0, 0, px, px)
+  const out = new Float32Array(lm.length)
+  out.set(lm)
+  for (let i = 0; i < 478; i++) {
+    out[i * 3] = (lm[i * 3] * W - x0) / side
+    out[i * 3 + 1] = (lm[i * 3 + 1] * H - y0) / side
+    out[i * 3 + 2] = (lm[i * 3 + 2] * W) / side
+  }
+  return { canvas: c, lm: out }
+}
+
+function cosine(a: Float32Array, b: Float32Array) {
+  let d = 0
+  let na = 0
+  let nb = 0
+  for (let i = 0; i < a.length; i++) {
+    d += a[i] * b[i]
+    na += a[i] * a[i]
+    nb += b[i] * b[i]
+  }
+  return d / Math.max(1e-9, Math.sqrt(na * nb))
+}
+
+/** Median signature: robust to the odd frame caught mid-blink or mid-turn. */
+function medianSig(vs: Float32Array[]): Float32Array | null {
+  if (!vs.length) return null
+  const out = new Float32Array(vs[0].length)
+  for (let i = 0; i < out.length; i++) {
+    const col = vs.map((v) => v[i]).sort((a, b) => a - b)
+    out[i] = col[col.length >> 1]
+  }
+  return out
+}
+
+// ---- Timelines ---------------------------------------------------------------------
+
+/** Where a face is, frame after frame: analysed-frame indices and boxes
+ *  (fractions of the frame), in growing typed arrays. */
+class Timeline {
+  idx = new Int32Array(64)
+  box = new Float32Array(256)
+  n = 0
+
+  push(i: number, b: Box) {
+    if (this.n === this.idx.length) {
+      const idx = new Int32Array(this.n * 2)
+      idx.set(this.idx)
+      this.idx = idx
+      const box = new Float32Array(this.n * 8)
+      box.set(this.box)
+      this.box = box
+    }
+    this.idx[this.n] = i
+    this.box.set([b.x0, b.y0, b.x1, b.y1], this.n * 4)
+    this.n++
+  }
+
+  boxAt(k: number): Box {
+    const o = k * 4
+    return { x0: this.box[o], y0: this.box[o + 1], x1: this.box[o + 2], y1: this.box[o + 3] }
+  }
+
+  get first() {
+    return this.idx[0]
+  }
+  get last() {
+    return this.idx[this.n - 1]
+  }
+
+  /** Frames both timelines have. */
+  shared(o: Timeline) {
+    if (this.last < o.first || o.last < this.first) return 0
+    let i = 0
+    let j = 0
+    let n = 0
+    while (i < this.n && j < o.n) {
+      const a = this.idx[i]
+      const b = o.idx[j]
+      if (a === b) {
+        n++
+        i++
+        j++
+      } else if (a < b) i++
+      else j++
+    }
+    return n
+  }
+
+  static merge(parts: Timeline[]): Timeline {
+    const out = new Timeline()
+    parts = parts.filter((p) => p.n).sort((a, b) => a.first - b.first)
+    // One after another (a person's tracks never share a frame, as a rule):
+    // end to end. A long clip has thousands of them.
+    if (parts.every((p, i) => i === 0 || p.first > parts[i - 1].last)) {
+      for (const p of parts) for (let k = 0; k < p.n; k++) out.push(p.idx[k], p.boxAt(k))
+      return out
+    }
+    const at = parts.map(() => 0)
+    for (;;) {
+      let pick = -1
+      for (let p = 0; p < parts.length; p++) if (at[p] < parts[p].n && (pick < 0 || parts[p].idx[at[p]] < parts[pick].idx[at[pick]])) pick = p
+      if (pick < 0) break
+      const k = at[pick]++
+      // (one frame twice — two merged people both there: keep the first)
+      if (out.n && out.idx[out.n - 1] === parts[pick].idx[k]) continue
+      out.push(parts[pick].idx[k], parts[pick].boxAt(k))
+    }
+    return out
+  }
+}
+
 // ---- Tracks ------------------------------------------------------------------------
 
 interface Track {
   id: number
-  first: number
-  last: number
-  lm: Map<number, Float32Array>
+  tl: Timeline
+  /** Last box, px of the working frame, and its velocity per analysed frame. */
   box: Box
   vx: number
   vy: number
-  embeds: Float32Array[]
+  embSum: Float32Array | null
+  embN: number
   sigs: Float32Array[]
-  best: { score: number; frame: HTMLCanvasElement | null; lm: Float32Array | null }
+  sigSeen: number
+  best: { score: number; canvas: HTMLCanvasElement | null; url: string | null; lm: Float32Array | null }
 }
 
 interface Det {
@@ -261,99 +338,225 @@ function dedupe(dets: Det[]): Det[] {
   return out
 }
 
-function snapshot(frame: HTMLCanvasElement) {
-  const k = Math.min(1, 640 / Math.max(frame.width, frame.height))
-  const c = document.createElement('canvas')
-  c.width = Math.round(frame.width * k)
-  c.height = Math.round(frame.height * k)
-  c.getContext('2d')!.drawImage(frame, 0, 0, c.width, c.height)
-  return c
-}
+// ---- The pass --------------------------------------------------------------------
 
-function cosine(a: Float32Array, b: Float32Array) {
-  let d = 0
-  let na = 0
-  let nb = 0
-  for (let i = 0; i < a.length; i++) {
-    d += a[i] * b[i]
-    na += a[i] * a[i]
-    nb += b[i] * b[i]
-  }
-  return d / Math.max(1e-9, Math.sqrt(na * nb))
-}
+/** Analyses `file`. Rejects with an AbortError if `signal` aborts. */
+export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) => void, signal?: AbortSignal): Promise<VideoAnalysis> {
+  const { video: vLm, image: iLm, embedder } = await loadVideoModels()
+  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
+  try {
+    const track = await input.getPrimaryVideoTrack()
+    if (!track) throw new Error('This file has no video.')
+    if (!(await track.canDecode())) throw new Error("This browser can't decode this video's format.")
+    const duration = await input.computeDuration()
+    if (duration > MAX_DURATION_S + 1) throw new Error(`Videos up to ${MAX_DURATION_S / 3600} hours can be edited.`)
+    const dw = track.displayWidth
+    const dh = track.displayHeight
+    const k = Math.min(1, WORK_MAX / Math.max(dw, dh))
+    const W = Math.max(2, Math.round(dw * k))
+    const H = Math.max(2, Math.round(dh * k))
+    const fps = (await track.computePacketStats(90).catch(() => null))?.averagePacketRate || 30
+    const step = Math.max(1, Math.round(fps / (duration > LONG_CLIP_S ? RATE_LONG : RATE_SHORT)))
+    const rate = fps / step
+    const gapFrames = Math.max(3, Math.round(TRACK_GAP_S * rate))
+    const tileEvery = Math.max(1, Math.min(TILE_EVERY, Math.round(TILE_EVERY_S * rate)))
+    const embedEvery = Math.max(1, Math.min(EMBED_EVERY, Math.round(EMBED_EVERY_S * rate)))
+    const minFrames = Math.max(3, Math.round(rate * 0.15))
 
-function mean(vs: Float32Array[]): Float32Array | null {
-  if (!vs.length) return null
-  const out = new Float32Array(vs[0].length)
-  for (const v of vs) for (let i = 0; i < v.length; i++) out[i] += v[i]
-  for (let i = 0; i < out.length; i++) out[i] /= vs.length
-  return out
-}
-
-/** Median signature: robust to the odd frame caught mid-blink or mid-turn. */
-function medianSig(vs: Float32Array[]): Float32Array | null {
-  if (!vs.length) return null
-  const out = new Float32Array(vs[0].length)
-  for (let i = 0; i < out.length; i++) {
-    const col = vs.map((v) => v[i]).sort((a, b) => a - b)
-    out[i] = col[col.length >> 1]
-  }
-  return out
-}
-
-// ---- Smoothing ----------------------------------------------------------------------
-
-/** One Euro filter over one coordinate series (in place into `out`):
- *  heavy smoothing while still, light while moving fast. */
-function oneEuro(xs: Float32Array, ts: Float64Array, out: Float32Array, reverse: boolean, minCutoff: number, beta: number) {
-  const n = xs.length
-  const alpha = (cutoff: number, dt: number) => 1 / (1 + 1 / (2 * Math.PI * cutoff * dt))
-  let prev = 0
-  let dPrev = 0
-  for (let k = 0; k < n; k++) {
-    const i = reverse ? n - 1 - k : k
-    const x = xs[i]
-    if (k === 0) {
-      prev = x
-      dPrev = 0
-      out[i] = x
-      continue
+    const frame = document.createElement('canvas')
+    frame.width = W
+    frame.height = H
+    const fctx = frame.getContext('2d')!
+    const times: number[] = []
+    const live: Track[] = []
+    const done: Track[] = []
+    let nextId = 1
+    let lastTs = -Infinity
+    let srcIdx = 0
+    // (a fixed sequence: the same clip is always analysed the same way)
+    let seed = 0x9e3779b9
+    const random = () => {
+      seed ^= seed << 13
+      seed ^= seed >>> 17
+      seed ^= seed << 5
+      return (seed >>> 0) / 4294967296
     }
-    const j = reverse ? i + 1 : i - 1
-    const dt = Math.max(1e-3, Math.abs(ts[i] - ts[j]))
-    const dx = (x - prev) / dt
-    const ad = alpha(1, dt)
-    dPrev = dPrev + ad * (dx - dPrev)
-    const a = alpha(minCutoff + beta * Math.abs(dPrev), dt)
-    prev = prev + a * (x - prev)
-    out[i] = prev
-  }
-}
 
-/** Zero-lag smoothing of a run of frames: the forward and backward passes
- *  lag in opposite directions, so their average doesn't. */
-function smoothRun(frames: Float32Array[], ts: Float64Array) {
-  const n = frames.length
-  if (n < 3) return frames
-  const series = new Float32Array(n)
-  const fwd = new Float32Array(n)
-  const bwd = new Float32Array(n)
-  const out = frames.map(() => new Float32Array(FRAME))
-  for (let c = 0; c < FRAME; c++) {
-    for (let i = 0; i < n; i++) series[i] = frames[i][c]
-    // Eye closure as found: a blink is over in a few frames, and smoothing
-    // would wash it out.
-    if (c >= STRIDE) {
-      for (let i = 0; i < n; i++) out[i][c] = series[i]
-      continue
+    const detectIn = (r: Region): Det[] => {
+      const res = iLm.detect(cropOf(frame, r))
+      return res.faceLandmarks.map((lm, i) => {
+        const a = pack(lm, closureFrom(res.faceBlendshapes, i), r)
+        return { lm: a, box: boxOf(a, W, H) }
+      })
     }
-    // z is noisier and matters less: smoothed harder.
-    const isZ = c % 3 === 2
-    oneEuro(series, ts, fwd, false, isZ ? 0.8 : 1.4, isZ ? 3 : 9)
-    oneEuro(series, ts, bwd, true, isZ ? 0.8 : 1.4, isZ ? 3 : 9)
-    for (let i = 0; i < n; i++) out[i][c] = (fwd[i] + bwd[i]) / 2
+    // A track that's ended: the noise (a "face" for a handful of frames)
+    // goes; the rest keep their best view as a small JPEG, not a canvas.
+    // A running count of people for the progress line: a track that ends
+    // looking like someone already counted (someone who left and came
+    // back) isn't counted again. (Only a guess; who is who is settled
+    // after the pass.)
+    const counted: Float32Array[] = []
+    const knownFace = (t: Track) => !!t.embSum && counted.some((c) => cosine(c, t.embSum!) > 0.82)
+    let faceless = 0
+    const retire = (t: Track) => {
+      if (t.tl.n < minFrames || !t.best.canvas) return
+      t.best.url = t.best.canvas.toDataURL('image/jpeg', 0.9)
+      t.best.canvas = null
+      done.push(t)
+      if (t.embSum && !knownFace(t)) counted.push(t.embSum)
+      if (!t.embSum) faceless++
+    }
+
+    const sink = new VideoSampleSink(track)
+    let breathed = performance.now()
+    for await (const sample of sink.samples()) {
+      let use = false
+      let ts = 0
+      try {
+        if (signal?.aborted) throw new DOMException('Canceled', 'AbortError')
+        ts = sample.timestamp
+        if (ts <= lastTs) continue
+        lastTs = ts
+        use = srcIdx++ % step === 0
+        if (use) sample.draw(fctx, 0, 0, W, H)
+      } finally {
+        sample.close()
+      }
+      if (!use) continue
+      const fi = times.length
+      times.push(ts)
+
+      // 1. Whole frame.
+      const vres = vLm.detectForVideo(frame, stamp(vLm, ts))
+      let dets: Det[] = vres.faceLandmarks.map((lm, i) => {
+        const a = pack(lm, closureFrom(vres.faceBlendshapes, i))
+        return { lm: a, box: boxOf(a, W, H) }
+      })
+      // Small faces: tiles, now and then (and on the first frame).
+      if (fi % tileEvery === 0) {
+        const m = Math.min(W, H)
+        const side = m * 0.62
+        const tiles = [
+          windowAt(W * 0.3, H * 0.3, side, W, H),
+          windowAt(W * 0.7, H * 0.3, side, W, H),
+          windowAt(W * 0.3, H * 0.7, side, W, H),
+          windowAt(W * 0.7, H * 0.7, side, W, H),
+          windowAt(W * 0.5, H * 0.45, side, W, H),
+        ]
+        for (const r of tiles) dets.push(...detectIn(r))
+      }
+      dets = dedupe(dets)
+
+      // 2. Associate with live tracks (best fit first).
+      const pairs: [number, number, number][] = []
+      live.forEach((t, ti) => {
+        const pred = shift(t.box, t.vx * (fi - t.tl.last), t.vy * (fi - t.tl.last))
+        dets.forEach((d, di) => {
+          const s = fitScore(pred, d.box)
+          if (s > 0) pairs.push([s, ti, di])
+        })
+      })
+      pairs.sort((a, b) => b[0] - a[0])
+      const tUsed = new Set<number>()
+      const dUsed = new Set<number>()
+      const matched: [Track, Det][] = []
+      for (const [, ti, di] of pairs) {
+        if (tUsed.has(ti) || dUsed.has(di)) continue
+        tUsed.add(ti)
+        dUsed.add(di)
+        matched.push([live[ti], dets[di]])
+      }
+      // A live track the whole frame lost: look again around where it's going.
+      live.forEach((t, ti) => {
+        if (tUsed.has(ti) || fi - t.tl.last > gapFrames) return
+        const pred = shift(t.box, t.vx * (fi - t.tl.last), t.vy * (fi - t.tl.last))
+        const c = centreOf(pred)
+        const r = windowAt(c.x, c.y, Math.min(Math.min(W, H), Math.max(sizeOf(pred) * 2.6, 96)), W, H)
+        const found = detectIn(r).filter((d) => !dets.some((o) => iou(o.box, d.box) > 0.35))
+        let best: Det | null = null
+        let bo = 0.12
+        for (const d of found) {
+          const o = iou(pred, d.box)
+          if (o > bo) {
+            bo = o
+            best = d
+          }
+        }
+        if (best) {
+          tUsed.add(ti)
+          matched.push([t, best])
+        }
+      })
+
+      for (const [t, d] of matched) {
+        const dtf = Math.max(1, fi - t.tl.last)
+        const c0 = centreOf(t.box)
+        const c1 = centreOf(d.box)
+        // Velocity per frame, eased so one jumpy detection doesn't fling it.
+        t.vx = t.vx * 0.5 + ((c1.x - c0.x) / dtf) * 0.5
+        t.vy = t.vy * 0.5 + ((c1.y - c0.y) / dtf) * 0.5
+        t.box = d.box
+        t.tl.push(fi, { x0: d.box.x0 / W, y0: d.box.y0 / H, x1: d.box.x1 / W, y1: d.box.y1 / H })
+      }
+      // New tracks for the rest.
+      dets.forEach((d, di) => {
+        if (dUsed.has(di) || matched.some(([, m]) => m === d)) return
+        if (sizeOf(d.box) < 14) return
+        const tl = new Timeline()
+        tl.push(fi, { x0: d.box.x0 / W, y0: d.box.y0 / H, x1: d.box.x1 / W, y1: d.box.y1 / H })
+        const t: Track = { id: nextId++, tl, box: d.box, vx: 0, vy: 0, embSum: null, embN: 0, sigs: [], sigSeen: 0, best: { score: 0, canvas: null, url: null, lm: null } }
+        live.push(t)
+        matched.push([t, d])
+      })
+
+      // 3. Appearance, shape and best view, for tracks seen this frame.
+      for (const [t, d] of matched) {
+        const fr = frontal(d.lm)
+        const sz = sizeOf(d.box)
+        if (fr > 0.55) {
+          // (a fair sample of them, however long the track)
+          const s = signature(d.lm)
+          const seen = t.sigSeen++
+          if (t.sigs.length < MAX_SIGS) t.sigs.push(s)
+          else {
+            const j = Math.floor(random() * (seen + 1))
+            if (j < MAX_SIGS) t.sigs[j] = s
+          }
+        }
+        if (embedder && fr > 0.45 && sz > 28 && (t.embN === 0 || (fi - t.tl.first) % embedEvery === 0)) {
+          const e = embedder.embed(alignedFace(frame, d.lm)).embeddings[0]?.floatEmbedding
+          if (e) {
+            t.embSum ??= new Float32Array(e.length)
+            for (let i = 0; i < e.length; i++) t.embSum[i] += e[i]
+            t.embN++
+          }
+        }
+        const score = sz * (0.35 + fr)
+        if (score > t.best.score * 1.15) {
+          const v = bestView(frame, d.lm, t.best.canvas)
+          t.best = { score, canvas: v.canvas, url: null, lm: v.lm }
+        }
+      }
+
+      // Retire tracks gone too long.
+      for (let i = live.length - 1; i >= 0; i--) if (fi - live[i].tl.last > gapFrames) retire(live.splice(i, 1)[0])
+      if (fi % 15 === 0) onProgress({ progress: duration > 0 ? Math.min(0.99, ts / duration) : 0, people: faceless + counted.length + live.filter((t) => t.tl.n >= minFrames && !knownFace(t)).length })
+      // Let the page breathe now and then (a task, not a timer: timers in a
+      // hidden tab are slowed to a crawl).
+      if (performance.now() - breathed > 50) {
+        await nextTask()
+        breathed = performance.now()
+      }
+    }
+    for (const t of live.splice(0)) retire(t)
+
+    if (!times.length) throw new Error("Couldn't read any frames from this video.")
+    const T = Float64Array.from(times)
+    const people = groupIntoPeople(done, T, W, H)
+    return await makeAnalysis(people, T, W, H, duration, fps, step / fps, tileEvery)
+  } finally {
+    input.dispose()
   }
-  return out
 }
 
 // ---- People -----------------------------------------------------------------------
@@ -361,248 +564,22 @@ function smoothRun(frames: Float32Array[], ts: Float64Array) {
 interface Person {
   id: number
   tracks: Track[]
-  /** Smoothed landmarks by frame index (absent where off screen). */
-  frames: (Float32Array | undefined)[]
-}
-
-/** Builds each person's smoothed, gap-filled mesh from their tracks. */
-function buildFrames(p: Person, times: Float64Array) {
-  const raw: (Float32Array | undefined)[] = new Array(times.length)
-  for (const t of p.tracks) for (const [i, lm] of t.lm) raw[i] = lm
-  // Fill short gaps by interpolation.
-  let lastIdx = -1
-  for (let i = 0; i < raw.length; i++) {
-    if (!raw[i]) continue
-    if (lastIdx >= 0 && i - lastIdx > 1 && times[i] - times[lastIdx] <= FILL_GAP_S) {
-      const a = raw[lastIdx]!
-      const b = raw[i]!
-      for (let k = lastIdx + 1; k < i; k++) {
-        const f = (times[k] - times[lastIdx]) / (times[i] - times[lastIdx])
-        const m = new Float32Array(FRAME)
-        for (let c = 0; c < FRAME; c++) m[c] = a[c] + (b[c] - a[c]) * f
-        raw[k] = m
-      }
-    }
-    lastIdx = i
-  }
-  // Smooth each contiguous run.
-  const out: (Float32Array | undefined)[] = new Array(times.length)
-  let i = 0
-  while (i < raw.length) {
-    if (!raw[i]) {
-      i++
-      continue
-    }
-    let j = i
-    while (j < raw.length && raw[j]) j++
-    const run = raw.slice(i, j) as Float32Array[]
-    const sm = smoothRun(run, times.slice(i, j))
-    for (let k = 0; k < sm.length; k++) out[i + k] = sm[k]
-    i = j
-  }
-  p.frames = out
-}
-
-function spansOf(p: Person, times: Float64Array): [number, number][] {
-  const spans: [number, number][] = []
-  let start = -1
-  for (let i = 0; i <= p.frames.length; i++) {
-    const on = i < p.frames.length && !!p.frames[i]
-    if (on && start < 0) start = i
-    if (!on && start >= 0) {
-      spans.push([times[start], times[i - 1]])
-      start = -1
-    }
-  }
-  return spans
-}
-
-function faceThumb(frame: HTMLCanvasElement, lm: Float32Array) {
-  const W = frame.width
-  const H = frame.height
-  const b = boxOf(lm, W, H)
-  const side = sizeOf(b) * 1.45
-  const c = centreOf(b)
-  const out = document.createElement('canvas')
-  out.width = out.height = 112
-  out.getContext('2d')!.drawImage(frame, c.x - side / 2, c.y - side / 2 - side * 0.04, side, side, 0, 0, 112, 112)
-  return out.toDataURL('image/jpeg', 0.85)
-}
-
-// ---- The pass --------------------------------------------------------------------
-
-/** Analyses `file`. Rejects with an AbortError if `signal` aborts. */
-export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) => void, signal?: AbortSignal): Promise<VideoAnalysis> {
-  const { video: vLm, image: iLm, embedder } = await loadModels()
-  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
-  const track = await input.getPrimaryVideoTrack()
-  if (!track) throw new Error('This file has no video.')
-  if (!(await track.canDecode())) throw new Error("This browser can't decode this video's format.")
-  const duration = await input.computeDuration()
-  if (duration > MAX_DURATION_S + 1) throw new Error(`Videos up to ${MAX_DURATION_S / 60} minutes can be edited.`)
-  const dw = track.displayWidth
-  const dh = track.displayHeight
-  const k = Math.min(1, WORK_MAX / Math.max(dw, dh))
-  const W = Math.max(2, Math.round(dw * k))
-  const H = Math.max(2, Math.round(dh * k))
-  const sink = new CanvasSink(track, { width: W, height: H, fit: 'fill', poolSize: 2 })
-
-  const times: number[] = []
-  const live: Track[] = []
-  const done: Track[] = []
-  let nextId = 1
-  let lastTs = -1
-  // Start the VIDEO-mode clock beyond anything a previous clip used.
-  const clockBase = performance.now()
-  let frameIdx = 0
-  const fps = (await track.computePacketStats(60).catch(() => null))?.averagePacketRate || 30
-  const gapFrames = Math.max(3, Math.round(TRACK_GAP_S * fps))
-
-  const detectIn = (frame: HTMLCanvasElement, r: { x: number; y: number; w: number; h: number }): Det[] => {
-    const c = crop(frame, r)
-    const res = iLm.detect(c)
-    return res.faceLandmarks.map((lm, i) => {
-      const a = pack(lm, closureFrom(res.faceBlendshapes, i), r)
-      return { lm: a, box: boxOf(a, W, H) }
-    })
-  }
-
-  for await (const { canvas, timestamp } of sink.canvases()) {
-    if (signal?.aborted) throw new DOMException('Canceled', 'AbortError')
-    const frame = canvas as HTMLCanvasElement
-    if (timestamp <= lastTs) continue
-    lastTs = timestamp
-    const fi = frameIdx++
-    times.push(timestamp)
-    const ms = clockBase + timestamp * 1000
-
-    // 1. Whole frame.
-    const vres = vLm.detectForVideo(frame, ms)
-    let dets: Det[] = vres.faceLandmarks.map((lm, i) => {
-      const a = pack(lm, closureFrom(vres.faceBlendshapes, i))
-      return { lm: a, box: boxOf(a, W, H) }
-    })
-    // Small faces: tiles, now and then (and on the first frame).
-    if (fi % TILE_EVERY === 0) {
-      const m = Math.min(W, H)
-      const side = m * 0.62
-      const tiles = [
-        windowAt(W * 0.3, H * 0.3, side, W, H),
-        windowAt(W * 0.7, H * 0.3, side, W, H),
-        windowAt(W * 0.3, H * 0.7, side, W, H),
-        windowAt(W * 0.7, H * 0.7, side, W, H),
-        windowAt(W * 0.5, H * 0.45, side, W, H),
-      ]
-      for (const r of tiles) dets.push(...detectIn(frame, r))
-    }
-    dets = dedupe(dets)
-
-    // 2. Associate with live tracks (best overlap first).
-    const pairs: [number, number, number][] = []
-    live.forEach((t, ti) => {
-      const pred = shift(t.box, t.vx, t.vy)
-      dets.forEach((d, di) => {
-        const o = iou(pred, d.box)
-        const cd = Math.hypot(centreOf(pred).x - centreOf(d.box).x, centreOf(pred).y - centreOf(d.box).y) / Math.max(1, sizeOf(pred))
-        const score = o > 0.15 ? o : cd < 0.5 ? 0.15 * (1 - cd) : 0
-        if (score > 0) pairs.push([score, ti, di])
-      })
-    })
-    pairs.sort((a, b) => b[0] - a[0])
-    const tUsed = new Set<number>()
-    const dUsed = new Set<number>()
-    const matched: [Track, Det][] = []
-    for (const [, ti, di] of pairs) {
-      if (tUsed.has(ti) || dUsed.has(di)) continue
-      tUsed.add(ti)
-      dUsed.add(di)
-      matched.push([live[ti], dets[di]])
-    }
-    // A live track the whole frame lost: look again around where it's going.
-    live.forEach((t, ti) => {
-      if (tUsed.has(ti) || fi - t.last > gapFrames) return
-      const pred = shift(t.box, t.vx * (fi - t.last), t.vy * (fi - t.last))
-      const c = centreOf(pred)
-      const r = windowAt(c.x, c.y, Math.min(Math.min(W, H), Math.max(sizeOf(pred) * 2.6, 96)), W, H)
-      const found = detectIn(frame, r).filter((d) => !dets.some((o) => iou(o.box, d.box) > 0.35))
-      let best: Det | null = null
-      let bo = 0.12
-      for (const d of found) {
-        const o = iou(pred, d.box)
-        if (o > bo) {
-          bo = o
-          best = d
-        }
-      }
-      if (best) {
-        tUsed.add(ti)
-        matched.push([t, best])
-      }
-    })
-
-    for (const [t, d] of matched) {
-      const dtf = Math.max(1, fi - t.last)
-      const c0 = centreOf(t.box)
-      const c1 = centreOf(d.box)
-      // Velocity per frame, eased so one jumpy detection doesn't fling it.
-      t.vx = t.vx * 0.5 + ((c1.x - c0.x) / dtf) * 0.5
-      t.vy = t.vy * 0.5 + ((c1.y - c0.y) / dtf) * 0.5
-      t.box = d.box
-      t.last = fi
-      t.lm.set(fi, d.lm)
-    }
-    // New tracks for the rest.
-    dets.forEach((d, di) => {
-      if (dUsed.has(di) || matched.some(([, m]) => m === d)) return
-      if (sizeOf(d.box) < 14) return
-      const t: Track = { id: nextId++, first: fi, last: fi, lm: new Map([[fi, d.lm]]), box: d.box, vx: 0, vy: 0, embeds: [], sigs: [], best: { score: 0, frame: null, lm: null } }
-      live.push(t)
-      matched.push([t, d])
-    })
-
-    // 3. Appearance, shape and best view, for tracks seen this frame.
-    for (const [t, d] of matched) {
-      const fr = frontal(d.lm)
-      const sz = sizeOf(d.box)
-      if (fr > 0.55) t.sigs.push(signature(d.lm))
-      if (embedder && fr > 0.45 && sz > 28 && (t.embeds.length === 0 || (fi - t.first) % EMBED_EVERY === 0)) {
-        const e = embedder.embed(alignedFace(frame, d.lm)).embeddings[0]?.floatEmbedding
-        if (e) t.embeds.push(Float32Array.from(e))
-      }
-      const score = sz * (0.35 + fr)
-      if (score > t.best.score * 1.15) t.best = { score, frame: snapshot(frame), lm: d.lm }
-    }
-
-    // Retire tracks gone too long.
-    for (let i = live.length - 1; i >= 0; i--) if (fi - live[i].last > gapFrames) done.push(...live.splice(i, 1))
-    onProgress({ progress: duration > 0 ? Math.min(0.99, timestamp / duration) : 0, people: live.length + done.filter((t) => t.lm.size > 8).length })
-    // Let the page breathe now and then.
-    if (fi % 6 === 0) await new Promise((r) => setTimeout(r, 0))
-  }
-  done.push(...live)
-  input.dispose()
-
-  if (!times.length) throw new Error("Couldn't read any frames from this video.")
-  const T = Float64Array.from(times)
-  // Noise: a "face" seen for a handful of frames and nowhere near the camera.
-  const tracks = done.filter((t) => t.lm.size >= Math.max(4, Math.round(fps * 0.15)) && t.best.frame)
-  const people = groupIntoPeople(tracks, T, W, H)
-  for (const p of people) buildFrames(p, T)
-  return makeAnalysis(people, T, W, H, duration)
+  /** All their tracks' boxes, in frame order. */
+  tl: Timeline
 }
 
 /** Joins tracks into people. */
 function groupIntoPeople(tracks: Track[], times: Float64Array, W: number, H: number): Person[] {
-  const info = tracks.map((t) => ({ t, emb: mean(t.embeds), sig: medianSig(t.sigs) }))
+  const info = tracks.map((t) => ({ t, emb: t.embSum && t.embN ? t.embSum.map((v) => v / t.embN) : null, sig: medianSig(t.sigs) }))
   // Longest first: the best-known faces anchor the people.
-  info.sort((a, b) => b.t.lm.size - a.t.lm.size)
+  info.sort((a, b) => b.t.tl.n - a.t.tl.n)
   const people: { p: Person; embs: Float32Array[]; sigs: Float32Array[] }[] = []
   for (const it of info) {
     let best: (typeof people)[number] | null = null
     let bestScore = 0
     for (const cand of people) {
       // Never two tracks of one person in the same frame.
-      if (cand.p.tracks.some((o) => overlap(o, it.t) > 2)) continue
+      if (cand.p.tracks.some((o) => o.tl.shared(it.t.tl) > 2)) continue
       const s = sameness(cand, it, times, W, H)
       if (s > bestScore) {
         bestScore = s
@@ -611,24 +588,18 @@ function groupIntoPeople(tracks: Track[], times: Float64Array, W: number, H: num
     }
     if (best && bestScore >= 0.5) {
       best.p.tracks.push(it.t)
-      if (it.emb) best.embs.push(it.emb)
-      if (it.sig) best.sigs.push(it.sig)
-    } else people.push({ p: { id: 0, tracks: [it.t], frames: [] }, embs: it.emb ? [it.emb] : [], sigs: it.sig ? [it.sig] : [] })
+      // (a sample is enough: tracks come longest first, so these are the
+      // clearest looks at them)
+      if (it.emb && best.embs.length < MAX_LOOKS) best.embs.push(it.emb)
+      if (it.sig && best.sigs.length < MAX_LOOKS) best.sigs.push(it.sig)
+    } else people.push({ p: { id: 0, tracks: [it.t], tl: it.t.tl }, embs: it.emb ? [it.emb] : [], sigs: it.sig ? [it.sig] : [] })
   }
-  // Number people by when they first appear, largest first among ties.
+  // Number people by when they first appear.
   const out = people.map((x) => x.p)
-  out.sort((a, b) => Math.min(...a.tracks.map((t) => t.first)) - Math.min(...b.tracks.map((t) => t.first)))
+  for (const p of out) p.tl = Timeline.merge(p.tracks.map((t) => t.tl))
+  out.sort((a, b) => a.tl.first - b.tl.first)
   out.forEach((p, i) => (p.id = i + 1))
   return out
-}
-
-function overlap(a: Track, b: Track) {
-  const lo = Math.max(a.first, b.first)
-  const hi = Math.min(a.last, b.last)
-  if (hi < lo) return 0
-  let n = 0
-  for (let i = lo; i <= hi; i++) if (a.lm.has(i) && b.lm.has(i)) n++
-  return n
 }
 
 /** 0..1: how sure we are that track `it` is person `cand`. Appearance
@@ -652,12 +623,13 @@ function sameness(cand: { p: Person; embs: Float32Array[]; sigs: Float32Array[] 
   }
   // Continuity: the end of a track of theirs just before this one began.
   let cont = 0
+  const px = (b: Box): Box => ({ x0: b.x0 * W, y0: b.y0 * H, x1: b.x1 * W, y1: b.y1 * H })
   for (const o of cand.p.tracks) {
-    if (o.last >= it.t.first) continue
-    const dt = times[it.t.first] - times[o.last]
+    if (o.tl.last >= it.t.tl.first) continue
+    const dt = times[it.t.tl.first] - times[o.tl.last]
     if (dt > 2.5) continue
-    const a = boxOf(o.lm.get(o.last)!, W, H)
-    const b = boxOf(it.t.lm.get(it.t.first)!, W, H)
+    const a = px(o.tl.boxAt(o.tl.n - 1))
+    const b = px(it.t.tl.boxAt(0))
     const dc = Math.hypot(centreOf(a).x - centreOf(b).x, centreOf(a).y - centreOf(b).y) / Math.max(1, sizeOf(a))
     cont = Math.max(cont, Math.max(0, 1 - dc / 1.5) * Math.max(0, 1 - dt / 2.5))
   }
@@ -666,63 +638,116 @@ function sameness(cand: { p: Person; embs: Float32Array[]; sigs: Float32Array[] 
   return wsum ? s / wsum : 0
 }
 
-function makeAnalysis(people: Person[], times: Float64Array, W: number, H: number, duration: number): VideoAnalysis {
+function faceThumb(frame: HTMLCanvasElement, lm: Float32Array) {
+  const W = frame.width
+  const H = frame.height
+  const b = boxOf(lm, W, H)
+  const side = sizeOf(b) * 1.45
+  const c = centreOf(b)
+  const out = document.createElement('canvas')
+  out.width = out.height = 112
+  out.getContext('2d')!.drawImage(frame, c.x - side / 2, c.y - side / 2 - side * 0.04, side, side, 0, 0, 112, 112)
+  return out.toDataURL('image/jpeg', 0.85)
+}
+
+function loadCanvas(url: string): Promise<HTMLCanvasElement> {
+  return new Promise((resolve, reject) => {
+    const im = new Image()
+    im.onload = () => {
+      const c = document.createElement('canvas')
+      c.width = im.naturalWidth
+      c.height = im.naturalHeight
+      c.getContext('2d')!.drawImage(im, 0, 0)
+      resolve(c)
+    }
+    im.onerror = () => reject(new Error('Bad face picture'))
+    im.src = url
+  })
+}
+
+async function makeAnalysis(people: Person[], times: Float64Array, W: number, H: number, duration: number, fps: number, interval: number, tileEvery: number): Promise<VideoAnalysis> {
   const byId = new Map(people.map((p) => [p.id, p]))
+  // A person is on screen this far either side of an analysed frame they're
+  // in, and across gaps up to FILL_GAP_S. And they're looked for a little
+  // before they were first seen: a small face is only found by the tile
+  // scan, every `tileEvery` analysed frames, so it may have been there for
+  // up to that long already.
+  const reach = interval * 0.75
+  const lead = Math.max(reach, tileEvery * interval)
+  const bridge = FILL_GAP_S + interval
+
+  const bestOf = (p: Person) => p.tracks.reduce((a, b) => (b.best.score > a.best.score ? b : a))
+  // Each person's clearest view, back from its JPEG. (Merging two people
+  // keeps the better of their two, so these are all that's ever needed.)
+  const views = new Map<Track, HTMLCanvasElement>()
+  await Promise.all(people.map(async (p) => views.set(bestOf(p), await loadCanvas(bestOf(p).best.url!))))
+  const spansOf = (p: Person): [number, number][] => {
+    const spans: [number, number][] = []
+    for (let k = 0; k < p.tl.n; k++) {
+      const t = times[p.tl.idx[k]]
+      const last = spans[spans.length - 1]
+      if (last && t - last[1] <= bridge) last[1] = t
+      else spans.push([t, t])
+    }
+    return spans.map(([a, b]) => [Math.max(0, a - reach), Math.min(duration, b + reach)])
+  }
+  const thumbs = new Map<Track, string>()
   const info = (): PersonInfo[] =>
     people.map((p) => {
-      const best = p.tracks.reduce((a, b) => (b.best.score > a.best.score ? b : a)).best
-      const spans = spansOf(p, times)
-      const on = p.frames.reduce((n, f) => n + (f ? 1 : 0), 0)
-      const frame = best.frame!
-      return { id: p.id, thumb: faceThumb(frame, best.lm!), spans, best: { frame, landmarks: unpack(best.lm!) }, presence: on / Math.max(1, times.length) }
+      const best = bestOf(p)
+      const frame = views.get(best)!
+      let thumb = thumbs.get(best)
+      if (!thumb) thumbs.set(best, (thumb = faceThumb(frame, best.best.lm!)))
+      const spans = spansOf(p)
+      const on = spans.reduce((n, [a, b]) => n + (b - a), 0)
+      return { id: p.id, thumb, spans, best: { frame, landmarks: unpack(best.best.lm!) }, presence: Math.min(1, on / Math.max(1e-3, duration)) }
     })
   let cached = info()
 
-  const indexAt = (t: number) => {
-    // Last frame at or before t.
+  /** Index into `p.tl` of the last analysed frame at or before `t` (-1: none). */
+  const lastAt = (p: Person, t: number) => {
     let lo = 0
-    let hi = times.length - 1
-    if (t <= times[0]) return 0
+    let hi = p.tl.n - 1
+    if (hi < 0 || times[p.tl.idx[0]] > t + 1e-6) return -1
     while (lo < hi) {
       const mid = (lo + hi + 1) >> 1
-      if (times[mid] <= t + 1e-6) lo = mid
+      if (times[p.tl.idx[mid]] <= t + 1e-6) lo = mid
       else hi = mid - 1
     }
     return lo
   }
-  const at = (p: Person, t: number) => {
-    const i = indexAt(t)
-    const a = p.frames[i]
-    if (!a) {
-      // Just before their first frame of a run, show it rather than nothing.
-      const b = p.frames[i + 1]
-      return b && times[i + 1] - t < 0.05 ? unpack(b) : null
+  const boxAt = (p: Person, t: number): Box | null => {
+    const i = lastAt(p, t)
+    const ta = i >= 0 ? times[p.tl.idx[i]] : -Infinity
+    const tb = i + 1 < p.tl.n ? times[p.tl.idx[i + 1]] : Infinity
+    if (i >= 0 && i + 1 < p.tl.n && tb - ta <= bridge) {
+      const a = p.tl.boxAt(i)
+      const b = p.tl.boxAt(i + 1)
+      const f = Math.min(1, Math.max(0, (t - ta) / Math.max(1e-6, tb - ta)))
+      return { x0: a.x0 + (b.x0 - a.x0) * f, y0: a.y0 + (b.y0 - a.y0) * f, x1: a.x1 + (b.x1 - a.x1) * f, y1: a.y1 + (b.y1 - a.y1) * f }
     }
-    const b = p.frames[i + 1]
-    if (!b || times[i + 1] <= times[i]) return unpack(a)
-    const f = Math.min(1, Math.max(0, (t - times[i]) / (times[i + 1] - times[i])))
-    const m = new Float32Array(FRAME)
-    for (let c = 0; c < FRAME; c++) m[c] = a[c] + (b[c] - a[c]) * f
-    return unpack(m)
+    if (i >= 0 && t - ta <= reach) return p.tl.boxAt(i)
+    if (i + 1 < p.tl.n && tb - t <= lead) return p.tl.boxAt(i + 1)
+    return null
   }
 
-  const analysis: VideoAnalysis = {
+  return {
     width: W,
     height: H,
     duration,
-    times,
+    fps,
+    interval,
     get people() {
       return cached
     },
-    landmarksAt(id, t) {
-      const p = byId.get(id)
-      return p ? at(p, t) : null
-    },
-    facesAt(t) {
-      const out: { id: number; landmarks: NormalizedLandmark[] }[] = []
+    boxesAt(t) {
+      // (a player paused at the very end reports the clip's end, a frame
+      // past the last frame's start)
+      t = Math.min(t, times[times.length - 1])
+      const out: { id: number; box: Box }[] = []
       for (const p of people) {
-        const lm = at(p, t)
-        if (lm) out.push({ id: p.id, landmarks: lm })
+        const box = boxAt(p, t)
+        if (box) out.push({ id: p.id, box })
       }
       return out
     },
@@ -731,11 +756,10 @@ function makeAnalysis(people: Person[], times: Float64Array, W: number, H: numbe
       const b = byId.get(into)
       if (!a || !b || a === b) return
       b.tracks.push(...a.tracks)
+      b.tl = Timeline.merge([b.tl, a.tl])
       people.splice(people.indexOf(a), 1)
       byId.delete(from)
-      buildFrames(b, times)
       cached = info()
     },
   }
-  return analysis
 }

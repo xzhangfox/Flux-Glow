@@ -257,9 +257,13 @@ export function drawEffect(canvas: HTMLCanvasElement, P: P3[], effectId: string,
   }
 
   if (THREE_D.has(effectId)) {
-    // First use: start loading the engine; the caller re-renders when it's in.
+    // First use: start loading the engine; whoever is waiting hears when
+    // it's in (and redraws, which starts the model loading).
     if (!ar) {
-      preloadAR()
+      preloadAR().then(
+        () => readyListeners.forEach((fn) => fn()),
+        () => {},
+      )
       return
     }
     try {

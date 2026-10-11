@@ -37,10 +37,11 @@ let filesetPromise: ReturnType<typeof FilesetResolver.forVisionTasks> | null = n
 export const visionFileset = () => (filesetPromise ??= FilesetResolver.forVisionTasks(WASM_BASE_URL))
 
 /** A landmarker of its own (the video editor's, tracking several faces),
- *  as lenient as the camera's. */
-export async function createLandmarker(runningMode: 'IMAGE' | 'VIDEO', numFaces: number): Promise<FaceLandmarker> {
+ *  as lenient as the camera's. (`delegate`: dev tests on a machine with a
+ *  software GPU run the model on the CPU instead.) */
+export async function createLandmarker(runningMode: 'IMAGE' | 'VIDEO', numFaces: number, delegate: 'GPU' | 'CPU' = 'GPU'): Promise<FaceLandmarker> {
   return FaceLandmarker.createFromOptions(await visionFileset(), {
-    baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
+    baseOptions: { modelAssetPath: MODEL_URL, delegate },
     runningMode,
     numFaces,
     outputFaceBlendshapes: true,

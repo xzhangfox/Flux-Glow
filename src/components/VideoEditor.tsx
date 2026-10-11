@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode, type RefObject, type SVGProps } from 'react'
-import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
 import { DEFAULT_PARAMS, faceFocus, processFaces, type EditParams, type FaceEdit, type NumericParam } from '../lib/pipeline'
 import { analyzeVideo, preloadVideoModels, type PersonInfo, type VideoAnalysis } from '../lib/video/analyze'
-import { canExportVideo, exportVideo, type ExportResult } from '../lib/video/export'
+import { canExportVideo, exportVideo, fpsChoices, planExport, probeSource, sizeChoices, type BitrateTier, type ExportResult, type SourceInfo } from '../lib/video/export'
+import { FaceFinder, LiveSmoother, type Found } from '../lib/video/follow'
+import { boxOf, unpack } from '../lib/video/faces'
+import { freeSpace, removeTemp, sweepTemp } from '../lib/video/disk'
 import { ensureSeekable } from '../lib/video/source'
+import { holdScreenOn } from '../lib/wakeLock'
 import { EFFECTS, EFFECT_THUMBS, findEffect, onEffectReady, prepareEffect } from '../lib/effects'
 import { LOOKS, applyLook, findLook } from '../lib/looks'
 import { renderFaceThumbs } from '../lib/thumbs'
@@ -38,13 +41,14 @@ import {
 
 // The video editor: every person found in the clip gets their own Beauty,
 // Shape, Look and Effect — or one setting for everyone — over a frame-wide
-// Filter. The clip is analysed once up front (who is where, in every frame;
-// see video/analyze.ts); after that, previews and the export just look the
-// faces up, so effects stay locked on each person through the whole clip.
+// Filter. The clip is analysed once up front (who is where, and who is who;
+// see video/analyze.ts); after that, each frame shown or exported has its
+// faces found again and put to the right person (video/follow.ts), so
+// effects stay locked on each person through the whole clip, however long.
 //
 // Preview plays the real video (with its sound) and retouches each shown
 // frame at a working size; the export (video/export.ts) redoes every frame
-// at full size, in order, at full quality.
+// at the chosen size, in order, at full quality.
 
 /** The preview's working size (long side). */
 const PREVIEW_MAX = 720
@@ -59,7 +63,20 @@ type Target = 'all' | number
 function fmt(s: number) {
   if (!Number.isFinite(s)) return '0:00'
   const t = Math.max(0, Math.floor(s))
-  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`
+  const h = Math.floor(t / 3600)
+  const m = Math.floor((t % 3600) / 60)
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}` : `${m}:${String(t % 60).padStart(2, '0')}`
+}
+
+/** "About 3 min", "about 1 h 20 min". */
+function fmtLeft(s: number) {
+  if (s < 60) return 'under a minute'
+  const m = Math.round(s / 60)
+  return m < 60 ? `about ${m} min` : `about ${Math.floor(m / 60)} h ${m % 60} min`
+}
+
+function fmtBytes(b: number) {
+  return b >= 1e9 ? `${(b / 1e9).toFixed(b >= 1e10 ? 0 : 1)} GB` : `${Math.max(1, Math.round(b / 1e6))} MB`
 }
 
 function useElementSize(ref: RefObject<HTMLElement | null>) {
@@ -87,20 +104,23 @@ function fitContain(box: { width: number; height: number }, aspect: number) {
   return { width: Math.round(width), height: Math.round(height) }
 }
 
-/** A face's box in fractions of the frame. */
-function faceBox(lm: NormalizedLandmark[]) {
-  let x0 = 1
-  let y0 = 1
-  let x1 = 0
-  let y1 = 0
-  for (let i = 0; i < 468; i++) {
-    const p = lm[i]
-    if (p.x < x0) x0 = p.x
-    if (p.x > x1) x1 = p.x
-    if (p.y < y0) y0 = p.y
-    if (p.y > y1) y1 = p.y
-  }
-  return { x0, y0, x1, y1 }
+function Choice<T>({ label, options, value, onChange }: { label: string; options: { value: T; label: string; detail?: string }[]; value: T; onChange: (v: T) => void }) {
+  return (
+    <div className="mb-3">
+      <p className="text-white/55 text-[11px] font-medium mb-1.5">{label}</p>
+      <div className="flex gap-1.5">
+        {options.map((o) => {
+          const on = o.value === value
+          return (
+            <button key={String(o.value)} onClick={() => onChange(o.value)} aria-pressed={on} className={`flex-1 min-w-0 rounded-xl px-2 py-2 border text-center ${on ? 'border-primary bg-primary/10' : 'border-white/10 bg-white/[0.04]'}`}>
+              <span className={`block text-[12.5px] font-semibold leading-tight ${on ? 'text-primary' : 'text-white'}`}>{o.label}</span>
+              {o.detail && <span className="block text-white/45 text-[10px] mt-0.5 truncate">{o.detail}</span>}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
 }
 
 const sameParams = (a: EditParams, b: EditParams) =>
@@ -135,8 +155,15 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
   const [progress, setProgress] = useState(0)
   const [found, setFound] = useState(0)
   const [source, setSource] = useState<Blob | null>(null)
+  const [srcInfo, setSrcInfo] = useState<SourceInfo | null>(null)
   const [url, setUrl] = useState<string | null>(null)
+  const [analyzeStart, setAnalyzeStart] = useState(0)
   const analysisRef = useRef<VideoAnalysis | null>(null)
+  // The faces in the frame on show (found afresh for each one), and the
+  // smoothing that steadies them while it plays.
+  const finderRef = useRef<FaceFinder | null>(null)
+  const smoother = useRef(new LiveSmoother())
+  const shownRef = useRef<{ time: number; w: number; faces: Found[] } | null>(null)
   const [people, setPeople] = useState<PersonInfo[]>([])
 
   // Edits: `all` is the Everyone setting and also carries the frame-wide
@@ -161,6 +188,10 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
 
   const [exportSheet, setExportSheet] = useState(false)
   const [quality, setQuality] = useState<'high' | 'fast'>('high')
+  const [outSize, setOutSize] = useState<number | null>(null)
+  const [outFps, setOutFps] = useState<number | null>(null)
+  const [outRate, setOutRate] = useState<BitrateTier>('recommended')
+  const [space, setSpace] = useState<number | null>(null)
   const [exporting, setExporting] = useState<{ progress: number; started: number } | null>(null)
   const exportAbort = useRef<AbortController | null>(null)
   const [exported, setExported] = useState<ExportResult | null>(null)
@@ -203,23 +234,36 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
   useEffect(() => {
     const ac = new AbortController()
     let objectUrl: string | null = null
+    // (an hour-long clip takes a while: the screen stays on meanwhile)
+    const release = holdScreenOn()
     ;(async () => {
       try {
         preloadVideoModels().catch(() => {})
+        void sweepTemp()
         const src = await ensureSeekable(file)
         if (ac.signal.aborted) return
         objectUrl = URL.createObjectURL(src)
         setSource(src)
         setUrl(objectUrl)
+        probeSource(src).then((i) => !ac.signal.aborted && setSrcInfo(i), () => {})
         setPhase('analyzing')
+        setAnalyzeStart(performance.now())
+        // (a few updates a second: re-rendering the editor for every frame
+        // analysed would slow the analysis down)
+        let shown = 0
         const an = await analyzeVideo(
           src,
           (p) => {
+            const now = performance.now()
+            if (now - shown < 200) return
+            shown = now
             setProgress(p.progress)
             setFound(p.people)
           },
           ac.signal,
         )
+        if (ac.signal.aborted) return
+        finderRef.current = await FaceFinder.create(an)
         if (ac.signal.aborted) return
         analysisRef.current = an
         setPeople(an.people)
@@ -230,10 +274,13 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
         if ((e as Error).name === 'AbortError') return
         setError((e as Error).message || "Couldn't open this video.")
         setPhase('error')
+      } finally {
+        release()
       }
     })()
     return () => {
       ac.abort()
+      release()
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
   }, [file, initial])
@@ -245,10 +292,15 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
   // ---- Rendering ----
   const paramsFor = (id: number, s = state.current): EditParams | null => (s.off[id] ? null : (s.per[id] ?? s.all))
 
+  // Tags on the paused frame: each face found in it, and anyone the
+  // analysis has there whose face isn't showing (turned away, say).
   const updateTags = useCallback((t: number) => {
     const an = analysisRef.current
     if (!an) return setTags([])
-    setTags(an.facesAt(t).map((f) => ({ id: f.id, ...faceBox(f.landmarks) })))
+    const shown = shownRef.current?.time === t ? shownRef.current.faces : []
+    const tags = shown.map((f) => ({ id: f.id, ...boxOf(f.lm, 1, 1) }))
+    for (const e of an.boxesAt(t)) if (!tags.some((x) => x.id === e.id)) tags.push({ id: e.id, ...e.box })
+    setTags(tags)
   }, [])
 
   const renderNow = useCallback(
@@ -267,12 +319,22 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
       }
       work.getContext('2d')!.drawImage(v, 0, 0, w, h)
       const s = state.current
+      // The faces in this frame (once per frame: a slider moved on a paused
+      // frame reuses them).
+      const finder = finderRef.current
+      let shown = shownRef.current
+      if (finder && (!shown || shown.time !== time || shown.w !== w)) {
+        const playing = !v.paused
+        const found = finder.find(work, time, playing)
+        if (!playing) smoother.current.reset()
+        shown = shownRef.current = { time, w, faces: playing ? smoother.current.apply(found, time) : found }
+      }
       let result: HTMLCanvasElement = work
       if (!s.showBefore) {
         const faces: FaceEdit[] = []
-        for (const f of analysisRef.current?.facesAt(time) ?? []) {
+        for (const f of shown?.faces ?? []) {
           const params = paramsFor(f.id, s)
-          if (params) faces.push({ landmarks: f.landmarks, params, slot: `p${f.id}` })
+          if (params) faces.push({ landmarks: unpack(f.lm), params, slot: `p${f.id}` })
         }
         result = processFaces(work, faces, s.all, false, time)
       }
@@ -391,7 +453,8 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
     snap.width = work.width
     snap.height = work.height
     snap.getContext('2d')!.drawImage(work, 0, 0)
-    const lm = analysisRef.current?.facesAt(videoRef.current?.currentTime ?? 0)[0]?.landmarks ?? null
+    const f0 = shownRef.current?.faces[0]
+    const lm = f0 ? unpack(f0.lm) : null
     let cancelled = false
     const t = setTimeout(() => {
       const made = new Map<string, string>()
@@ -422,6 +485,7 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
       setMergeFrom(null)
       setTarget(id)
       showToast(`Merged into Person ${id}`)
+      shownRef.current = null
       renderNow()
       return
     }
@@ -432,6 +496,16 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
   const customised = (id: number) => !!per[id] && !sameParams(per[id], all)
 
   // ---- Export ----
+  // The last export stays on disk (a long one is gigabytes) until the next
+  // one starts, or the editor closes.
+  const lastExport = useRef<Blob | null>(null)
+  useEffect(() => () => void removeTemp(lastExport.current), [])
+  const openExportSheet = () => {
+    setExportSheet(true)
+    freeSpace().then(setSpace, () => setSpace(null))
+  }
+  const plan = srcInfo ? planExport(srcInfo, { size: outSize, fps: outFps, bitrate: outRate }) : null
+
   const startExport = async () => {
     const an = analysisRef.current
     if (!an || !source) return
@@ -447,13 +521,26 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
     exportAbort.current = ac
     setExporting({ progress: 0, started: performance.now() })
     const snapshot = { ...state.current }
+    const release = holdScreenOn()
+    await removeTemp(lastExport.current)
+    lastExport.current = null
     try {
-      const res = await exportVideo(source, an, (id) => paramsFor(id, snapshot), snapshot.all, { quality }, (p) => setExporting((e) => (e ? { ...e, progress: p } : e)), ac.signal)
+      let shown = 0
+      const onProgress = (p: number) => {
+        const now = performance.now()
+        if (now - shown < 250) return
+        shown = now
+        setExporting((e) => (e ? { ...e, progress: p } : e))
+      }
+      const res = await exportVideo(source, an, (id) => paramsFor(id, snapshot), snapshot.all, { size: outSize, fps: outFps, bitrate: outRate, quality }, onProgress, ac.signal)
+      lastExport.current = res.blob
+      if (res.frames.written !== null && res.frames.written !== res.frames.expected) console.warn(`Export: ${res.frames.expected} frames sent, ${res.frames.written} in the file`)
       setExported(res)
       dirty.current = false
     } catch (e) {
       if (!ac.signal.aborted) showToast((e as Error).message || 'Export failed')
     } finally {
+      release()
       setExporting(null)
       exportAbort.current = null
       renderNow()
@@ -467,7 +554,8 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
   const bottomH = useRef(0)
   if (!panel && bottomBox.height) bottomH.current = bottomBox.height
   const ready = phase === 'ready'
-  const eta = exporting && exporting.progress > 0.02 ? ((performance.now() - exporting.started) / exporting.progress) * (1 - exporting.progress) : null
+  const eta = exporting && exporting.progress > 0.01 ? ((performance.now() - exporting.started) / exporting.progress) * (1 - exporting.progress) : null
+  const analyzeEta = phase === 'analyzing' && progress > 0.02 && analyzeStart ? ((performance.now() - analyzeStart) / progress) * (1 - progress) : null
 
   const beauty = beautyItems(current, setKey)
   const shape = shapeItems(current, setKey)
@@ -583,7 +671,7 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
           >
             <IconCompare className="w-5 h-5" />
           </button>
-          <button onClick={() => setExportSheet(true)} disabled={!ready || !!exporting} className="h-10 px-4 rounded-full bg-primary text-black text-[13px] font-semibold disabled:opacity-40">
+          <button onClick={openExportSheet} disabled={!ready || !!exporting} className="h-10 px-4 rounded-full bg-primary text-black text-[13px] font-semibold disabled:opacity-40">
             Export
           </button>
         </div>
@@ -612,7 +700,9 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
               <div className="h-full bg-primary transition-[width] duration-200" style={{ width: `${Math.round(progress * 100)}%` }} />
             </div>
             <div className="flex justify-between text-[11px] text-white/60 mt-2 tabular-nums">
-              <span>{Math.round(progress * 100)}%</span>
+              <span>
+                {Math.round(progress * 100)}%{analyzeEta !== null && analyzeEta > 20_000 ? ` · ${fmtLeft(analyzeEta / 1000)} left` : ''}
+              </span>
               <span>
                 {found} {found === 1 ? 'person' : 'people'} found
               </span>
@@ -852,21 +942,37 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
       {exportSheet && (
         <Sheet onDismiss={() => setExportSheet(false)}>
           <p className="text-white text-[15px] font-semibold mb-1">Export video</p>
-          <p className="text-white/55 text-[12px] mb-4">Up to 1080p MP4 with the original sound. Every frame is retouched on your device.</p>
-          {(
-            [
-              ['high', 'Best quality', 'Full photo-grade retouching on every frame. Slower.'],
-              ['fast', 'Fast', 'The same look at preview grade. Much quicker.'],
-            ] as const
-          ).map(([q, label, hint]) => (
-            <button key={q} onClick={() => setQuality(q)} className={`w-full text-left rounded-xl px-4 py-3 mb-2 border ${quality === q ? 'border-primary bg-primary/10' : 'border-white/10 bg-white/[0.04]'}`}>
-              <span className="flex items-center justify-between">
-                <span className="text-white text-[13px] font-semibold">{label}</span>
-                {quality === q && <IconCheck className="w-4 h-4 text-primary" />}
-              </span>
-              <span className="block text-white/55 text-[11.5px] mt-0.5">{hint}</span>
-            </button>
-          ))}
+          <p className="text-white/55 text-[12px] mb-4">MP4 with the original sound, every frame retouched on your device — up to the original's own size and frame rate.</p>
+          {srcInfo && (
+            <>
+              <Choice label="Resolution" options={sizeChoices(srcInfo)} value={outSize} onChange={setOutSize} />
+              <Choice label="Frame rate" options={fpsChoices(srcInfo).map((o) => ({ ...o, detail: o.value === null ? 'original' : 'fps' }))} value={outFps} onChange={setOutFps} />
+              <Choice
+                label="Bitrate"
+                options={(['lower', 'recommended', 'higher'] as const).map((b) => ({ value: b, label: b === 'lower' ? 'Lower' : b === 'recommended' ? 'Recommended' : 'Higher', detail: `${(planExport(srcInfo, { size: outSize, fps: outFps, bitrate: b }).bitrate / 1e6).toFixed(1)} Mbps` }))}
+                value={outRate}
+                onChange={setOutRate}
+              />
+            </>
+          )}
+          <Choice
+            label="Retouching"
+            options={[
+              { value: 'high' as const, label: 'Best quality', detail: 'photo-grade, slower' },
+              { value: 'fast' as const, label: 'Fast', detail: 'preview-grade, quicker' },
+            ]}
+            value={quality}
+            onChange={setQuality}
+          />
+          {plan && srcInfo && (
+            <div className="text-[11.5px] text-white/60 mb-1 space-y-1">
+              <p>
+                {plan.width}×{plan.height} · {outFps ? fpsChoices(srcInfo).find((o) => o.value === outFps)?.label : fpsChoices(srcInfo)[0].label} fps · about <span className="text-white font-semibold">{fmtBytes(plan.bytes)}</span> for {fmt(srcInfo.duration)}
+              </p>
+              {space !== null && space < plan.bytes * 1.1 && <p className="text-danger">This device has only {fmtBytes(space)} free for it — choose a smaller size or bitrate, or free up space.</p>}
+              {srcInfo.duration > 15 * 60 && <p>A long video takes a long time — keep this page open and the screen on until it's done.</p>}
+            </div>
+          )}
           <button onClick={startExport} className="w-full h-11 mt-2 rounded-full bg-primary text-black text-sm font-semibold">
             Export
           </button>
@@ -884,7 +990,7 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
             </div>
             <div className="flex justify-between text-[11px] text-white/60 mt-2 tabular-nums">
               <span>{Math.round(exporting.progress * 100)}%</span>
-              <span>{eta !== null ? `about ${fmt(eta / 1000)} left` : 'starting…'}</span>
+              <span>{eta !== null && exporting.progress > 0.002 ? `${fmtLeft(eta / 1000)} left` : 'starting…'}</span>
             </div>
             <button onClick={() => exportAbort.current?.abort()} className="mt-4 h-9 px-4 rounded-full bg-white/10 text-white text-[12px] font-semibold">
               Cancel

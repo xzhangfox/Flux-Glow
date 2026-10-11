@@ -1,4 +1,5 @@
-import { ALL_FORMATS, BlobSource, BufferTarget, Conversion, Input, Mp4OutputFormat, Output, WebMOutputFormat, canEncodeAudio, canEncodeVideo } from 'mediabunny'
+import { ALL_FORMATS, BlobSource, Conversion, Input, Mp4OutputFormat, Output, WebMOutputFormat, canEncodeAudio, canEncodeVideo } from 'mediabunny'
+import { outputSink } from './disk'
 
 /**
  * A copy of `file` that players can seek in. What MediaRecorder writes as
@@ -8,22 +9,42 @@ import { ALL_FORMATS, BlobSource, BufferTarget, Conversion, Input, Mp4OutputForm
  */
 export async function ensureSeekable(file: Blob): Promise<Blob> {
   if (!/webm|matroska/i.test(file.type)) return file
+  return (await repackage(file, 'webm')) ?? file
+}
+
+/** `file`'s frames and sound, repackaged as WebM or MP4 (null if it can't
+ *  be). A long one is written to storage, not memory. */
+async function repackage(file: Blob, as: 'webm' | 'mp4'): Promise<Blob | null> {
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
+  const sink = await outputSink(file.size * 1.05)
   try {
-    const output = new Output({ format: new WebMOutputFormat(), target: new BufferTarget() })
+    const output = new Output({ format: as === 'webm' ? new WebMOutputFormat() : new Mp4OutputFormat(sink.onDisk ? { fastStart: false } : {}), target: sink.target })
     const conversion = await Conversion.init({ input, output })
-    if (!conversion.isValid) return file
+    if (!conversion.isValid) {
+      await sink.discard()
+      return null
+    }
     await conversion.execute()
-    const buf = (output.target as BufferTarget).buffer
-    return buf ? new Blob([buf], { type: 'video/webm' }) : file
+    return await sink.finish(as === 'webm' ? 'video/webm' : 'video/mp4')
   } catch {
-    return file
+    await sink.discard()
+    return null
   } finally {
     input.dispose()
   }
 }
 
 const shareable = new WeakMap<Blob, Promise<Blob>>()
+
+/** Past this size a video is shared as it is: rewriting it would mean
+ *  holding all of it in memory (and no chat app takes one this big). */
+const SHAREABLE_MAX = 256 * 1024 * 1024
+
+/** `blob` is already what toShareableMp4 would make of it (H.264 + AAC
+ *  in an MP4): it's shared as it is. */
+export function markShareable(blob: Blob) {
+  shareable.set(blob, Promise.resolve(blob))
+}
 
 /**
  * `file` as the MP4 that chat apps (WeChat, iMessage, WhatsApp…) show as a
@@ -38,6 +59,7 @@ const shareable = new WeakMap<Blob, Promise<Blob>>()
 export function toShareableMp4(file: Blob): Promise<Blob> {
   let p = shareable.get(file)
   if (p) return p
+  if (file.size > SHAREABLE_MAX) return Promise.resolve(file)
   p = (async () => {
     const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
     try {
@@ -46,7 +68,8 @@ export function toShareableMp4(file: Blob): Promise<Blob> {
       if (vt.codec !== 'avc' && !(await canEncodeVideo('avc'))) return file
       const at = await input.getPrimaryAudioTrack()
       const aac = !at || at.codec === 'aac' || (await canEncodeAudio('aac'))
-      const output = new Output({ format: new Mp4OutputFormat({ fastStart: 'in-memory' }), target: new BufferTarget() })
+      const sink = await outputSink(0)
+      const output = new Output({ format: new Mp4OutputFormat({ fastStart: 'in-memory' }), target: sink.target })
       const conversion = await Conversion.init({
         input,
         output,
@@ -56,8 +79,7 @@ export function toShareableMp4(file: Blob): Promise<Blob> {
       })
       if (!conversion.isValid) return file
       await conversion.execute()
-      const buf = (output.target as BufferTarget).buffer
-      return buf ? new Blob([buf], { type: 'video/mp4' }) : file
+      return await sink.finish('video/mp4')
     } catch {
       return file
     } finally {
@@ -76,19 +98,10 @@ export function toShareableMp4(file: Blob): Promise<Blob> {
  * frames and sound, no re-encode), every frame gets the time to the next
  * one. Anything that isn't WebM is returned as is.
  */
-export async function withFrameDurations(file: Blob): Promise<Blob> {
-  if (!/webm|matroska/i.test(file.type)) return file
-  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
-  try {
-    const output = new Output({ format: new Mp4OutputFormat(), target: new BufferTarget() })
-    const conversion = await Conversion.init({ input, output })
-    if (!conversion.isValid) return file
-    await conversion.execute()
-    const buf = (output.target as BufferTarget).buffer
-    return buf ? new Blob([buf], { type: 'video/mp4' }) : file
-  } catch {
-    return file
-  } finally {
-    input.dispose()
-  }
+export function withFrameDurations(file: Blob): Promise<Blob> {
+  if (!/webm|matroska/i.test(file.type)) return Promise.resolve(file)
+  let p = timed.get(file)
+  if (!p) timed.set(file, (p = repackage(file, 'mp4').then((b) => b ?? file)))
+  return p
 }
+const timed = new WeakMap<Blob, Promise<Blob>>()
