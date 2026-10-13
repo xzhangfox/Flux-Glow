@@ -2,7 +2,7 @@ import type { FaceLandmarker } from '@mediapipe/tasks-vision'
 import { ALL_FORMATS, BlobSource, CanvasSink, Input } from 'mediabunny'
 import { closureFrom } from '../faceLandmarker'
 import { FILL_GAP_S, loadVideoModels, type VideoAnalysis } from './analyze'
-import { EuroState, FRAME, STRIDE, boxOf, centreOf, cropOf, fitScore, iou, lerpFace, pack, scaleBox, shift, sizeOf, stamp, windowAt, type Box } from './faces'
+import { EuroState, FRAME, STRIDE, Turn, bodyBoxOf, bodySig, boxOf, centreOf, cropOf, fitScore, iou, lerpFace, lostYaw, pack, plausibleTurn, sameBody, scaleBox, shift, sizeOf, stamp, turnTo, windowAt, yawOf, type Box } from './faces'
 
 // Finding the analysed people in a frame, as it's shown or exported: the
 // landmarker runs on the frame itself, and each face it finds is put to the
@@ -27,19 +27,42 @@ const MAX_RETRIES = 4
 const MAX_FACES = 6
 /** How long a person's own last place still guides where they are now. */
 const RECENT_S = 0.3
-/** A fixed camera: someone in their seat whose face can't be found (turned
- *  away, a hand over it) keeps their last mesh this long, so their effect
- *  stays on rather than blinking off. */
-const HOLD_S = 1.5
-/** …and the export bridges gaps up to this long (as the analysis does
- *  0.6 s for a moving camera): their effect rides through a turned head. */
-const FIXED_FILL_S = 2.5
+/** A fixed camera: someone still in their seat whose face can't be found
+ *  (turned away, a hand over it) keeps their last mesh this long, so their
+ *  effect stays on rather than blinking off. */
+const HOLD_S = 6
+/** …and the export bridges gaps up to this long (as it does 0.6 s for a
+ *  moving camera): their effect rides through a turned head. */
+const FIXED_FILL_S = 6
 /** Someone who doesn't come back within that keeps it this long more. */
-const FIXED_TAIL_S = 1
+const FIXED_TAIL_S = 4
+/** A missing person whose seat has looked different this long has got up
+ *  and gone (until their face is found again). */
+const LEAVE_S = 0.5
+/** Frames this close (or a few frame times) follow on from each other… */
+const TRACKED_S = 0.25
+/** …and a head lost for longer counts as back once a face is really found
+ *  there — or once it's been found again and again for this long. */
+const COMEBACK_S = 1
 
 export class FaceFinder {
   private recent = new Map<number, { box: Box; t: number; vx: number; vy: number }>()
-  private held = new Map<number, { lm: Float32Array; t: number }>()
+  private held = new Map<number, { lm: Float32Array; t: number; yaw: number; rate: number }>()
+  /** Fixed camera: each head's last trusted turn, and how it's turning… */
+  private poses = new Map<number, { yaw: number; t: number; turn: Turn }>()
+  /** …and since when a head lost is being found again (not yet trusted). */
+  private comeback = new Map<number, { since: number; last: number }>()
+  /** The time between frames, as they come (s). */
+  private step = 1 / 30
+  /** Fixed camera: under each face last found, its shoulders (see
+   *  faces.ts) — and who, missing now, is still sitting there. */
+  private bodies = new Map<number, { box: Box; sig: Float32Array }>()
+  /** …since when a missing person's seat has looked different, and who
+   *  has gone (so a seat that happens to look the same again later — the
+   *  light, what's behind — doesn't bring them back). */
+  private leaving = new Map<number, number>()
+  private gone = new Set<number>()
+  seated = new Set<number>()
   private lastT = -Infinity
   private an: VideoAnalysis
   private video: FaceLandmarker
@@ -60,8 +83,18 @@ export class FaceFinder {
    *  their face can't be found (the preview; the export bridges gaps
    *  itself, looking ahead). */
   static async create(an: VideoAnalysis, hold = an.fixed) {
-    const { video, image, lenient } = await loadVideoModels()
-    return new FaceFinder(an, video, image, an.fixed ? lenient : image, hold)
+    const { video, seated, image, lenient } = await loadVideoModels()
+    return new FaceFinder(an, an.fixed ? seated : video, image, an.fixed ? lenient : image, hold)
+  }
+
+  /** A face found afresh (not tracked) round box `b` of `frame`. */
+  private faceAt(frame: HTMLCanvasElement, b: Box) {
+    const W = frame.width
+    const H = frame.height
+    const c = centreOf(b)
+    const r = windowAt(c.x, c.y, Math.min(Math.min(W, H), Math.max(sizeOf(b) * 2.2, 96)), W, H)
+    const res = this.image.detect(cropOf(frame, r))
+    return res.faceLandmarks.some((lm) => iou(boxOf(pack(lm, undefined, r), W, H), b) > 0.3)
   }
 
   /** The people in `frame`, at time `t` in the clip. `sequential`: frames
@@ -71,8 +104,17 @@ export class FaceFinder {
     const W = frame.width
     const H = frame.height
     if (!sequential || t < this.lastT || t - this.lastT > RECENT_S) this.recent.clear()
+    if (sequential && t > this.lastT && t - this.lastT < 1) this.step = 0.8 * this.step + 0.2 * (t - this.lastT)
+    // (a jump: nothing held from before it)
+    else if (!sequential || t < this.lastT) {
+      this.held.clear()
+      this.comeback.clear()
+      this.leaving.clear()
+      this.gone.clear()
+    }
     this.lastT = t
     const expected = this.an.boxesAt(t)
+    this.seated.clear()
     // No one is meant to be here: nothing to look for.
     if (!expected.length) {
       this.recent.clear()
@@ -143,6 +185,37 @@ export class FaceFinder {
       }
     })
 
+    // Fixed camera: a mesh that has swung further than a head turns between
+    // frames — or one that turns up after a head was lost — may be the back
+    // of a head the models took for a face. Kept only if a face really is
+    // there (found afresh, strictly), or it keeps being found a while.
+    if (this.an.fixed && sequential) {
+      const tracked = Math.max(TRACKED_S, this.step * 2.5)
+      for (let i = out.length - 1; i >= 0; i--) {
+        const { id, lm } = out[i]
+        const yaw = yawOf(lm, W, H)
+        const p = this.poses.get(id)
+        const dt = p ? t - p.t : Infinity
+        let ok: boolean
+        if (dt >= 0 && dt <= tracked) ok = plausibleTurn(p!.yaw, yaw, dt) || this.faceAt(frame, boxes[i])
+        else {
+          const c = this.comeback.get(id)
+          const since = c && t >= c.last && t - c.last <= tracked ? c.since : t
+          this.comeback.set(id, { since, last: t })
+          ok = t - since >= COMEBACK_S || this.faceAt(frame, boxes[i])
+        }
+        if (ok) {
+          this.comeback.delete(id)
+          const turn = p?.turn ?? new Turn()
+          turn.add(yaw, t)
+          this.poses.set(id, { yaw, t, turn })
+        } else {
+          out.splice(i, 1)
+          boxes.splice(i, 1)
+        }
+      }
+    }
+
     // Remember where everyone found is, and how they're moving.
     const seen = new Set<number>()
     out.forEach((f, i) => {
@@ -163,14 +236,41 @@ export class FaceFinder {
     })
     for (const id of [...this.recent.keys()]) if (!seen.has(id) && t - this.recent.get(id)!.t > RECENT_S) this.recent.delete(id)
 
-    // Fixed camera: whoever is in their seat but not found keeps their last
-    // mesh a while.
-    if (this.hold) {
-      for (const f of out) this.held.set(f.id, { lm: f.lm, t })
+    // Fixed camera: who is still sitting there, found or not; and (the
+    // preview) whoever is, but wasn't found, keeps their last mesh a while.
+    if (this.an.fixed) {
+      out.forEach((f, i) => {
+        this.seated.add(f.id)
+        this.leaving.delete(f.id)
+        this.gone.delete(f.id)
+        const body = bodyBoxOf(boxes[i], W, H)
+        if (body) this.bodies.set(f.id, { box: { x0: body.x0 / W, y0: body.y0 / H, x1: body.x1 / W, y1: body.y1 / H }, sig: bodySig(frame, body) })
+        else this.bodies.delete(f.id)
+      })
       for (const w of want) {
-        if (seen.has(w.id)) continue
-        const h = this.held.get(w.id)
-        if (h && Math.abs(t - h.t) <= HOLD_S) out.push({ id: w.id, lm: h.lm })
+        if (seen.has(w.id) || this.gone.has(w.id)) continue
+        const b = this.bodies.get(w.id)
+        // (nothing to go by: take the analysis's word that they're there)
+        if (!b || sameBody(b.sig, bodySig(frame, scaleBox(b.box, W, H)))) {
+          this.leaving.delete(w.id)
+          this.seated.add(w.id)
+          continue
+        }
+        const since = this.leaving.get(w.id) ?? t
+        this.leaving.set(w.id, since)
+        if (t - since >= LEAVE_S) this.gone.add(w.id)
+      }
+      if (this.hold) {
+        for (const f of out) {
+          const p = this.poses.get(f.id)
+          this.held.set(f.id, { lm: f.lm, t, yaw: p?.t === t ? p.yaw : yawOf(f.lm, W, H), rate: p?.t === t ? p.turn.rate : 0 })
+        }
+        for (const w of want) {
+          if (seen.has(w.id) || !this.seated.has(w.id)) continue
+          const h = this.held.get(w.id)
+          // (lost turning away: gone on round, out of sight)
+          if (h && t >= h.t && t - h.t <= HOLD_S) out.push({ id: w.id, lm: turnTo(h.lm, lostYaw(h.yaw, h.rate, t - h.t), W, H) })
+        }
       }
     }
     return out
@@ -206,10 +306,16 @@ export class LiveSmoother {
 
 /** How far ahead the smoothing looks (the backward pass's run-in). */
 const SMOOTH_AHEAD_S = 0.3
+/** Fixed camera: how long into a head's coming back its turn is read. */
+const TURN_READ_S = 0.3
+
+const smoothstep = (u: number) => u * u * (3 - 2 * u)
 
 interface Scouted {
   ts: number
   raw: Map<number, Float32Array>
+  /** Fixed camera: who is still sitting there (found or not). */
+  seated?: Set<number>
   /** With short gaps bridged; then each face filtered forwards. */
   filled?: Map<number, Float32Array>
   fwd?: Map<number, Float32Array>
@@ -226,7 +332,16 @@ export class FaceScout {
   private filledTo = 0
   private ended = false
   private euro = new Map<number, EuroState>()
-  private lastSeen = new Map<number, { ts: number; lm: Float32Array }>()
+  /** Each face as last found (fixed camera: which way it faced, and how
+   *  fast it was turning). */
+  private lastSeen = new Map<number, { ts: number; lm: Float32Array; yaw: number; rate: number }>()
+  private turns = new Map<number, Turn>()
+  /** The frames' size, px (for which way heads face). */
+  private W = 1
+  private H = 1
+  /** Read past each frame before it's bridged: a fixed camera reads how a
+   *  head that comes back is turning. */
+  private turnAhead: number
   private lastFilled: Map<number, Float32Array> | undefined
   private back: EuroState
   private warned = false
@@ -248,6 +363,7 @@ export class FaceScout {
     this.an = an
     this.gap = an.fixed ? FIXED_FILL_S : FILL_GAP_S
     this.tail = an.fixed ? FIXED_TAIL_S : 0
+    this.turnAhead = an.fixed ? TURN_READ_S : 0
     this.back = new EuroState(an.fixed)
   }
 
@@ -269,36 +385,67 @@ export class FaceScout {
       return
     }
     const { canvas, timestamp } = r.value
+    this.W = canvas.width
+    this.H = canvas.height
     const prev = this.frames[this.frames.length - 1]
     if (prev && timestamp <= prev.ts) return
     if (prev) this.tol = Math.min(this.tol, Math.max(1e-3, (timestamp - prev.ts) / 2))
     const found = this.finder.find(canvas as HTMLCanvasElement, timestamp, true)
-    this.frames.push({ ts: timestamp, raw: new Map(found.map((f) => [f.id, f.lm])) })
+    this.frames.push({ ts: timestamp, raw: new Map(found.map((f) => [f.id, f.lm])), seated: this.an.fixed ? new Set(this.finder.seated) : undefined })
+  }
+
+  /** How fast the head that turns up in frame `k` turns, run backwards
+   *  (from its first moments back), deg/s. */
+  private rateBack(k: number, id: number, yaw: number) {
+    let m = -1
+    for (let n = k + 1; n < this.frames.length && this.frames[n].ts - this.frames[k].ts <= TURN_READ_S; n++) if (this.frames[n].raw.has(id)) m = n
+    if (m < 0 || this.frames[m].ts - this.frames[k].ts < 0.1) return 0
+    return (yaw - yawOf(this.frames[m].raw.get(id)!, this.W, this.H)) / (this.frames[m].ts - this.frames[k].ts)
   }
 
   /** Bridges short gaps in frame `j` and filters it forwards. Needs the
-   *  frames up to `gap` past it (or the end of the clip). */
+   *  frames up to `gap` (and `turnAhead`) past it, or the end of the clip. */
   private fill(j: number) {
     const f = this.frames[j]
+    const { W, H } = this
     const filled = new Map(f.raw)
-    let seated: Set<number> | null = null
     for (const [id, seen] of this.lastSeen) {
-      if (filled.has(id) || f.ts - seen.ts > this.gap) continue
+      const lost = f.ts - seen.ts
+      if (filled.has(id) || lost > this.gap) continue
+      // (fixed camera: only while they're still in their seat)
+      if (f.seated && !f.seated.has(id)) continue
       // Back within the gap? Then they were here all along.
       for (let k = j + 1; k < this.frames.length && this.frames[k].ts - seen.ts <= this.gap; k++) {
         const b = this.frames[k].raw.get(id)
         if (!b) continue
-        filled.set(id, lerpFace(seen.lm, b, (f.ts - seen.ts) / Math.max(1e-6, this.frames[k].ts - seen.ts)))
+        const u = lost / Math.max(1e-6, this.frames[k].ts - seen.ts)
+        if (!this.an.fixed) filled.set(id, lerpFace(seen.lm, b, u))
+        else {
+          // (a head lost turning away went on round, out of sight, and
+          // came back the way it's turning when it turns up)
+          const yb = yawOf(b, W, H)
+          const ya = lostYaw(seen.yaw, seen.rate, lost)
+          const yc = lostYaw(yb, this.rateBack(k, id, yb), this.frames[k].ts - f.ts)
+          const yaw = ya + (yc - ya) * smoothstep(u)
+          filled.set(id, lerpFace(turnTo(seen.lm, yaw, W, H), turnTo(b, yaw, W, H), u))
+        }
         break
       }
       // (a fixed camera: not back, but still in their seat — keep them a
       // little longer)
-      if (!filled.has(id) && f.ts - seen.ts <= this.tail) {
-        seated ??= new Set(this.an.boxesAt(f.ts).map((e) => e.id))
-        if (seated.has(id)) filled.set(id, seen.lm)
-      }
+      if (!filled.has(id) && lost <= this.tail) filled.set(id, turnTo(seen.lm, lostYaw(seen.yaw, seen.rate, lost), W, H))
     }
-    for (const [id, lm] of f.raw) this.lastSeen.set(id, { ts: f.ts, lm })
+    for (const [id, lm] of f.raw) {
+      if (!this.an.fixed) {
+        this.lastSeen.set(id, { ts: f.ts, lm, yaw: 0, rate: 0 })
+        continue
+      }
+      const yaw = yawOf(lm, W, H)
+      let turn = this.turns.get(id)
+      if (!turn) this.turns.set(id, (turn = new Turn()))
+      turn.add(yaw, f.ts)
+      this.lastSeen.set(id, { ts: f.ts, lm, yaw, rate: turn.rate })
+    }
     const prev = this.lastFilled
     const fwd = new Map<number, Float32Array>()
     for (const [id, lm] of filled) {
@@ -316,12 +463,12 @@ export class FaceScout {
   /** The people in the source frame at `ts`, their meshes steadied. */
   async at(ts: number): Promise<Found[]> {
     // Read on until this frame's look-ahead is all in.
-    const need = ts + SMOOTH_AHEAD_S + this.gap + this.tol
+    const need = ts + SMOOTH_AHEAD_S + this.gap + this.turnAhead + this.tol
     while (!this.ended && (!this.frames.length || this.frames[this.frames.length - 1].ts < need)) await this.pull()
     if (!this.frames.length) return []
     // Bridge and filter everything whose own look-ahead is in.
     const end = this.frames[this.frames.length - 1].ts
-    while (this.filledTo < this.frames.length && (this.ended || this.frames[this.filledTo].ts + this.gap <= end)) this.fill(this.filledTo++)
+    while (this.filledTo < this.frames.length && (this.ended || this.frames[this.filledTo].ts + this.gap + this.turnAhead <= end)) this.fill(this.filledTo++)
 
     // The frame: the nearest one (frames come in order, so from the front).
     let i = 0

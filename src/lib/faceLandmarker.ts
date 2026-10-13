@@ -37,18 +37,19 @@ let filesetPromise: ReturnType<typeof FilesetResolver.forVisionTasks> | null = n
 export const visionFileset = () => (filesetPromise ??= FilesetResolver.forVisionTasks(WASM_BASE_URL))
 
 /** A landmarker of its own (the video editor's, tracking several faces),
- *  as lenient as the camera's — or more (`confidence`: the least a face
- *  must score to count). (`delegate`: dev tests on a machine with a
- *  software GPU run the model on the CPU instead.) */
-export async function createLandmarker(runningMode: 'IMAGE' | 'VIDEO', numFaces: number, delegate: 'GPU' | 'CPU' = 'GPU', confidence = 0.35): Promise<FaceLandmarker> {
+ *  as lenient as the camera's — or more (`conf`: the least a face must
+ *  score to be found, to still be a face, and to keep being tracked).
+ *  (`delegate`: dev tests on a machine with a software GPU run the model
+ *  on the CPU instead.) */
+export async function createLandmarker(runningMode: 'IMAGE' | 'VIDEO', numFaces: number, delegate: 'GPU' | 'CPU' = 'GPU', conf: { detect?: number; presence?: number; track?: number } = {}): Promise<FaceLandmarker> {
   return FaceLandmarker.createFromOptions(await visionFileset(), {
     baseOptions: { modelAssetPath: MODEL_URL, delegate },
     runningMode,
     numFaces,
     outputFaceBlendshapes: true,
-    minFaceDetectionConfidence: confidence,
-    minFacePresenceConfidence: confidence + 0.05,
-    minTrackingConfidence: confidence,
+    minFaceDetectionConfidence: conf.detect ?? 0.35,
+    minFacePresenceConfidence: conf.presence ?? 0.4,
+    minTrackingConfidence: conf.track ?? 0.35,
   })
 }
 

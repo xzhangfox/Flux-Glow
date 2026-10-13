@@ -63,7 +63,7 @@ export const MAX_DURATION_S = 4 * 60 * 60
 const RATE_FIXED = 8
 /** …and someone in their seat is still there across a gap this long (their
  *  face turned away, a hand over it). */
-const FIXED_BRIDGE_S = 4
+const FIXED_BRIDGE_S = 10
 /** The clearest view of each face is kept as a crop this big (px). */
 const BEST_PX = 288
 
@@ -109,7 +109,7 @@ export interface AnalyzeProgress {
 
 // ---- Models ------------------------------------------------------------------------
 
-let models: Promise<{ video: FaceLandmarker; image: FaceLandmarker; lenient: FaceLandmarker; embedder: ImageEmbedder | null }> | null = null
+let models: Promise<{ video: FaceLandmarker; seated: FaceLandmarker; image: FaceLandmarker; lenient: FaceLandmarker; embedder: ImageEmbedder | null }> | null = null
 let delegate: 'GPU' | 'CPU' = 'GPU'
 /** Dev tests only (a machine whose GPU is software): run the models on the
  *  CPU. Before anything loads them. */
@@ -118,9 +118,16 @@ export const runModelsOnCpu = () => void (delegate = 'CPU')
  *  one looking at single frames and crops, and the identity embedder. */
 export function loadVideoModels() {
   models ??= (async () => {
-    // (`lenient`: for a seat someone is known to be in — a face turned half
-    // away or partly covered still counts there)
-    const [video, image, lenient] = await Promise.all([createLandmarker('VIDEO', MAX_FACES, delegate), createLandmarker('IMAGE', MAX_FACES, delegate), createLandmarker('IMAGE', 2, delegate, 0.2)])
+    // A fixed camera's: `seated` keeps tracking a face as it turns toward
+    // profile (it only needs the mesh still to look like a face, not a
+    // face to be found afresh); `lenient` looks for one in a seat someone
+    // is known to be in — turned half away or partly covered still counts.
+    const [video, seated, image, lenient] = await Promise.all([
+      createLandmarker('VIDEO', MAX_FACES, delegate),
+      createLandmarker('VIDEO', MAX_FACES, delegate, { detect: 0.3, presence: 0.15, track: 0.15 }),
+      createLandmarker('IMAGE', MAX_FACES, delegate),
+      createLandmarker('IMAGE', 2, delegate, { detect: 0.2, presence: 0.15, track: 0.15 }),
+    ])
     let embedder: ImageEmbedder | null = null
     try {
       embedder = await ImageEmbedder.createFromOptions(await visionFileset(), {
@@ -133,7 +140,7 @@ export function loadVideoModels() {
       // Without it, identity rests on face shape and on position over time.
       embedder = null
     }
-    return { video, image, lenient, embedder }
+    return { video, seated, image, lenient, embedder }
   })()
   return models
 }
@@ -353,7 +360,9 @@ function dedupe(dets: Det[]): Det[] {
 /** Analyses `file`. Rejects with an AbortError if `signal` aborts. */
 export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) => void, signal?: AbortSignal, opts: { fixed?: boolean } = {}): Promise<VideoAnalysis> {
   const fixed = !!opts.fixed
-  const { video: vLm, image: iLm, embedder } = await loadVideoModels()
+  const models = await loadVideoModels()
+  const { image: iLm, embedder } = models
+  const vLm = fixed ? models.seated : models.video
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
   try {
     const track = await input.getPrimaryVideoTrack()

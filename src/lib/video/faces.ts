@@ -114,6 +114,162 @@ export function cropOf(src: HTMLCanvasElement, r: Region, max = 640) {
   return c
 }
 
+// ---- Is someone still in the seat? ------------------------------------------------
+//
+// With a fixed camera, a face that can't be found (turned away, a hand over
+// it) is usually still there — and its effect should stay. But the person
+// may have got up and gone. What tells them apart is what's under the
+// face: their shoulders and clothes stay put while they turn their head,
+// and are gone when they leave. So each time a face is found, a tiny
+// picture of that area is kept; while it's missing, the same area now is
+// compared with it.
+
+/** The area under a face (px box of a W × H frame): shoulders and chest. */
+export function bodyBoxOf(face: Box, W: number, H: number): Box | null {
+  const w = face.x1 - face.x0
+  const h = face.y1 - face.y0
+  const b = { x0: Math.max(0, face.x0 - w * 0.5), x1: Math.min(W, face.x1 + w * 0.5), y0: Math.min(H, face.y1 + h * 0.15), y1: Math.min(H, face.y1 + h * 1.6) }
+  // (mostly out of the picture — a close-up: nothing to go by)
+  return b.y1 - b.y0 < h * 0.4 || b.x1 - b.x0 < w ? null : b
+}
+
+const SIG = 6
+let sigCanvas: HTMLCanvasElement | null = null
+/** That area, shrunk to a few averaged colours. */
+export function bodySig(frame: HTMLCanvasElement, b: Box): Float32Array {
+  const c = (sigCanvas ??= document.createElement('canvas'))
+  c.width = c.height = SIG
+  const g = c.getContext('2d', { willReadFrequently: true })!
+  g.imageSmoothingQuality = 'high'
+  g.drawImage(frame, b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0, 0, 0, SIG, SIG)
+  const d = g.getImageData(0, 0, SIG, SIG).data
+  const out = new Float32Array(SIG * SIG * 3)
+  for (let i = 0; i < SIG * SIG; i++) for (let k = 0; k < 3; k++) out[i * 3 + k] = d[i * 4 + k] / 255
+  return out
+}
+
+/** Still the same person sitting there (not an empty seat)? */
+export function sameBody(a: Float32Array, b: Float32Array) {
+  let s = 0
+  for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i])
+  return s / a.length < 0.12
+}
+
+// ---- Which way a head faces -------------------------------------------------------
+//
+// When a seated person turns past profile, no face is left to find — and
+// the landmark models, asked to look hard, may find one on the back of the
+// head (so a nose and whiskers end up on the hair). So a fixed camera keeps
+// an eye on each head's turn: a mesh that swings further than a head can
+// turn between two frames is a mistake, and so is one that turns up after a
+// head was lost, unless a face really is there. And a head lost while
+// turning away is taken to have gone on round, out of sight — so the
+// effect's front (a nose, glasses) goes behind the head with it, while what
+// sits on top (ears, a hat) stays put.
+
+type V3 = [number, number, number]
+const pt = (lm: Float32Array, i: number, W: number, H: number): V3 => [lm[i * 3] * W, lm[i * 3 + 1] * H, lm[i * 3 + 2] * W]
+const sub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+const cross = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+const len = (a: V3) => Math.hypot(a[0], a[1], a[2])
+const unit = (a: V3): V3 => {
+  const l = Math.max(1e-9, len(a))
+  return [a[0] / l, a[1] / l, a[2] / l]
+}
+
+/** How far the head is turned, degrees (0 facing the camera; the sign
+ *  says which way). From the eye corners' depth. */
+export function yawOf(lm: Float32Array, W: number, H: number) {
+  const r = sub(pt(lm, 263, W, H), pt(lm, 33, W, H))
+  return (Math.atan2(r[2], r[0]) * 180) / Math.PI
+}
+
+/** `a − b`, degrees, the short way round. */
+const angleDiff = (a: number, b: number) => ((((a - b) % 360) + 540) % 360) - 180
+
+/** The face turned round its own head until its yaw is `yaw`. */
+export function turnTo(lm: Float32Array, yaw: number, W: number, H: number): Float32Array {
+  const from = yawOf(lm, W, H)
+  const deg = angleDiff(yaw, from)
+  if (Math.abs(deg) < 0.5) return lm
+  const up = unit(sub(pt(lm, 10, W, H), pt(lm, 152, W, H)))
+  const side = sub(pt(lm, 454, W, H), pt(lm, 234, W, H))
+  let fwd = unit(cross(unit(side), up))
+  // (out of the face, toward the camera: nearer is smaller z)
+  const nose = pt(lm, 1, W, H)
+  const mid: V3 = [(pt(lm, 234, W, H)[0] + pt(lm, 454, W, H)[0]) / 2, (pt(lm, 234, W, H)[1] + pt(lm, 454, W, H)[1]) / 2, (pt(lm, 234, W, H)[2] + pt(lm, 454, W, H)[2]) / 2]
+  const toNose = sub(nose, mid)
+  if (fwd[0] * toNose[0] + fwd[1] * toNose[1] + fwd[2] * toNose[2] < 0) fwd = [-fwd[0], -fwd[1], -fwd[2]]
+  const pivot: V3 = [mid[0] - fwd[0] * len(side) * 0.25, mid[1] - fwd[1] * len(side) * 0.25, mid[2] - fwd[2] * len(side) * 0.25]
+  const rotate = (rad: number) => {
+    const c = Math.cos(rad)
+    const s = Math.sin(rad)
+    const out = new Float32Array(lm)
+    for (let i = 0; i < N_LM; i++) {
+      const v = sub(pt(lm, i, W, H), pivot)
+      const kv = cross(up, v)
+      const d = up[0] * v[0] + up[1] * v[1] + up[2] * v[2]
+      const r: V3 = [v[0] * c + kv[0] * s + up[0] * d * (1 - c), v[1] * c + kv[1] * s + up[1] * d * (1 - c), v[2] * c + kv[2] * s + up[2] * d * (1 - c)]
+      out[i * 3] = (r[0] + pivot[0]) / W
+      out[i * 3 + 1] = (r[1] + pivot[1]) / H
+      out[i * 3 + 2] = (r[2] + pivot[2]) / W
+    }
+    return out
+  }
+  // (whichever way round gets there)
+  const rad = (deg * Math.PI) / 180
+  const a = rotate(rad)
+  return Math.abs(angleDiff(yawOf(a, W, H), yaw)) <= Math.abs(deg) / 2 ? a : rotate(-rad)
+}
+
+/** A head lost while turned this far is taken to be turning away… */
+const AWAY_FROM_DEG = 55
+/** …as is one lost turning (from at least TURNING_FROM_DEG) this fast,
+ *  deg/s. */
+const TURNING_DEG_S = 40
+const TURNING_FROM_DEG = 15
+/** It goes on round at least this fast, deg/s, to at most MAX_TURN_DEG
+ *  (well past profile: the effect's front is behind the head). */
+const AWAY_DEG_S = 90
+const MAX_TURN_DEG = 120
+
+/** Where a head lost at `yaw`, turning at `rate` deg/s, has got to `dt`
+ *  seconds later: on round, away from the camera, if it was turning away
+ *  (or already turned well away) — otherwise (a hand over the face, say)
+ *  where it was. (Run backwards from where a head turns up again — `rate`
+ *  then its turn reversed — it gives where it came back from.) */
+export function lostYaw(yaw: number, rate: number, dt: number) {
+  const s = Math.sign(yaw) || 1
+  const a = Math.abs(yaw)
+  const away = a >= AWAY_FROM_DEG || (a >= TURNING_FROM_DEG && rate * s >= TURNING_DEG_S)
+  if (!away || a >= MAX_TURN_DEG) return yaw
+  return s * Math.min(MAX_TURN_DEG, a + Math.max(AWAY_DEG_S, rate * s) * Math.max(0, dt))
+}
+
+/** A head's yaw over the last moments: how fast it's turning. */
+export class Turn {
+  private h: { yaw: number; t: number }[] = []
+
+  add(yaw: number, t: number) {
+    const last = this.h[this.h.length - 1]
+    // (a jump: start afresh)
+    if (last && (t <= last.t || t - last.t > 0.25)) this.h = []
+    this.h.push({ yaw, t })
+    while (this.h.length > 2 && t - this.h[1].t >= 0.3) this.h.shift()
+  }
+
+  /** deg/s over the last ~0.3 s (0: too little to go by). */
+  get rate() {
+    const a = this.h[0]
+    const b = this.h[this.h.length - 1]
+    return b && b.t - a.t >= 0.1 ? (b.yaw - a.yaw) / (b.t - a.t) : 0
+  }
+}
+
+/** Can a head turn from `from` to `to` degrees in `dt` seconds? (Fast
+ *  as people turn, a whole head doesn't flip in a frame.) */
+export const plausibleTurn = (from: number, to: number, dt: number) => Math.abs(to - from) <= 40 + 200 * Math.max(0, dt)
+
 /** Frame-to-frame interpolation of two packed faces. */
 export function lerpFace(a: Float32Array, b: Float32Array, f: number, out = new Float32Array(FRAME)) {
   for (let c = 0; c < FRAME; c++) out[c] = a[c] + (b[c] - a[c]) * f
