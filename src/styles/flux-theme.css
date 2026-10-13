@@ -89,8 +89,9 @@
   --surface-border-strong: rgba(89, 161, 213, 0.45);
   --text-main: #eaf6fb;
   --text-secondary: #969bb8;
-  --app-bg-image: radial-gradient(circle at 82% 10%, rgba(89, 161, 213, 0.24) 0%, rgba(5, 9, 15, 0) 42%),
-    radial-gradient(circle at 16% 88%, rgba(44, 73, 123, 0.55) 0%, rgba(4, 7, 12, 0.92) 56%, rgba(2, 4, 7, 1) 100%);
+  --app-bg-image: radial-gradient(circle at 82% 10%, rgba(89, 161, 213, 0.22) 0%, rgba(5, 9, 15, 0) 45%),
+    radial-gradient(circle at 16% 88%, rgba(44, 73, 123, 0.4) 0%, rgba(4, 7, 12, 0.6) 60%, rgba(2, 4, 7, 0.8) 100%),
+    url('/themes/ocean_bg.webp');
   --app-bg-blur: blur(18px);
 }
 
