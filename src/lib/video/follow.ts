@@ -88,9 +88,12 @@ const FRONT_DEG = 15
 const TRUE_SIZE_DEG = 40
 
 /** The preview: a head found again after being held eases from where it
- *  was held onto where it's found over this long (the export, reading
- *  ahead, eases it in before it's found). */
+ *  was held onto where it's found — over this long, or longer for a bigger
+ *  turn (at most EASE_DEG_S), up to RETURN_EASE_MAX_S. (The export, reading
+ *  ahead, eases it in before it's found.) */
 const RETURN_EASE_S = 0.35
+const RETURN_EASE_MAX_S = 0.8
+const EASE_DEG_S = 120
 
 const smoothstep = (u: number) => u * u * (3 - 2 * u)
 
@@ -184,7 +187,7 @@ export class FaceFinder {
   /** The preview: each head as last held, and a head found again easing
    *  in from there. */
   private heldOut = new Map<number, { lm: Float32Array; t: number }>()
-  private easing = new Map<number, { from: Float32Array; t0: number }>()
+  private easing = new Map<number, { from: Float32Array; t0: number; d: number }>()
   /** The time between frames, as they come (s). */
   private step = 1 / 30
   /** Fixed camera, without the segmenter: under each face last found, its
@@ -450,12 +453,11 @@ export class FaceFinder {
           this.seated.add(w.id)
           continue
         }
+        // (not shown while it looks empty; gone — till their face is seen
+        // again — once it's looked empty a moment, not at the first doubt)
         const since = this.leaving.get(w.id) ?? t
         this.leaving.set(w.id, since)
-        // (a moment's doubt — a hand sweeping past the segmenter's view —
-        // isn't leaving)
         if (t - since >= LEAVE_S) this.gone.add(w.id)
-        else this.seated.add(w.id)
       }
       if (this.hold) {
         for (const w of want) {
@@ -471,11 +473,14 @@ export class FaceFinder {
         for (const f of out) {
           if (!seen.has(f.id)) continue
           const held = this.heldOut.get(f.id)
-          if (held && t >= held.t && t - held.t <= 0.5) this.easing.set(f.id, { from: held.lm, t0: t })
+          if (held && t >= held.t && t - held.t <= 0.5) {
+            const turn = Math.abs(yawOf(held.lm, W, H) - yawOf(f.lm, W, H))
+            this.easing.set(f.id, { from: held.lm, t0: t, d: Math.min(RETURN_EASE_MAX_S, Math.max(RETURN_EASE_S, turn / EASE_DEG_S)) })
+          }
           this.heldOut.delete(f.id)
           const e = this.easing.get(f.id)
           if (!e) continue
-          const u = (t - e.t0) / RETURN_EASE_S
+          const u = (t - e.t0) / e.d
           if (u >= 1 || u < 0) this.easing.delete(f.id)
           else f.lm = easeFace(e.from, f.lm, smoothstep(u), W, H)
         }
