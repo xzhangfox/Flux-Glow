@@ -1,4 +1,4 @@
-import { ImageEmbedder, type FaceLandmarker, type NormalizedLandmark } from '@mediapipe/tasks-vision'
+import { ImageEmbedder, ImageSegmenter, type FaceLandmarker, type NormalizedLandmark } from '@mediapipe/tasks-vision'
 import { ALL_FORMATS, BlobSource, Input, VideoSampleSink } from 'mediabunny'
 import { closureFrom, createLandmarker, visionFileset } from '../faceLandmarker'
 import { nextTask } from '../schedule'
@@ -62,8 +62,16 @@ export const MAX_DURATION_S = 4 * 60 * 60
  *  so far fewer analysed frames tell who is where. */
 const RATE_FIXED = 8
 /** …and someone in their seat is still there across a gap this long (their
- *  face turned away, a hand over it). */
-const FIXED_BRIDGE_S = 10
+ *  face turned away, a hand over it, looking off at someone else) — whether
+ *  they really are, frame by frame, is the person segmenter's to say (see
+ *  follow.ts). */
+const FIXED_BRIDGE_S = 300
+/** A fixed camera: a face only becomes a person once a strict look finds
+ *  it (the lenient one that keeps a seated head through a turn also takes
+ *  a hand by the face for one now and then) — or it's there this long. */
+const SURE_AFTER_S = 20
+/** …looked for every this many analysed frames, till it's found. */
+const SURE_EVERY = 2
 /** The clearest view of each face is kept as a crop this big (px). */
 const BEST_PX = 288
 
@@ -143,6 +151,32 @@ export function loadVideoModels() {
     return { video, seated, image, lenient, embedder }
   })()
   return models
+}
+
+let strict: Promise<FaceLandmarker> | null = null
+/** A fixed camera's: a landmarker that only finds a face that surely is
+ *  one. */
+export const loadStrictLandmarker = () => (strict ??= createLandmarker('IMAGE', 2, delegate, { detect: 0.55, presence: 0.6, track: 0.5 }))
+
+let personSeg: Promise<ImageSegmenter | null> | null = null
+/** A fixed camera's: the person segmenter, which tells a seat with someone
+ *  in it (face turned away, a hand over it) from an empty one. Null if it
+ *  can't load — the seat is then judged by what's under the face. */
+export function loadPersonSegmenter() {
+  personSeg ??= (async () => {
+    try {
+      return await ImageSegmenter.createFromOptions(await visionFileset(), {
+        baseOptions: { modelAssetPath: '/mediapipe/selfie_segmenter.tflite', delegate },
+        runningMode: 'IMAGE',
+        outputConfidenceMasks: true,
+        outputCategoryMask: false,
+      })
+    } catch (err) {
+      console.warn('Person segmenter unavailable', err)
+      return null
+    }
+  })()
+  return personSeg
 }
 
 /** Warm the models up ahead of time (e.g. when the editor opens). */
@@ -330,6 +364,10 @@ class Timeline {
 interface Track {
   id: number
   tl: Timeline
+  /** A fixed camera: found by the strict landmarker (see SURE_AFTER_S), and
+   *  the analysed frame it was last looked for in. */
+  sure: boolean
+  checked: number
   /** Last box, px of the working frame, and its velocity per analysed frame. */
   box: Box
   vx: number
@@ -362,6 +400,7 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
   const fixed = !!opts.fixed
   const models = await loadVideoModels()
   const { image: iLm, embedder } = models
+  const sLm = fixed ? await loadStrictLandmarker() : null
   const vLm = fixed ? models.seated : models.video
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
   try {
@@ -418,8 +457,10 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
     const counted: Float32Array[] = []
     const knownFace = (t: Track) => !!t.embSum && counted.some((c) => cosine(c, t.embSum!) > 0.82)
     let faceless = 0
+    const sureFrames = Math.round(SURE_AFTER_S * rate)
     const retire = (t: Track) => {
       if (t.tl.n < minFrames || !t.best.canvas) return
+      if (sLm && !t.sure && t.tl.n < sureFrames) return
       t.best.url = t.best.canvas.toDataURL('image/jpeg', 0.9)
       t.best.canvas = null
       done.push(t)
@@ -524,10 +565,21 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
         if (sizeOf(d.box) < 14) return
         const tl = new Timeline()
         tl.push(fi, { x0: d.box.x0 / W, y0: d.box.y0 / H, x1: d.box.x1 / W, y1: d.box.y1 / H })
-        const t: Track = { id: nextId++, tl, box: d.box, vx: 0, vy: 0, embSum: null, embN: 0, sigs: [], sigSeen: 0, best: { score: 0, canvas: null, url: null, lm: null } }
+        const t: Track = { id: nextId++, tl, sure: false, checked: -Infinity, box: d.box, vx: 0, vy: 0, embSum: null, embN: 0, sigs: [], sigSeen: 0, best: { score: 0, canvas: null, url: null, lm: null } }
         live.push(t)
         matched.push([t, d])
       })
+
+      // A fixed camera: is each new face surely one?
+      if (sLm)
+        for (const [t, d] of matched) {
+          if (t.sure || fi - t.checked < SURE_EVERY) continue
+          t.checked = fi
+          const c = centreOf(d.box)
+          const r = windowAt(c.x, c.y, Math.min(Math.min(W, H), Math.max(sizeOf(d.box) * 2.2, 96)), W, H)
+          const res = sLm.detect(cropOf(frame, r))
+          t.sure = res.faceLandmarks.some((lm) => iou(boxOf(pack(lm, undefined, r), W, H), d.box) > 0.3)
+        }
 
       // 3. Appearance, shape and best view, for tracks seen this frame.
       for (const [t, d] of matched) {

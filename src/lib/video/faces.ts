@@ -1,4 +1,4 @@
-import type { NormalizedLandmark } from '@mediapipe/tasks-vision'
+import type { ImageSegmenter, NormalizedLandmark } from '@mediapipe/tasks-vision'
 import { withEyeClosure, type EyeClosure } from '../faceLandmarker'
 
 // What the video analysis, the preview and the export share about faces in
@@ -118,11 +118,82 @@ export function cropOf(src: HTMLCanvasElement, r: Region, max = 640) {
 //
 // With a fixed camera, a face that can't be found (turned away, a hand over
 // it) is usually still there — and its effect should stay. But the person
-// may have got up and gone. What tells them apart is what's under the
-// face: their shoulders and clothes stay put while they turn their head,
-// and are gone when they leave. So each time a face is found, a tiny
-// picture of that area is kept; while it's missing, the same area now is
-// compared with it.
+// may have got up and gone. The person segmenter tells: where their head
+// was, it still sees a person — the back of a head, hair, a hand over the
+// face are all a person — or the empty room behind. (It used to go by the
+// colours under the face, which an arm across the chest, a gesture or a
+// turn of the shoulders changed as much as leaving did: the effect went
+// whenever a hand came up to the face.) Without the segmenter, that's
+// still the fallback: a tiny picture of the area under the face, kept each
+// time it's found, compared with the same area now.
+
+let segCanvas: HTMLCanvasElement | null = null
+/** How much of `head` (px box of a W × H frame) is a person, 0..1 — looked
+ *  at in a window round it, about head and shoulders, the way the
+ *  segmenter sees people best. */
+export function personIn(seg: ImageSegmenter, frame: HTMLCanvasElement, head: Box): number {
+  const W = frame.width
+  const H = frame.height
+  const c = centreOf(head)
+  const r = windowAt(c.x, c.y + sizeOf(head) * 0.35, Math.min(Math.min(W, H), Math.max(sizeOf(head) * 2.6, 64)), W, H)
+  const src = cropOf(frame, r, 256)
+  const crop = (segCanvas ??= document.createElement('canvas'))
+  if (crop.width !== src.width || crop.height !== src.height) {
+    crop.width = src.width
+    crop.height = src.height
+  }
+  crop.getContext('2d')!.drawImage(src, 0, 0)
+  const res = seg.segment(crop)
+  const masks = res.confidenceMasks
+  const m = masks && masks[masks.length - 1]?.getAsFloat32Array()
+  res.close()
+  if (!m) return 1
+  // The middle of the head's box, in the crop.
+  const cw = crop.width
+  const ch = crop.height
+  const shrink = 0.18
+  const bx0 = ((head.x0 + (head.x1 - head.x0) * shrink) / W - r.x) / r.w
+  const bx1 = ((head.x1 - (head.x1 - head.x0) * shrink) / W - r.x) / r.w
+  const by0 = ((head.y0 + (head.y1 - head.y0) * shrink) / H - r.y) / r.h
+  const by1 = ((head.y1 - (head.y1 - head.y0) * shrink) / H - r.y) / r.h
+  const x0 = Math.max(0, Math.floor(bx0 * cw))
+  const x1 = Math.min(cw, Math.ceil(bx1 * cw))
+  const y0 = Math.max(0, Math.floor(by0 * ch))
+  const y1 = Math.min(ch, Math.ceil(by1 * ch))
+  let sum = 0
+  let n = 0
+  for (let y = y0; y < y1; y++)
+    for (let x = x0; x < x1; x++) {
+      sum += m[y * cw + x]
+      n++
+    }
+  return n ? sum / n : 1
+}
+
+const THUMB_W = 32
+const THUMB_H = 18
+let thumbCanvas: HTMLCanvasElement | null = null
+/** The frame shrunk to a few grey values: compared frame to frame, it shows
+ *  a cut to another shot. */
+export function frameThumb(frame: HTMLCanvasElement): Float32Array {
+  const c = (thumbCanvas ??= document.createElement('canvas'))
+  c.width = THUMB_W
+  c.height = THUMB_H
+  const g = c.getContext('2d', { willReadFrequently: true })!
+  g.drawImage(frame, 0, 0, THUMB_W, THUMB_H)
+  const d = g.getImageData(0, 0, THUMB_W, THUMB_H).data
+  const out = new Float32Array(THUMB_W * THUMB_H)
+  for (let i = 0; i < out.length; i++) out[i] = (0.3 * d[i * 4] + 0.59 * d[i * 4 + 1] + 0.11 * d[i * 4 + 2]) / 255
+  return out
+}
+
+/** A cut: most of the picture changed at once (not a hand passing, a head
+ *  turning — those change a corner of it). */
+export function isCut(a: Float32Array, b: Float32Array) {
+  let changed = 0
+  for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > 0.12) changed++
+  return changed / a.length > 0.55
+}
 
 /** The area under a face (px box of a W × H frame): shoulders and chest. */
 export function bodyBoxOf(face: Box, W: number, H: number): Box | null {
@@ -238,13 +309,20 @@ const MAX_TURN_DEG = 120
  *  (or already turned well away) — otherwise (a hand over the face, say)
  *  where it was. (Run backwards from where a head turns up again — `rate`
  *  then its turn reversed — it gives where it came back from.) */
-export function lostYaw(yaw: number, rate: number, dt: number) {
+export function lostYaw(yaw: number, rate: number, dt: number, max = MAX_TURN_DEG) {
   const s = Math.sign(yaw) || 1
   const a = Math.abs(yaw)
   const away = a >= AWAY_FROM_DEG || (a >= TURNING_FROM_DEG && rate * s >= TURNING_DEG_S)
-  if (!away || a >= MAX_TURN_DEG) return yaw
-  return s * Math.min(MAX_TURN_DEG, a + Math.max(AWAY_DEG_S, rate * s) * Math.max(0, dt))
+  if (!away || a >= max) return yaw
+  return s * Math.min(max, a + Math.max(AWAY_DEG_S, rate * s) * Math.max(0, dt))
 }
+
+/** A fixed camera holds a head turned at most side-on: seated in an
+ *  interview, people turn to the side to face whoever they're talking to
+ *  far more than they turn their back — and a head shown side-on while
+ *  they're facing away looks far less wrong than one facing away while
+ *  their profile is in view. */
+export const HELD_MAX_DEG = 90
 
 /** A head's yaw over the last moments: how fast it's turning. */
 export class Turn {
