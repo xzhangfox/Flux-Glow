@@ -1,5 +1,5 @@
 import { useRef, type ReactNode } from 'react'
-import { FADE_RIGHT_STYLE, useScrollFade } from './useScrollFade'
+import { FADE_RIGHT_STYLE, useScrollFade, useStartAtChosen } from './useScrollFade'
 import { IconSpinner } from './icons'
 
 // A row of previews rendered on the user's own face (Looks, Effects), the
@@ -20,6 +20,7 @@ export default function ThumbStrip({
 }) {
   const rowRef = useRef<HTMLDivElement>(null)
   const fadeRight = useScrollFade(rowRef)
+  useStartAtChosen(rowRef)
   return (
     <div ref={rowRef} className="flex gap-2.5 overflow-x-auto no-scrollbar -mx-1 px-1 pb-1 pt-1" style={fadeRight ? FADE_RIGHT_STYLE : undefined}>
       {items.map((it) => {

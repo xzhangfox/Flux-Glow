@@ -1,6 +1,6 @@
 import { useRef } from 'react'
 import { FILTER_PRESETS } from '../lib/filters'
-import { FADE_RIGHT_STYLE, useScrollFade } from './useScrollFade'
+import { FADE_RIGHT_STYLE, useScrollFade, useStartAtChosen } from './useScrollFade'
 import Slider from './Slider'
 import { IconSpinner } from './icons'
 
@@ -26,6 +26,7 @@ export default function FilterPanel({
 }) {
   const rowRef = useRef<HTMLDivElement>(null)
   const fadeRight = useScrollFade(rowRef)
+  useStartAtChosen(rowRef)
   return (
     <div>
       <div className="flex items-center h-7 mb-3">
