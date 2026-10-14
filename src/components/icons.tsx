@@ -326,6 +326,15 @@ export function IconPause(props: IconProps) {
   )
 }
 
+export function IconCamera(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.8l1.4-2h4.6l1.4 2h1.8A2.5 2.5 0 0 1 20 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17.5z" />
+      <circle cx="12" cy="12.8" r="3.6" />
+    </svg>
+  )
+}
+
 export function IconVideo(props: IconProps) {
   return (
     <svg {...base} {...props}>

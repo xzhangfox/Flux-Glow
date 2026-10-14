@@ -6,6 +6,7 @@ Part of the [Flux](https://xzhangfox.github.io) family of apps.
 
 ## Features
 
+- **Welcome screen**: a spinning sphere of the app's own screens and results (React Bits' InfiniteMenu), the picture in front in color with what it does, beside the two ways in — Camera and Edit (a photo or video you already have). Tapping the picture in front tries it: the camera opens with that look, filter or effect already on. Back returns to it; `/?mode=camera` (the home-screen shortcut) skips it.
 - **Camera**: front/back switch, real optical zoom where the browser exposes it, and zooming out below 1x to the camera's full field of view (tap the zoom pill to cycle stops, hold or swipe it for a fine-control ruler), 3:4 / 1:1 / full-screen framing, a rule-of-thirds grid, and a 3s/10s self-timer. The viewfinder is exactly what gets saved — no hidden crop.
 - **Beauty**: skin smoothing, whitening, blemish removal, wrinkle softening, smile-fold softening, and 3D fill light.
 - **Shape**: jaw, temple, cheekbone, eyes, brow height, nose width, nose bridge, and mouth (size, upper lip, lower lip, corners), each bidirectional.

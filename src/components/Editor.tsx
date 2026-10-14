@@ -48,6 +48,7 @@ import {
   IconRefresh,
   IconPlus,
   IconSettings,
+  IconBack,
 } from './icons'
 
 // Saved photos and uploads are worked on at up to this size — phone photos
@@ -70,7 +71,10 @@ const PINCH_RULER_LINGER_MS = 1000
 export type Source = { kind: 'image'; file: File } | { kind: 'live' }
 
 type Status = 'loading' | 'ready' | 'no-face' | 'error'
-type Panel = 'looks' | 'beauty' | 'shape' | 'filter' | 'effects' | 'stickers'
+export type Panel = 'looks' | 'beauty' | 'shape' | 'filter' | 'effects' | 'stickers'
+/** Where the editor opens: a panel already up, and settings already on
+ *  (an effect or filter picked on the welcome screen). */
+export type EditorStart = { panel?: Panel; params?: Partial<EditParams> }
 
 function loadImage(file: File): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -177,16 +181,21 @@ export default function Editor({
   onPickImage,
   onEditVideo,
   onTrySample,
+  onHome,
+  start,
 }: {
   source: Source
   onReset: () => void
+  /** Back to the welcome screen (the camera's top-left button). */
+  onHome?: () => void
+  start?: EditorStart
   onPickImage?: (file: File) => void
   /** Opens a video in the video editor, starting from `params`. */
   onEditVideo?: (file: Blob, params?: EditParams) => void
   onTrySample?: () => void
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [params, setParams] = useState<EditParams>(() => ({ ...DEFAULT_PARAMS, protectBackground: loadBgProtect() }))
+  const [params, setParams] = useState<EditParams>(() => ({ ...DEFAULT_PARAMS, protectBackground: loadBgProtect(), ...start?.params }))
   const [status, setStatus] = useState<Status>('loading')
   const [live, setLive] = useState(source.kind === 'live')
   // A photo just taken with the camera (not an upload): shown and edited
@@ -207,7 +216,7 @@ export default function Editor({
   const pressTimerRef = useRef<number | null>(null)
   const pressHandledRef = useRef(false)
   const [processing, setProcessing] = useState(false)
-  const [panel, setPanel] = useState<Panel | null>(null)
+  const [panel, setPanel] = useState<Panel | null>(start?.panel ?? null)
   const [showBefore, setShowBefore] = useState(false)
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user')
   const [zoom, setZoom] = useState(1)
@@ -300,7 +309,11 @@ export default function Editor({
   // the DOM (grid -> slider) before a bubble-phase listener runs, and a
   // detached node always reads as "outside".
   useEffect(() => {
+    // (The tap on the welcome screen that opened the editor with a panel up
+    // can still end in a click once the editor is here: not a tap outside.)
+    const since = performance.now()
     function onClick(e: MouseEvent) {
+      if (performance.now() - since < 600) return
       const target = e.target as Element
       if (panelRef.current?.contains(target)) return
       if (target.closest?.('[data-panel-toggle], [data-keep-panel]')) return
@@ -1190,6 +1203,11 @@ export default function Editor({
         <div className="flex items-center gap-2">
           {live ? (
             <>
+              {onHome && (
+                <TopButton label="Home" onClick={onHome}>
+                  <IconBack className="w-5 h-5" />
+                </TopButton>
+              )}
               <TopButton label={`Self-timer: ${timer ? `${timer} seconds` : 'off'}`} active={timer > 0} onClick={() => setTimer((t) => TIMER_STEPS[(TIMER_STEPS.indexOf(t) + 1) % TIMER_STEPS.length])}>
                 <IconTimer className="w-[18px] h-[18px]" />
                 {timer > 0 && <span>{timer}s</span>}
@@ -1202,7 +1220,7 @@ export default function Editor({
               </TopButton>
             </>
           ) : (
-            <TopButton label="Discard and return to camera" onClick={handleClose}>
+            <TopButton label="Discard and go back" onClick={handleClose}>
               <IconClose className="w-5 h-5" />
             </TopButton>
           )}
