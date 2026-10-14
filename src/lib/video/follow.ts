@@ -53,11 +53,16 @@ const FIXED_FILL_S = 6
  *  comes back over this long before it does. */
 const RETURN_BLEND_S = 0.8
 /** A seat the segmenter sees this much of a person in, where the head was:
- *  someone is still sitting there. */
-const PRESENT = 0.35
+ *  someone is still sitting there. (An empty one scores near 0; a head
+ *  turned away, whose outline no longer fills the box its face did, can
+ *  score as little as 0.3.) */
+const PRESENT = 0.2
 /** A seat that has looked empty this long: they've got up and gone (until
- *  their face is found again). */
+ *  their face is found again). Before then the head isn't shown — except
+ *  the preview's, held through the first DOUBT_S of a doubt (it can't look
+ *  ahead, as the export does, to see whether they're still there). */
 const LEAVE_S = 0.6
+const DOUBT_S = 0.25
 /** Frames this close (or a few frame times) follow on from each other… */
 const TRACKED_S = 0.25
 /** …and a head held a while counts as back once the same clean face has
@@ -458,6 +463,7 @@ export class FaceFinder {
         const since = this.leaving.get(w.id) ?? t
         this.leaving.set(w.id, since)
         if (t - since >= LEAVE_S) this.gone.add(w.id)
+        else if (this.hold && t - since < DOUBT_S) this.seated.add(w.id)
       }
       if (this.hold) {
         for (const w of want) {
@@ -635,6 +641,16 @@ export class FaceScout {
     this.frames.push({ ts: timestamp, raw: new Map(found.map((f) => [f.id, f.lm])), seated: this.an.fixed ? new Set(this.finder.seated) : undefined })
   }
 
+  /** A fixed camera: is person `id` in their seat in frame `j` — or only
+   *  doubted for a moment there (the segmenter unsure), seen sitting there
+   *  again just after? */
+  private inSeat(j: number, id: number) {
+    if (this.frames[j].seated?.has(id)) return true
+    const t0 = this.frames[j].ts
+    for (let k = j + 1; k < this.frames.length && this.frames[k].ts - t0 <= LEAVE_S; k++) if (this.frames[k].seated?.has(id)) return true
+    return false
+  }
+
   /** How fast the head that turns up in frame `k` turns, run backwards
    *  (from its first moments back), deg/s. */
   private rateBack(k: number, id: number, yaw: number) {
@@ -669,7 +685,7 @@ export class FaceScout {
       // eased across the whole gap; after longer, onto where it comes back
       // just before it does.
       for (const [id, h] of this.heads) {
-        if (filled.has(id) || !f.seated?.has(id) || f.ts <= h.t) continue
+        if (filled.has(id) || !this.inSeat(j, id) || f.ts <= h.t) continue
         const held = h.at(f.ts, W, H)
         let k = j + 1
         while (k < this.frames.length && this.frames[k].ts - f.ts <= this.gap && !this.frames[k].raw.has(id)) k++
