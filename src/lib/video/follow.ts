@@ -583,6 +583,8 @@ export class FaceScout {
   private lastSeen = new Map<number, { ts: number; lm: Float32Array }>()
   /** …or each head as last found (a fixed one: see Head). */
   private heads = new Map<number, Head>()
+  /** Fixed camera: when each person was last seen in their seat. */
+  private lastSeated = new Map<number, number>()
   /** Fixed camera: each head's pose in the frames just served (steady()). */
   private past = new Map<number, { ts: number; p: Pose }[]>()
   /** The frames' size, px (for which way heads face). */
@@ -642,12 +644,17 @@ export class FaceScout {
   }
 
   /** A fixed camera: is person `id` in their seat in frame `j` — or only
-   *  doubted for a moment there (the segmenter unsure), seen sitting there
-   *  again just after? */
+   *  doubted there for a moment (the segmenter unsure): seen sitting there
+   *  both just before and just after? (Not someone coming back to their
+   *  seat: they aren't shown before they're there.) */
   private inSeat(j: number, id: number) {
-    if (this.frames[j].seated?.has(id)) return true
-    const t0 = this.frames[j].ts
-    for (let k = j + 1; k < this.frames.length && this.frames[k].ts - t0 <= LEAVE_S; k++) if (this.frames[k].seated?.has(id)) return true
+    const f = this.frames[j]
+    if (f.seated?.has(id)) {
+      this.lastSeated.set(id, f.ts)
+      return true
+    }
+    const before = this.lastSeated.get(id) ?? -Infinity
+    for (let k = j + 1; k < this.frames.length && this.frames[k].ts - before <= LEAVE_S; k++) if (this.frames[k].seated?.has(id)) return true
     return false
   }
 
@@ -709,6 +716,7 @@ export class FaceScout {
         let h = this.heads.get(id)
         if (!h) this.heads.set(id, (h = new Head()))
         h.see(lm, f.ts, W, H)
+        this.lastSeated.set(id, f.ts)
       }
     }
     const prev = this.lastFilled
