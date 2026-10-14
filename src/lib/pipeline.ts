@@ -51,6 +51,14 @@ export const DEFAULT_PARAMS: EditParams = {
 /** Beauty sliders whose raw effect is too strong at the top of the track:
  *  full fill light blew the face out and full whitening went grey, so the
  *  slider's 100 maps to the strongest setting that still looks like skin. */
+/** A face turned further than this (degrees) shows no face to retouch. */
+const AWAY_DEG = 75
+/** How far a face is turned, degrees (0 toward the camera), from the depth
+ *  of its eye corners. */
+function yawOfFace(l: NormalizedLandmark[]) {
+  return (Math.atan2(l[263].z - l[33].z, l[263].x - l[33].x) * 180) / Math.PI
+}
+
 function calibrate(p: EditParams): EditParams {
   return { ...p, fillLight: p.fillLight * 0.4, whitening: p.whitening * 0.75 }
 }
@@ -148,9 +156,13 @@ function* faceSteps(base: HTMLCanvasElement, faces: FaceEdit[], frame: Pick<Edit
   working.height = base.height
   working.getContext('2d')!.drawImage(base, 0, 0)
   const ovalLoop = connectorsToLoop(FaceLandmarker.FACE_LANDMARKS_FACE_OVAL)
-  const prepared = faces.map((f) => ({ ...f, params: calibrate(withEffectBoost(f.params)) }))
+  // A face turned well past profile — a video's head held while it's
+  // turned away (see video/follow.ts) — has no skin or features in sight to
+  // retouch or reshape (they'd land on the hair): its effect alone is drawn.
+  const prepared = faces.map((f) => ({ ...f, params: calibrate(withEffectBoost(f.params)), away: Math.abs(yawOfFace(f.landmarks)) > AWAY_DEG }))
 
-  for (const { landmarks, params } of prepared) {
+  for (const { landmarks, params, away } of prepared) {
+    if (away) continue
     const mask = buildSkinMask(landmarks, base.width, base.height)
     const bounds = loopBoundsPx(ovalLoop, landmarks, base.width, base.height, Math.max(20, base.width * 0.05))
     if (highQuality) {
@@ -177,14 +189,14 @@ function* faceSteps(base: HTMLCanvasElement, faces: FaceEdit[], frame: Pick<Edit
   }
   yield
   let reshaped = working
-  for (const { landmarks, params } of prepared) reshaped = applyReshape(reshaped, landmarks, params, params.protectBackground, !highQuality)
+  for (const { landmarks, params, away } of prepared) if (!away) reshaped = applyReshape(reshaped, landmarks, params, params.protectBackground, !highQuality)
   yield
-  for (const { landmarks, params, slot } of prepared) {
+  for (const { landmarks, params, slot, away } of prepared) {
     if (params.effectId === 'none') continue
     // Effects track the face as reshaped, so ears sit on the slimmed head.
-    const tg = deformTargets(landmarks, params, base.width / base.height)
+    const tg = away ? null : deformTargets(landmarks, params, base.width / base.height)
     const pts = withEyeClosure(
-      Array.from({ length: tg.length / 2 }, (_, i) => ({ x: tg[i * 2] * base.width, y: tg[i * 2 + 1] * base.height, z: landmarks[i].z * base.width })),
+      Array.from({ length: landmarks.length }, (_, i) => ({ x: (tg ? tg[i * 2] : landmarks[i].x) * base.width, y: (tg ? tg[i * 2 + 1] : landmarks[i].y) * base.height, z: landmarks[i].z * base.width })),
       eyeClosureOf(landmarks),
     )
     drawEffect(reshaped, pts, params.effectId, t ?? (highQuality ? 0.6 : performance.now() / 1000), !highQuality, slot)

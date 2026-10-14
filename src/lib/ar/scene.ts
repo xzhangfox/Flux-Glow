@@ -232,9 +232,12 @@ function centroid(idx: number[], P: THREE.Vector3[]) {
 }
 
 function buildRig(P: THREE.Vector3[], live: boolean): Rig {
-  let eyeL = centroid(LEFT_EYE, P)
-  let eyeR = centroid(RIGHT_EYE, P)
-  if (eyeL.x > eyeR.x) [eyeL, eyeR] = [eyeR, eyeL]
+  // Left and right on screen for a face toward the camera — always the
+  // face's own right and left eye (not whichever is further left now: a
+  // head held turned past profile, its face out of sight, has them the
+  // other way round on screen, and its effect has to face away with it).
+  const eyeL = centroid(RIGHT_EYE, P)
+  const eyeR = centroid(LEFT_EYE, P)
   const E = Math.max(1, eyeL.distanceTo(eyeR))
   const right = eyeR.clone().sub(eyeL).normalize()
   const upRaw = P[10].clone().sub(P[152]).normalize()
