@@ -6,6 +6,7 @@ import { renderFilterThumbnails } from '../lib/filters'
 import { ASPECT_MODES, aspectRatioFor, cropRectFor, drawFrame, remapLandmarks, type AspectMode } from '../lib/frame'
 import { STILL_MAX, cameraConstraints, previewCopy, settlePhotoMode, switchCamera } from '../lib/camera'
 import { nextTask } from '../lib/schedule'
+import { LiveSize, landmarksAt, type Tracked } from '../lib/liveTrack'
 import BgProtectToggle from './BgProtectToggle'
 import { loadBgProtect, saveBgProtect } from '../lib/bgProtect'
 import SettingsSheet from './SettingsSheet'
@@ -56,12 +57,11 @@ import {
 // retouching passes need, and a smaller working size keeps every slider
 // drag responsive.
 const MAX_DIMENSION = 1600
-// The live viewfinder's working size. It is also the display canvas's real
-// backing-store resolution, so going lower would visibly soften the preview
-// on a high-DPI phone rather than buy hidden headroom.
-const LIVE_MAX_DIMENSION = 1280
-// ~30fps ceiling. Actual pace is still gated by the in-flight guard in the
-// loop, so a slower device just falls short of it instead of backlogging.
+// The live viewfinder's working size is also the display canvas's real
+// backing-store resolution: 1280 on a side, stepping down only as far as a
+// phone needs to keep up with its camera (see liveTrack.ts).
+// The camera's frame interval where the browser doesn't say (no
+// requestVideoFrameCallback): frames are then paced by the display.
 const LIVE_FRAME_INTERVAL_MS = 33
 const TIMER_STEPS = [0, 3, 10] as const
 // How long the zoom ruler stays after a pinch ends.
@@ -270,6 +270,9 @@ export default function Editor({
   const fullResultRef = useRef<{ params: EditParams; canvas: HTMLCanvasElement } | null>(null)
   const rafRef = useRef(0)
   const lastFrameRef = useRef(0)
+  // The live tracker's two newest results (the shutter takes the face from
+  // them, carried on to the moment it fires).
+  const liveTrackRef = useRef<{ newest: Tracked | null; before: Tracked | null }>({ newest: null, before: null })
   // Bumped on every stop/start of the camera. A live frame whose detection
   // is still in flight when the shutter fires (or the camera flips) must
   // not land afterwards and overwrite the captured photo with a stale,
@@ -448,69 +451,92 @@ export default function Editor({
       await tracker.ready()
       if (gen !== liveGenRef.current) return
 
-      // Two stages, side by side: the tracker finds the face in the newest
-      // frame (in a worker of its own, where it has one) while the page
-      // retouches the frame before it — so the preview keeps up with the
-      // slower of the two, not both added together. A tracked frame waits
-      // for the retouch only while the one before is still in it, and no
-      // further frame is tracked meanwhile (nothing tracked to be dropped).
-      // Both run in tasks of their own, outside the frame callback, broken
-      // up between stages, so taps and slider moves are handled — and
-      // painted — in between instead of waiting for a whole frame.
+      // Every frame the camera gives is drawn, retouched and shown, at the
+      // camera's own rate (requestVideoFrameCallback); the tracker, in a
+      // worker of its own where it has one, takes the newest frame each
+      // time it's free. A frame is retouched with the newest face found,
+      // carried on by the face's motion to the frame's moment (liveTrack.ts)
+      // — so a phone whose tracker manages half the camera's rate still
+      // shows every frame, not every other one. The retouch runs in tasks
+      // of its own, broken up between stages, so taps and slider moves are
+      // handled — and painted — in between; and at a size the phone keeps up
+      // with at the camera's rate.
+      liveTrackRef.current = { newest: null, before: null }
+      const size = new LiveSize()
+      const viewCrop = () =>
+        // (hardware zoom already zoomed the sensor output — cropping again on
+        // top of it would double-zoom)
+        cropRectFor(video.videoWidth, video.videoHeight, aspectRatioFor(aspectRef.current), cropZoom(zoomRef.current, zoomRangeRef.current))
       let tracking = false
-      let retouching = false
-      let tracked: { base: HTMLCanvasElement; landmarks: NormalizedLandmark[] | null } | null = null
-      const retouchNext = async () => {
-        if (retouching || !tracked || gen !== liveGenRef.current) return
-        const job = tracked
-        tracked = null
-        retouching = true
-        try {
-          const result = await processFrameInSteps(job.base, job.landmarks, paramsRef.current, nextTask)
-          if (gen !== liveGenRef.current) return
-          baseRef.current = job.base
-          landmarksRef.current = job.landmarks
-          resultRef.current = result
-          setStatus(job.landmarks ? 'ready' : 'no-face')
-          render()
-        } catch {
-          // (a frame lost; the next one tries again)
-        } finally {
-          retouching = false
-          void retouchNext()
-        }
+      const trackNewest = () => {
+        if (tracking) return
+        tracking = true
+        const at = performance.now()
+        const crop = viewCrop()
+        tracker
+          .detect(video, at, { x: crop.x0, y: crop.y0, w: crop.fw, h: crop.fh })
+          .then(
+            (lm) => {
+              if (gen === liveGenRef.current) liveTrackRef.current = { newest: { lm, at }, before: liveTrackRef.current.newest }
+            },
+            () => {},
+          )
+          .finally(() => (tracking = false))
       }
 
-      const loop = () => {
-        if (gen !== liveGenRef.current) return
-        rafRef.current = requestAnimationFrame(loop)
-        if (tracking || tracked || video.readyState < 2) return
-        const now = performance.now()
-        if (now - lastFrameRef.current < LIVE_FRAME_INTERVAL_MS) return
-        lastFrameRef.current = now
-        tracking = true
+      let retouching = false
+      let interval = LIVE_FRAME_INTERVAL_MS
+      const retouch = () => {
+        retouching = true
+        const t0 = performance.now()
         void (async () => {
           try {
             await nextTask()
             if (gen !== liveGenRef.current) return
             const mirror = facingModeRef.current === 'user'
-            // Hardware zoom already zoomed the sensor output — cropping again
-            // on top of it would double-zoom.
-            const crop = cropRectFor(video.videoWidth, video.videoHeight, aspectRatioFor(aspectRef.current), cropZoom(zoomRef.current, zoomRangeRef.current))
-            // (the frame's picture and the tracker's copy, taken together)
-            const base = drawFrame(video, LIVE_MAX_DIMENSION, crop, mirror)
-            const raw = await tracker.detect(video, now, { x: crop.x0, y: crop.y0, w: crop.fw, h: crop.fh })
+            const crop = viewCrop()
+            const { newest, before } = liveTrackRef.current
+            const base = drawFrame(video, size.size, crop, mirror)
+            const landmarks = remapLandmarks(landmarksAt(newest, before, performance.now()), crop, mirror)
+            const result = await processFrameInSteps(base, landmarks, paramsRef.current, nextTask)
             if (gen !== liveGenRef.current) return
-            tracked = { base, landmarks: remapLandmarks(raw, crop, mirror) }
-            void retouchNext()
+            baseRef.current = base
+            landmarksRef.current = landmarks
+            resultRef.current = result
+            setStatus(landmarks ? 'ready' : 'no-face')
+            render()
+            size.note(performance.now() - t0, interval)
           } catch {
             // (a frame lost; the next one tries again)
           } finally {
-            tracking = false
+            retouching = false
           }
         })()
       }
-      loop()
+
+      let lastMedia = 0
+      const frame = (meta?: VideoFrameCallbackMetadata) => {
+        if (gen !== liveGenRef.current) return
+        next()
+        if (meta) {
+          const t = meta.mediaTime * 1000
+          if (lastMedia && t > lastMedia && t - lastMedia < 200) interval += (t - lastMedia - interval) * 0.1
+          lastMedia = t
+        } else {
+          const now = performance.now()
+          if (now - lastFrameRef.current < LIVE_FRAME_INTERVAL_MS) return
+          lastFrameRef.current = now
+        }
+        if (video.readyState < 2) return
+        trackNewest()
+        // (the first frame waits for the first look for a face)
+        if (!retouching && liveTrackRef.current.newest) retouch()
+      }
+      const next = () => {
+        if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback((_, meta) => frame(meta))
+        else rafRef.current = requestAnimationFrame(() => frame())
+      }
+      next()
     } catch {
       if (gen === liveGenRef.current) setStatus('error')
     }
@@ -558,7 +584,9 @@ export default function Editor({
     const base = Math.max(full.width, full.height) > MAX_DIMENSION ? drawFrame(full, MAX_DIMENSION, FULL_FRAME, false, 'high') : full
     fullBaseRef.current = base === full ? null : full
     fullResultRef.current = null
-    const liveLandmarks = landmarksRef.current
+    // (the newest tracked face, carried on to this moment)
+    const { newest, before } = liveTrackRef.current
+    const liveLandmarks = newest ? remapLandmarks(landmarksAt(newest, before, performance.now()), crop, mirror) : landmarksRef.current
     staticBusyRef.current = true
     capturedRef.current = true
     setCaptured(true)
