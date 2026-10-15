@@ -7,7 +7,7 @@ import { ASPECT_MODES, aspectRatioFor, cropRectFor, drawFrame, remapLandmarks, t
 import { STILL_MAX, cameraConstraints, previewCopy, settlePhotoMode, switchCamera } from '../lib/camera'
 import { nextTask } from '../lib/schedule'
 import { LiveSize, landmarksAt, type Tracked } from '../lib/liveTrack'
-import { LiveRecorder, canRecordLive, loadLivePhoto, motionPhoto, saveLivePhoto, type LiveClip } from '../lib/livePhoto'
+import { LiveRecorder, canRecordLive, loadLivePhoto, motionPhoto, renderLive, saveLivePhoto, type LiveClip, type LiveTake } from '../lib/livePhoto'
 import BgProtectToggle from './BgProtectToggle'
 import { loadBgProtect, saveBgProtect } from '../lib/bgProtect'
 import SettingsSheet from './SettingsSheet'
@@ -205,10 +205,11 @@ export default function Editor({
   // same rendering — nothing re-detected or re-processed differently.
   const [captured, setCaptured] = useState(false)
   // Live Photo: the switch (where the browser can record one), and the
-  // captured photo's clip — on its way, or ready to play and save with it.
+  // captured photo's clip — on its way, or ready to play and save with it,
+  // made for the edit (and stickers) the photo had then.
   const [canLive, setCanLive] = useState(false)
   const [livePhoto, setLivePhoto] = useState(loadLivePhoto)
-  const [liveClip, setLiveClip] = useState<'pending' | { clip: LiveClip; url: string } | null>(null)
+  const [liveClip, setLiveClip] = useState<'pending' | { clip: LiveClip; url: string; params: EditParams; stickers: Sticker[] } | null>(null)
   const [playingClip, setPlayingClip] = useState(false)
   const capturedRef = useRef(false)
   // Video: long-press the shutter to record.
@@ -281,12 +282,14 @@ export default function Editor({
   // The live tracker's two newest results (the shutter takes the face from
   // them, carried on to the moment it fires).
   const liveTrackRef = useRef<{ newest: Tracked | null; before: Tracked | null }>({ newest: null, before: null })
-  // Live Photo: the running camera's recorder; after a Live Photo's shutter,
-  // the edit its last moments are recorded with (the camera runs on a
-  // moment for them, out of sight); and the clip on its way.
+  // Live Photo: the running camera's recorder; whether a Live Photo's
+  // shutter has gone (the camera runs on a moment, out of sight, recording
+  // the moments after it); the captured photo's take (see livePhoto.ts);
+  // and the clip being made from it, for the edit it's being made for.
   const liveRecRef = useRef<LiveRecorder | null>(null)
-  const afterShutterRef = useRef<{ params: EditParams } | null>(null)
-  const clipRef = useRef<Promise<LiveClip | null> | null>(null)
+  const afterShutterRef = useRef(false)
+  const takeRef = useRef<Promise<LiveTake | null> | null>(null)
+  const clipJobRef = useRef<{ params: EditParams; stickers: Sticker[]; job: Promise<LiveClip | null> } | null>(null)
   const captureIdRef = useRef(0)
   const livePhotoRef = useRef(livePhoto)
   livePhotoRef.current = livePhoto
@@ -393,7 +396,7 @@ export default function Editor({
     cancelAnimationFrame(rafRef.current)
     liveRecRef.current?.stop()
     liveRecRef.current = null
-    afterShutterRef.current = null
+    afterShutterRef.current = false
     streamRef.current?.getTracks().forEach((t) => t.stop())
     streamRef.current = null
     previewTrackRef.current?.stop()
@@ -520,13 +523,14 @@ export default function Editor({
             const at = performance.now()
             const base = drawFrame(video, size.size, crop, mirror)
             const landmarks = remapLandmarks(landmarksAt(newest, before, at), crop, mirror)
-            const after = afterShutterRef.current
-            const result = await processFrameInSteps(base, landmarks, after?.params ?? paramsRef.current, nextTask)
-            if (gen !== liveGenRef.current) return
-            // (not while a video's being recorded: that's its own clip)
-            if (!recRef.current) liveRecRef.current?.push(result, at)
+            // (the frame as it came, for a Live Photo: its clip gets the
+            // photo's edit — not while a video's being recorded, that's its
+            // own clip)
+            if (!recRef.current) liveRecRef.current?.push(base, at, landmarks)
             // (after a Live Photo's shutter: the moments after it, for its clip only)
-            if (after) return
+            if (afterShutterRef.current) return
+            const result = await processFrameInSteps(base, landmarks, paramsRef.current, nextTask)
+            if (gen !== liveGenRef.current) return
             baseRef.current = base
             landmarksRef.current = landmarks
             resultRef.current = result
@@ -572,8 +576,11 @@ export default function Editor({
   // Turns a still frame into the editable photo: full-quality landmark
   // detection on that exact frame (IMAGE mode, not the live tracker's
   // estimate), then the high-quality retouching pass.
+  // `after`: what the full-quality pass waits for — a Live Photo's moments
+  // after the shutter, which the camera is still recording (a pass that
+  // long, run now, would hold up its frames and leave a jump in the clip).
   const loadStill = useCallback(
-    async (base: HTMLCanvasElement, liveLandmarks: NormalizedLandmark[] | null = null) => {
+    async (base: HTMLCanvasElement, liveLandmarks: NormalizedLandmark[] | null = null, after?: Promise<unknown>) => {
       staticBusyRef.current = true
       setProcessing(true)
       baseRef.current = base
@@ -588,6 +595,16 @@ export default function Editor({
         landmarksRef.current = liveLandmarks
       }
       setStatus(landmarksRef.current ? 'ready' : 'no-face')
+      if (after) {
+        const id = captureIdRef.current
+        await after
+        // (discarded meanwhile: the camera's back)
+        if (captureIdRef.current !== id) {
+          staticBusyRef.current = false
+          setProcessing(false)
+          return
+        }
+      }
       await nextPaint()
       recomputeStatic()
       staticBusyRef.current = false
@@ -618,27 +635,67 @@ export default function Editor({
     capturedRef.current = true
     setCaptured(true)
     // A Live Photo: the camera runs on a moment, out of sight, recording the
-    // moments after the shutter with this edit; then it stops.
+    // moments after the shutter; then it stops, and the clip is made with
+    // the photo's edit.
     const id = ++captureIdRef.current
-    const rec = liveRecRef.current
-    const clip = rec?.shutter(performance.now()) ?? null
-    clipRef.current = clip
-    setLiveClip(clip ? 'pending' : null)
+    const take = liveRecRef.current?.shutter(performance.now()) ?? null
+    takeRef.current = take
+    clipJobRef.current = null
+    setLiveClip(take ? 'pending' : null)
     setPlayingClip(false)
-    if (clip) {
+    if (take) {
       const gen = liveGenRef.current
-      afterShutterRef.current = { params: paramsRef.current }
-      void clip.then((c) => {
+      afterShutterRef.current = true
+      void take.then((t) => {
         if (liveGenRef.current === gen) stopLive()
-        if (captureIdRef.current === id) setLiveClip(c ? { clip: c, url: URL.createObjectURL(c.blob) } : null)
+        if (captureIdRef.current !== id) return
+        if (!t) {
+          takeRef.current = null
+          setLiveClip(null)
+        } else void clipFor(paramsRef.current, stickersRef.current)
       })
     } else stopLive()
     setLive(false)
     // The last live frame (already retouched at preview quality) stays on
     // screen while the full-quality pass runs, so there's no flash of the
     // untouched photo in between.
-    loadStill(base, liveLandmarks)
+    loadStill(base, liveLandmarks, take ?? undefined)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stopLive, loadStill])
+
+  // A Live Photo's clip for an edit (and stickers): every frame of the take
+  // with it — the effect, retouch, filter and stickers from the first frame
+  // to the last, as the photo has them. Made once per edit; the newest
+  // shows on the LIVE badge.
+  const clipFor = useCallback((params: EditParams, stickers: Sticker[]): Promise<LiveClip | null> => {
+    const current = clipJobRef.current
+    if (current && current.params === params && current.stickers === stickers) return current.job
+    const take = takeRef.current
+    if (!take) return Promise.resolve(null)
+    const id = captureIdRef.current
+    const cancelled = () => captureIdRef.current !== id
+    const job = take.then(async (t) => {
+      if (!t || cancelled()) return null
+      // (an effect still loading would be missing from the first frames)
+      await prepareEffect(params.effectId).catch(() => {})
+      return renderLive(
+        t,
+        async (frame, face, at) => {
+          const r = await processFrameInSteps(frame, face, params, nextTask, at)
+          if (stickers.length) drawStickers(r.getContext('2d')!, stickers, r.width, r.height)
+          return r
+        },
+        cancelled,
+      )
+    })
+    clipJobRef.current = { params, stickers, job }
+    setLiveClip('pending')
+    void job.then((clip) => {
+      if (cancelled() || clipJobRef.current?.job !== job) return
+      setLiveClip(clip ? { clip, url: URL.createObjectURL(clip.blob), params, stickers } : null)
+    })
+    return job
+  }, [])
 
   // Uploaded photo.
   useEffect(() => {
@@ -1018,7 +1075,8 @@ export default function Editor({
   // ✕ in review: discard and go back to the camera.
   const handleClose = () => {
     captureIdRef.current++
-    clipRef.current = null
+    takeRef.current = null
+    clipJobRef.current = null
     setLiveClip(null)
     setPlayingClip(false)
     capturedRef.current = false
@@ -1054,8 +1112,18 @@ export default function Editor({
     showToast(on ? 'Live Photo on' : 'Live Photo off')
   }
 
-  // (a clip let go of — another photo, or leaving — frees its file)
+  // (a clip let go of — another photo, another edit, or leaving — frees its file)
   useEffect(() => () => void (liveClip && liveClip !== 'pending' && URL.revokeObjectURL(liveClip.url)), [liveClip])
+  // (an edit made: the clip playing was the last edit's; once the edit has
+  // settled, its own clip is made, so Play and Save don't wait for it)
+  useEffect(() => setPlayingClip(false), [params, stickers])
+  useEffect(() => {
+    if (!captured || !liveClip || liveClip === 'pending' || (liveClip.params === params && liveClip.stickers === stickers)) return
+    const t = setTimeout(() => void clipFor(params, stickers), 1500)
+    return () => clearTimeout(t)
+  }, [captured, liveClip, params, stickers, clipFor])
+  // (leaving: a clip being made stops)
+  useEffect(() => () => void captureIdRef.current++, [])
 
   const handleFlip = () => {
     cancelCountdown()
@@ -1192,10 +1260,29 @@ export default function Editor({
   // inside for Google Photos and Samsung's Gallery to play) — on iOS, where
   // a web app can't make a Live Photo, as the photo and the clip together.
   const liveFiles = async (blob: Blob, name: string): Promise<{ blob: Blob; files: File[] | null }> => {
-    const clip = clipRef.current ? await clipRef.current : null
+    if (!takeRef.current) return { blob, files: null }
+    // (the clip for the photo as it's saved: made now if it's been edited since)
+    setProcessing(true)
+    let clip: LiveClip | null = null
+    try {
+      clip = await clipFor(paramsRef.current, stickersRef.current)
+    } finally {
+      setProcessing(false)
+    }
     if (!clip) return { blob, files: null }
     if (isIOS) return { blob, files: [new File([blob], name, { type: 'image/jpeg' }), new File([clip.blob], name.replace(/\.jpg$/, '.mp4'), { type: 'video/mp4' })] }
     return { blob: await motionPhoto(blob, clip), files: null }
+  }
+
+  // (dismissed, or — the share sheet only opens soon after a tap, and
+  // making the photo and its clip took longer — refused: by the next tap
+  // they're made, and it opens at once)
+  const shareOrRetry = async (data: ShareData) => {
+    try {
+      await navigator.share(data)
+    } catch (err) {
+      if ((err as Error)?.name === 'NotAllowedError') showToast('Ready — tap again')
+    }
   }
 
   const handleSave = async () => {
@@ -1204,20 +1291,12 @@ export default function Editor({
     const name = timestampedName('jpg')
     const { blob, files } = await liveFiles(photo, name)
     if (files && navigator.canShare?.({ files })) {
-      try {
-        await navigator.share({ files })
-      } catch {
-        // dismissed
-      }
+      await shareOrRetry({ files })
       return
     }
     const file = new File([blob], name, { type: 'image/jpeg' })
     if (isIOS && navigator.canShare?.({ files: [file] })) {
-      try {
-        await navigator.share({ files: [file] })
-      } catch {
-        // dismissed
-      }
+      await shareOrRetry({ files: [file] })
       return
     }
     downloadBlob(blob, name)
@@ -1230,20 +1309,12 @@ export default function Editor({
     const name = timestampedName('jpg')
     const { blob, files } = await liveFiles(photo, name)
     if (files && navigator.canShare?.({ files })) {
-      try {
-        await navigator.share({ files, title: 'Flux Glow' })
-      } catch {
-        // dismissed
-      }
+      await shareOrRetry({ files, title: 'Flux Glow' })
       return
     }
     const file = new File([blob], name, { type: 'image/jpeg' })
     if (navigator.canShare?.({ files: [file] })) {
-      try {
-        await navigator.share({ files: [file], title: 'Flux Glow' })
-      } catch {
-        // dismissed
-      }
+      await shareOrRetry({ files: [file], title: 'Flux Glow' })
       return
     }
     downloadBlob(blob, name)
@@ -1401,7 +1472,13 @@ export default function Editor({
       )}
       {captured && liveClip && (
         <button
-          onClick={() => liveClip !== 'pending' && setPlayingClip((v) => !v)}
+          onClick={() => {
+            if (liveClip === 'pending') return
+            if (playingClip) return setPlayingClip(false)
+            // (made again first if the photo's been edited since)
+            if (liveClip.params !== params || liveClip.stickers !== stickers) void clipFor(params, stickers)
+            setPlayingClip(true)
+          }}
           aria-label={liveClip === 'pending' ? 'Live Photo: finishing' : playingClip ? 'Stop the Live Photo' : 'Play the Live Photo'}
           aria-pressed={playingClip}
           className={`absolute left-3 z-10 flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-bold tracking-[0.14em] transition ${playingClip ? 'bg-primary text-black' : 'bg-black/50 text-white'}`}

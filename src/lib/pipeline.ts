@@ -129,9 +129,10 @@ export function processFaces(base: HTMLCanvasElement, faces: FaceEdit[], frame: 
  *  stages (tone, reshape, effects, filter): each is a task of its own, so
  *  a tap or a slider move waiting to be handled doesn't wait for the
  *  whole frame. Every stage makes its own output, so whatever runs in
- *  between can't disturb it. */
-export async function processFrameInSteps(base: HTMLCanvasElement, landmarks: NormalizedLandmark[] | null, params: EditParams, pause: () => Promise<void>): Promise<HTMLCanvasElement> {
-  const steps = faceSteps(base, landmarks ? [{ landmarks, params }] : [], params, false)
+ *  between can't disturb it. `t`: the frame's moment (s), for a frame
+ *  rendered after it was taken (a Live Photo's). */
+export async function processFrameInSteps(base: HTMLCanvasElement, landmarks: NormalizedLandmark[] | null, params: EditParams, pause: () => Promise<void>, t?: number): Promise<HTMLCanvasElement> {
+  const steps = faceSteps(base, landmarks ? [{ landmarks, params }] : [], params, false, t)
   let r = steps.next()
   while (!r.done) {
     await pause()
