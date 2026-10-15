@@ -7,6 +7,7 @@ import { ASPECT_MODES, aspectRatioFor, cropRectFor, drawFrame, remapLandmarks, t
 import { STILL_MAX, cameraConstraints, previewCopy, settlePhotoMode, switchCamera } from '../lib/camera'
 import { nextTask } from '../lib/schedule'
 import { LiveSize, landmarksAt, type Tracked } from '../lib/liveTrack'
+import { LiveRecorder, canRecordLive, loadLivePhoto, motionPhoto, saveLivePhoto, type LiveClip } from '../lib/livePhoto'
 import BgProtectToggle from './BgProtectToggle'
 import { loadBgProtect, saveBgProtect } from '../lib/bgProtect'
 import SettingsSheet from './SettingsSheet'
@@ -50,6 +51,7 @@ import {
   IconPlus,
   IconSettings,
   IconBack,
+  IconLive,
 } from './icons'
 
 // Saved photos and uploads are worked on at up to this size — phone photos
@@ -202,6 +204,12 @@ export default function Editor({
   // exactly as the viewfinder showed it — same framing, same face fit,
   // same rendering — nothing re-detected or re-processed differently.
   const [captured, setCaptured] = useState(false)
+  // Live Photo: the switch (where the browser can record one), and the
+  // captured photo's clip — on its way, or ready to play and save with it.
+  const [canLive, setCanLive] = useState(false)
+  const [livePhoto, setLivePhoto] = useState(loadLivePhoto)
+  const [liveClip, setLiveClip] = useState<'pending' | { clip: LiveClip; url: string } | null>(null)
+  const [playingClip, setPlayingClip] = useState(false)
   const capturedRef = useRef(false)
   // Video: long-press the shutter to record.
   const [recordingSince, setRecordingSince] = useState<number | null>(null)
@@ -273,6 +281,15 @@ export default function Editor({
   // The live tracker's two newest results (the shutter takes the face from
   // them, carried on to the moment it fires).
   const liveTrackRef = useRef<{ newest: Tracked | null; before: Tracked | null }>({ newest: null, before: null })
+  // Live Photo: the running camera's recorder; after a Live Photo's shutter,
+  // the edit its last moments are recorded with (the camera runs on a
+  // moment for them, out of sight); and the clip on its way.
+  const liveRecRef = useRef<LiveRecorder | null>(null)
+  const afterShutterRef = useRef<{ params: EditParams } | null>(null)
+  const clipRef = useRef<Promise<LiveClip | null> | null>(null)
+  const captureIdRef = useRef(0)
+  const livePhotoRef = useRef(livePhoto)
+  livePhotoRef.current = livePhoto
   // Bumped on every stop/start of the camera. A live frame whose detection
   // is still in flight when the shutter fires (or the camera flips) must
   // not land afterwards and overwrite the captured photo with a stale,
@@ -374,6 +391,9 @@ export default function Editor({
   const stopLive = useCallback(() => {
     liveGenRef.current++
     cancelAnimationFrame(rafRef.current)
+    liveRecRef.current?.stop()
+    liveRecRef.current = null
+    afterShutterRef.current = null
     streamRef.current?.getTracks().forEach((t) => t.stop())
     streamRef.current = null
     previewTrackRef.current?.stop()
@@ -462,6 +482,7 @@ export default function Editor({
       // handled — and painted — in between; and at a size the phone keeps up
       // with at the camera's rate.
       liveTrackRef.current = { newest: null, before: null }
+      liveRecRef.current = livePhotoRef.current && typeof VideoEncoder !== 'undefined' ? new LiveRecorder() : null
       const size = new LiveSize()
       const viewCrop = () =>
         // (hardware zoom already zoomed the sensor output — cropping again on
@@ -496,10 +517,16 @@ export default function Editor({
             const mirror = facingModeRef.current === 'user'
             const crop = viewCrop()
             const { newest, before } = liveTrackRef.current
+            const at = performance.now()
             const base = drawFrame(video, size.size, crop, mirror)
-            const landmarks = remapLandmarks(landmarksAt(newest, before, performance.now()), crop, mirror)
-            const result = await processFrameInSteps(base, landmarks, paramsRef.current, nextTask)
+            const landmarks = remapLandmarks(landmarksAt(newest, before, at), crop, mirror)
+            const after = afterShutterRef.current
+            const result = await processFrameInSteps(base, landmarks, after?.params ?? paramsRef.current, nextTask)
             if (gen !== liveGenRef.current) return
+            // (not while a video's being recorded: that's its own clip)
+            if (!recRef.current) liveRecRef.current?.push(result, at)
+            // (after a Live Photo's shutter: the moments after it, for its clip only)
+            if (after) return
             baseRef.current = base
             landmarksRef.current = landmarks
             resultRef.current = result
@@ -590,7 +617,22 @@ export default function Editor({
     staticBusyRef.current = true
     capturedRef.current = true
     setCaptured(true)
-    stopLive()
+    // A Live Photo: the camera runs on a moment, out of sight, recording the
+    // moments after the shutter with this edit; then it stops.
+    const id = ++captureIdRef.current
+    const rec = liveRecRef.current
+    const clip = rec?.shutter(performance.now()) ?? null
+    clipRef.current = clip
+    setLiveClip(clip ? 'pending' : null)
+    setPlayingClip(false)
+    if (clip) {
+      const gen = liveGenRef.current
+      afterShutterRef.current = { params: paramsRef.current }
+      void clip.then((c) => {
+        if (liveGenRef.current === gen) stopLive()
+        if (captureIdRef.current === id) setLiveClip(c ? { clip: c, url: URL.createObjectURL(c.blob) } : null)
+      })
+    } else stopLive()
     setLive(false)
     // The last live frame (already retouched at preview quality) stays on
     // screen while the full-quality pass runs, so there's no flash of the
@@ -975,6 +1017,10 @@ export default function Editor({
 
   // ✕ in review: discard and go back to the camera.
   const handleClose = () => {
+    captureIdRef.current++
+    clipRef.current = null
+    setLiveClip(null)
+    setPlayingClip(false)
     capturedRef.current = false
     fullBaseRef.current = null
     fullResultRef.current = null
@@ -985,6 +1031,31 @@ export default function Editor({
     if (source.kind === 'live') startLive()
     else onReset()
   }
+
+  // (whether this browser can encode the clip: the switch shows where it can)
+  useEffect(() => {
+    let on = true
+    void canRecordLive().then((ok) => on && setCanLive(ok))
+    return () => {
+      on = false
+    }
+  }, [])
+
+  const toggleLivePhoto = () => {
+    const on = !livePhoto
+    setLivePhoto(on)
+    saveLivePhoto(on)
+    // (a camera that's running starts or stops keeping its last moments)
+    if (on && live && !liveRecRef.current) liveRecRef.current = new LiveRecorder()
+    if (!on) {
+      liveRecRef.current?.stop()
+      liveRecRef.current = null
+    }
+    showToast(on ? 'Live Photo on' : 'Live Photo off')
+  }
+
+  // (a clip let go of — another photo, or leaving — frees its file)
+  useEffect(() => () => void (liveClip && liveClip !== 'pending' && URL.revokeObjectURL(liveClip.url)), [liveClip])
 
   const handleFlip = () => {
     cancelCountdown()
@@ -1117,10 +1188,29 @@ export default function Editor({
   // iOS has no "download a file to Photos" — the share sheet's Save Image
   // is the only way a web app's photo reaches the camera roll, so Save goes
   // through it there and through a plain download everywhere else.
+  // A Live Photo goes as one Motion Photo file (the photo, with its clip
+  // inside for Google Photos and Samsung's Gallery to play) — on iOS, where
+  // a web app can't make a Live Photo, as the photo and the clip together.
+  const liveFiles = async (blob: Blob, name: string): Promise<{ blob: Blob; files: File[] | null }> => {
+    const clip = clipRef.current ? await clipRef.current : null
+    if (!clip) return { blob, files: null }
+    if (isIOS) return { blob, files: [new File([blob], name, { type: 'image/jpeg' }), new File([clip.blob], name.replace(/\.jpg$/, '.mp4'), { type: 'video/mp4' })] }
+    return { blob: await motionPhoto(blob, clip), files: null }
+  }
+
   const handleSave = async () => {
-    const blob = await exportBlob()
-    if (!blob) return
+    const photo = await exportBlob()
+    if (!photo) return
     const name = timestampedName('jpg')
+    const { blob, files } = await liveFiles(photo, name)
+    if (files && navigator.canShare?.({ files })) {
+      try {
+        await navigator.share({ files })
+      } catch {
+        // dismissed
+      }
+      return
+    }
     const file = new File([blob], name, { type: 'image/jpeg' })
     if (isIOS && navigator.canShare?.({ files: [file] })) {
       try {
@@ -1135,9 +1225,18 @@ export default function Editor({
   }
 
   const handleShare = async () => {
-    const blob = await exportBlob()
-    if (!blob) return
+    const photo = await exportBlob()
+    if (!photo) return
     const name = timestampedName('jpg')
+    const { blob, files } = await liveFiles(photo, name)
+    if (files && navigator.canShare?.({ files })) {
+      try {
+        await navigator.share({ files, title: 'Flux Glow' })
+      } catch {
+        // dismissed
+      }
+      return
+    }
     const file = new File([blob], name, { type: 'image/jpeg' })
     if (navigator.canShare?.({ files: [file] })) {
       try {
@@ -1207,6 +1306,9 @@ export default function Editor({
                 }}
               />
             </div>
+          )}
+          {captured && playingClip && liveClip && liveClip !== 'pending' && !showBefore && (
+            <video src={liveClip.url} autoPlay muted playsInline onEnded={() => setPlayingClip(false)} className="absolute inset-0 h-full w-full object-cover pointer-events-none" />
           )}
           {countdown !== null && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
@@ -1297,6 +1399,18 @@ export default function Editor({
           Loading {findEffect(params.effectId).label}…
         </div>
       )}
+      {captured && liveClip && (
+        <button
+          onClick={() => liveClip !== 'pending' && setPlayingClip((v) => !v)}
+          aria-label={liveClip === 'pending' ? 'Live Photo: finishing' : playingClip ? 'Stop the Live Photo' : 'Play the Live Photo'}
+          aria-pressed={playingClip}
+          className={`absolute left-3 z-10 flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-bold tracking-[0.14em] transition ${playingClip ? 'bg-primary text-black' : 'bg-black/50 text-white'}`}
+          style={{ top: `calc(${topInset} + 3.25rem)` }}
+        >
+          {liveClip === 'pending' ? <IconSpinner className="h-3.5 w-3.5 animate-spin" /> : <IconLive className="h-3.5 w-3.5" />}
+          LIVE
+        </button>
+      )}
       {(showBefore || processing) && (
         <div className="absolute left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/60 backdrop-blur-md text-[11px] font-semibold text-white" style={{ top: `calc(${topInset} + 3.25rem)` }}>
           {processing && !showBefore && <IconSpinner className="w-3 h-3 animate-spin text-primary" />}
@@ -1334,7 +1448,18 @@ export default function Editor({
         )}
 
         {live && !panel && status !== 'loading' && status !== 'error' && countdown === null && (
-          <div className="self-center mb-12">
+          <div className="relative mb-12 flex items-center justify-center self-stretch">
+            {canLive && recordingSince === null && (
+              <button
+                onClick={toggleLivePhoto}
+                aria-label={`Live Photo: ${livePhoto ? 'on' : 'off'}`}
+                aria-pressed={livePhoto}
+                className={`absolute left-4 flex h-9 items-center gap-1 rounded-full px-2.5 text-[10px] font-bold tracking-[0.14em] transition active:scale-95 ${livePhoto ? 'bg-primary/90 text-black' : 'bg-black/45 text-white/80'}`}
+              >
+                <IconLive off={!livePhoto} className="h-[18px] w-[18px]" />
+                LIVE
+              </button>
+            )}
             <ZoomControl range={zoomRange} value={zoom} onChange={applyZoom} pinching={pinching} />
           </div>
         )}

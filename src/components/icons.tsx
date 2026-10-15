@@ -392,3 +392,15 @@ export function IconLink(props: IconProps) {
     </svg>
   )
 }
+
+/** Live Photo: a dotted ring round a ring and a dot (struck through when off). */
+export function IconLive({ off, ...props }: IconProps & { off?: boolean }) {
+  return (
+    <svg {...base} strokeWidth={1.6} {...props}>
+      <circle cx="12" cy="12" r="9.3" strokeDasharray="0.6 2.6" />
+      <circle cx="12" cy="12" r="5.8" />
+      <circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none" />
+      {off && <path d="M4.5 4.5l15 15" strokeWidth={1.8} />}
+    </svg>
+  )
+}
