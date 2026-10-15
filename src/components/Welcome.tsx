@@ -1,47 +1,35 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ComponentType, type SVGProps } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ComponentType, type CSSProperties, type PointerEvent, type SVGProps } from 'react'
 import InfiniteMenu, { type InfiniteMenuItem } from './InfiniteMenu'
 import SettingsSheet from './SettingsSheet'
-import { useThemeColors } from '../context/ThemeContext'
 import type { EditorStart } from './Editor'
-import { IconBack, IconCamera, IconImage, IconSettings } from './icons'
+import { IconCamera, IconImage, IconSettings } from './icons'
 
-// The opening screen: a sphere of what Glow does — screens from the app and
-// photos it made, the one in front in color — beside the two ways in,
-// Camera and Edit. Each picture is also a door: tapping the one in front
-// (or its button) opens the camera with that very look, filter or effect
-// already on, or the photo picker for the things done to a photo or video.
+// The opening screen: a slowly turning sphere of travel photographs over a
+// glow that takes on the colours of the one in front, a line about Glow,
+// and the two ways in, Camera and Edit. The photos are only there to look
+// at (drag to spin them; tapping one does nothing). They're openly licensed:
+// see public/welcome/travel/CREDITS.md.
 
-type Go = { mode: 'camera'; start?: EditorStart } | { mode: 'edit'; accept: string; start?: EditorStart }
-type Feature = InfiniteMenuItem & { title: string; description: string; go: Go }
+type Photo = InfiniteMenuItem & { place: string; by?: string; glow: [string, string] }
 
-const camera = (start?: EditorStart): Go => ({ mode: 'camera', start })
-const effect = (effectId: string): Go => camera({ panel: 'effects', params: { effectId } })
-const filter = (filterId: string): Go => camera({ panel: 'filter', params: { filterId } })
+const photo = (file: string, place: string, glow: [string, string], by?: string): Photo => ({ image: `/welcome/travel/${file}.webp`, place, by, glow })
 
-// (Descriptions stay under ~40 characters: on a phone they get one line.)
-const FEATURES: Feature[] = [
-  { image: '/welcome/screen-camera.webp', title: 'Beauty camera', description: 'Retouched live as you shoot. Hold to film.', go: camera() },
-  { image: '/welcome/screen-camera-fox.webp', title: 'Live effects', description: 'Heads, masks and shades that follow you.', go: effect('foxhead') },
-  { image: '/welcome/screen-looks.webp', title: 'Looks', description: 'Baby Face, Chiseled, Glam: one tap each.', go: camera({ panel: 'looks' }) },
-  { image: '/welcome/screen-beauty.webp', title: 'Beauty', description: 'Smooth, brighten, clear blemishes, relight.', go: camera({ panel: 'beauty' }) },
-  { image: '/welcome/screen-shape.webp', title: 'Shape', description: 'Jaw, eyes, brows, nose, lips: 26 sliders.', go: camera({ panel: 'shape' }) },
-  { image: '/welcome/screen-filter.webp', title: 'Filters', description: 'Ten graded looks, previewed on your face.', go: camera({ panel: 'filter' }) },
-  { image: '/welcome/screen-stickers.webp', title: 'Stickers', description: 'Art, emoji and styled text on a photo.', go: { mode: 'edit', accept: 'image/*', start: { panel: 'stickers' } } },
-  { image: '/welcome/screen-video.webp', title: 'Video', description: 'Every face in a clip, tracked and retouched.', go: { mode: 'edit', accept: 'video/*' } },
-  { image: '/welcome/compare.webp', title: 'Before / after', description: 'Hold compare to see the original.', go: camera({ panel: 'beauty' }) },
-  { image: '/welcome/huskyhead.webp', title: 'Husky Head', description: 'A 3D head that blinks when you do.', go: effect('huskyhead') },
-  { image: '/welcome/shibahead.webp', title: 'Shiba Head', description: 'Turn, tilt, smile: it follows along.', go: effect('shibahead') },
-  { image: '/welcome/spider.webp', title: 'Spider', description: 'A full-head mask, hair tucked away.', go: effect('spider') },
-  { image: '/welcome/bat.webp', title: 'Bat', description: 'The cowl, fitted to your face.', go: effect('bat') },
-  { image: '/welcome/lavender.webp', title: 'ArtPapi', description: 'Lilac bob with matching eyes and lips.', go: effect('lavender') },
-  { image: '/welcome/glam.webp', title: 'ArtPop', description: 'Drawn-on lashes and glossy red lips.', go: effect('glam') },
-  { image: '/welcome/sport.webp', title: 'Sport', description: 'Wraparound shades that sit on your nose.', go: effect('sport') },
-  { image: '/welcome/faun.webp', title: 'Faun', description: 'Curled horns and forest markings.', go: effect('faun') },
-  { image: '/welcome/kitty.webp', title: 'Kitty', description: 'Ears and whiskers, tracked live.', go: effect('kitty') },
-  { image: '/welcome/bunny.webp', title: 'Bunny', description: 'Bunny ears that move with you.', go: effect('bunny') },
-  { image: '/welcome/fox.webp', title: 'Fox', description: 'Fox ears and a button nose.', go: effect('fox') },
-  { image: '/welcome/peach.webp', title: 'Peach', description: 'A warm, rosy filter made for skin.', go: filter('peach') },
-  { image: '/welcome/film.webp', title: 'Film', description: 'Faded blacks and a soft film tone.', go: filter('film') },
+// (Warm and cool alternate, so the glow keeps changing as it turns.)
+const PHOTOS: Photo[] = [
+  photo('antelope-canyon', 'Antelope Canyon, Arizona', ['#e8834a', '#8a3f5c'], "Ashim D'Silva"),
+  photo('ocean-above', 'The sea from above', ['#1f9fd1', '#0b5f8a'], 'Nattu Adnan'),
+  photo('monument-valley', 'Monument Valley', ['#d9764a', '#2f6f9e'], 'Jasper van der Meij'),
+  photo('peak-dusk', 'A granite peak at dusk', ['#3c6a8f', '#8a7fb0']),
+  photo('pier-sunset', 'A pier at sunset', ['#e98e6f', '#3d5a7a']),
+  photo('lake-range', 'Mountains over the lake', ['#4fa3c9', '#8da046'], 'Peter Thomas'),
+  photo('grand-canyon', 'Grand Canyon', ['#c76f7e', '#5b3f86'], 'Jad Limcaco'),
+  photo('dune-stars', 'Dunes under the stars', ['#2a5aa0', '#d39a6e'], 'Jared Evans'),
+  photo('yosemite-valley', 'Yosemite Valley, California', ['#c26a3a', '#5b7f95'], 'Aniket Deole'),
+  photo('star-trails', 'Star trails', ['#2b4a7d', '#7a5aa8'], 'Ahmadreza Sajadi'),
+  photo('dune-footprints', 'Footprints in the dunes', ['#d8b48c', '#7fa3b8'], 'David Emrich'),
+  photo('mirror-lake', 'A mirror of a lake', ['#c9855a', '#6aa3c0'], 'Sean Afnan'),
+  photo('dolomites', 'Canazei, the Dolomites', ['#a8805f', '#5f7f9a'], 'Benjamin Voros'),
+  photo('colorado-sign', 'Colorado', ['#4a9ad0', '#c48a5a'], 'Kait Herzog'),
 ]
 
 function hasWebGL2() {
@@ -55,65 +43,62 @@ function hasWebGL2() {
 }
 
 /** The sphere's zoom for its box (the front picture's half-width is
- *  0.23 × zoom × the box's shorter side): large on a phone, but clear of the
- *  header on a short one; on a wide screen, small enough that the title and
- *  description fit beside it. */
+ *  0.23 × zoom × the box's shorter side): far enough out that the globe of
+ *  photos shows round it, and clear of the header on a short phone. */
 function zoomFor(width: number, height: number) {
-  if (!width || !height) return 1.65
-  const fit = width <= height ? (height / 2 - 96) / 1.15 / (0.23 * width) : (width / 2 - 270) / (0.23 * height)
-  return Math.min(1.65, Math.max(0.9, fit))
+  if (!width || !height) return 1.2
+  const fit = width <= height ? (height / 2 - 72) / 1.15 / (0.23 * width) : (width / 2 - 200) / (0.23 * height)
+  return Math.min(width <= height ? 1.3 : 1.05, Math.max(0.85, fit))
 }
 
-function ModeButton({ icon: Icon, title, hint, inside, primary, onClick }: { icon: ComponentType<SVGProps<SVGSVGElement>>; title: string; hint: string; inside: string; primary?: boolean; onClick: () => void }) {
+/** One of the two ways in: a capsule that rises in, follows the finger with
+ *  a soft light, and springs back when pressed. */
+function ModeButton({ icon: Icon, title, hint, hintLong, primary, delay, onClick }: { icon: ComponentType<SVGProps<SVGSVGElement>>; title: string; hint: string; hintLong: string; primary?: boolean; delay: number; onClick: () => void }) {
+  const follow = (e: PointerEvent<HTMLButtonElement>) => {
+    const r = e.currentTarget.getBoundingClientRect()
+    e.currentTarget.style.setProperty('--mx', `${((e.clientX - r.left) / r.width) * 100}%`)
+    e.currentTarget.style.setProperty('--my', `${((e.clientY - r.top) / r.height) * 100}%`)
+  }
   return (
-    <button
-      onClick={onClick}
-      className={`group flex min-w-0 items-center gap-2.5 rounded-[22px] border p-3 text-left min-[400px]:gap-3 min-[400px]:p-3.5 transition active:scale-[0.98] lg:gap-4 lg:p-5 ${
-        primary ? 'border-primary bg-primary text-black shadow-glow-strong' : 'glass-strong text-white hover:border-primary/50'
-      }`}
-    >
-      <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full min-[400px]:h-11 min-[400px]:w-11 lg:h-12 lg:w-12 ${primary ? 'bg-black/15' : 'bg-white/10 text-primary'}`}>
+    <button onClick={onClick} onPointerMove={follow} onPointerDown={follow} className={`fg-mode ${primary ? 'fg-mode-primary' : 'fg-mode-soft'}`} style={{ animationDelay: `${delay}ms` } as CSSProperties}>
+      <span className="fg-mode-icon">
         <Icon className="h-[22px] w-[22px]" />
       </span>
-      <span className="min-w-0 flex-1">
-        <span className="block text-[15px] font-bold leading-tight lg:text-lg">{title}</span>
-        <span className={`mt-0.5 block text-[11px] leading-snug lg:text-[13px] ${primary ? 'text-black/70' : 'text-muted'}`}>{hint}</span>
-        <span className={`mt-2 hidden text-[10.5px] font-bold uppercase tracking-wider lg:block ${primary ? 'text-black/55' : 'text-primary/85'}`}>{inside}</span>
+      <span className="min-w-0 text-left">
+        <span className="block text-[15px] font-bold leading-tight lg:text-[17px]">{title}</span>
+        <span className="fg-mode-hint block truncate text-[11px] leading-snug lg:text-[13px]">
+          <span className="lg:hidden">{hint}</span>
+          <span className="hidden lg:inline">{hintLong}</span>
+        </span>
       </span>
-      <IconBack className="hidden h-5 w-5 shrink-0 rotate-180 opacity-60 transition group-hover:translate-x-0.5 lg:block" />
     </button>
   )
 }
 
-/** Without WebGL 2 (old browsers): the same pictures, one at a time. */
-function Slides({ onGo }: { onGo: (f: Feature) => void }) {
+/** Without WebGL 2 (old browsers): the same photos, one at a time. */
+function Slides({ onShow }: { onShow: (i: number) => void }) {
   const [i, setI] = useState(0)
   useEffect(() => {
-    const t = setInterval(() => setI((n) => (n + 1) % FEATURES.length), 3200)
+    const t = setInterval(() => setI((n) => (n + 1) % PHOTOS.length), 3600)
     return () => clearInterval(t)
   }, [])
-  const f = FEATURES[i]
+  useEffect(() => onShow(i), [i, onShow])
   return (
-    <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 px-6 pt-16">
-      <button onClick={() => onGo(f)} className="aspect-square w-full max-w-[min(70vw,48vh)] overflow-hidden rounded-[28px] shadow-glow-strong" aria-label={`Try ${f.title}`}>
-        <img key={f.image} src={f.image} alt="" className="fg-panel h-full w-full object-cover" />
-      </button>
-      <div className="text-center">
-        <p className="text-xl font-semibold">{f.title}</p>
-        <p className="text-sm text-muted">{f.description}</p>
+    <div className="absolute inset-0 flex items-center justify-center px-8 pt-14">
+      <div className="aspect-square w-full max-w-[min(68vw,46vh)] overflow-hidden rounded-[32px] shadow-[0_30px_80px_-20px_rgba(0,0,0,0.8)]">
+        <img key={i} src={PHOTOS[i].image} alt="" className="fg-photo-in h-full w-full object-cover" />
       </div>
     </div>
   )
 }
 
 export default function Welcome({ onCamera, onEdit, onSample }: { onCamera: (start?: EditorStart) => void; onEdit: (file: File, start?: EditorStart) => void; onSample: () => void }) {
-  const colors = useThemeColors()
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [webgl] = useState(hasWebGL2)
+  const [front, setFront] = useState(0)
   const boxRef = useRef<HTMLDivElement>(null)
   const [box, setBox] = useState({ width: 0, height: 0 })
   const fileRef = useRef<HTMLInputElement>(null)
-  const pickStart = useRef<EditorStart | undefined>(undefined)
 
   useLayoutEffect(() => {
     const el = boxRef.current
@@ -126,66 +111,82 @@ export default function Welcome({ onCamera, onEdit, onSample }: { onCamera: (sta
   }, [])
 
   // (The picker has to open within the tap itself, or browsers block it.)
-  const pick = (accept: string, start?: EditorStart) => {
+  const pick = () => {
     const input = fileRef.current
     if (!input) return
-    pickStart.current = start
-    input.accept = accept
+    input.accept = 'image/*,video/*'
     input.click()
   }
-  const go = (f: Feature) => (f.go.mode === 'camera' ? onCamera(f.go.start) : pick(f.go.accept, f.go.start))
 
+  const shown = PHOTOS[front]
   return (
-    <div className="fixed inset-0 flex flex-col overflow-hidden select-none lg:flex-row">
+    <div className="fg-welcome fixed inset-0 flex flex-col overflow-hidden select-none lg:flex-row" style={{ '--glow-a': shown.glow[0], '--glow-b': shown.glow[1] } as CSSProperties}>
+      {/* The glow: the front photo's colours and the theme's, drifting. */}
+      <div className="fg-aurora" aria-hidden>
+        <i className="fg-aurora-a" />
+        <i className="fg-aurora-b" />
+        <i className="fg-aurora-c" />
+        <i className="fg-sparkle" />
+        <i className="fg-sparkle fg-sparkle-late" />
+      </div>
+
       <div className="relative min-h-0 min-w-0 flex-1">
-        <div ref={boxRef} className="absolute inset-0">
+        <div ref={boxRef} className="absolute inset-0 [mask-image:linear-gradient(to_bottom,#000_86%,transparent)] lg:[mask-image:linear-gradient(to_right,#000_84%,transparent)]">
+          {/* (a halo behind the photo in front, in its colours) */}
+          <i className="fg-halo" style={{ width: Math.min(box.width, box.height) * 0.95, height: Math.min(box.width, box.height) * 0.95 }} aria-hidden />
           {webgl ? (
             <InfiniteMenu
-              items={FEATURES}
+              items={PHOTOS}
               count={160}
               tileSize={0.63}
-              roundness={0.2}
+              roundness={0.22}
               zoom={zoomFor(box.width, box.height)}
               pullBack={1}
               stretch={0.6}
               inertia={0.6}
               autoplay={3}
-              grayscale
-              dim={0.5}
+              grayscale={false}
+              dim={0.3}
               intro
-              showInfo
               theme="dark"
-              accentColor={colors.primary}
-              onItemClick={(_, index) => go(FEATURES[index])}
+              onActiveChange={(_, i) => setFront(i)}
             />
           ) : (
-            <Slides onGo={go} />
+            <Slides onShow={setFront} />
           )}
         </div>
-        <header className="pointer-events-none absolute inset-x-0 top-0 flex items-center gap-2.5 bg-gradient-to-b from-black/55 to-transparent px-4 pb-6 lg:px-8" style={{ paddingTop: 'max(0.85rem, env(safe-area-inset-top))' }}>
-          <img src="/favicon.svg" alt="" className="h-9 w-9" />
-          <div>
+        <header className="pointer-events-none absolute inset-x-0 top-0 flex items-center gap-2.5 bg-gradient-to-b from-black/50 to-transparent px-4 pb-8 lg:px-8" style={{ paddingTop: 'max(0.85rem, env(safe-area-inset-top))' }}>
+          <img src="/favicon.svg" alt="" className="fg-rise h-9 w-9" />
+          <div className="fg-rise" style={{ animationDelay: '80ms' }}>
             <p className="text-[15px] font-bold leading-tight text-white">Flux Glow</p>
-            <p className="text-[11px] leading-tight text-muted">
-              <span className="lg:hidden">Spin to explore · tap a picture to try it</span>
-              <span className="hidden lg:inline">The beauty camera that never uploads a thing</span>
-            </p>
+            <p className="text-[11px] leading-tight text-white/60">Beauty camera · private by design</p>
           </div>
         </header>
       </div>
 
-      <aside className="relative shrink-0 px-4 pt-2 lg:flex lg:w-[400px] lg:flex-col lg:justify-center lg:border-l lg:border-white/10 lg:bg-black/35 lg:px-8 lg:backdrop-blur-xl" style={{ paddingBottom: 'max(0.9rem, env(safe-area-inset-bottom))' }}>
-        <div className="mb-8 hidden lg:block">
-          <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-primary">Choose a mode</p>
-          <h1 className="mt-2 text-[28px] font-bold leading-tight text-white">Shoot it glowing, or fix it after.</h1>
-          <p className="mt-2 text-sm leading-relaxed text-muted">Spin the sphere to see what's inside. Tap the picture in front to try that one straight away.</p>
+      <aside className="relative shrink-0 px-5 pt-1 lg:flex lg:w-[480px] lg:flex-col lg:justify-center lg:pl-6 lg:pr-12" style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}>
+        <p key={front} className="fg-caption flex items-center gap-1.5 text-[11px] text-white/70 lg:text-xs">
+          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0 text-primary" fill="currentColor" aria-hidden>
+            <path d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7Zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5Z" />
+          </svg>
+          <span className="truncate">
+            {shown.place}
+            {shown.by && <span className="text-white/45"> · photo by {shown.by}</span>}
+          </span>
+        </p>
+        <h1 className="fg-rise mt-2 text-[30px] font-extrabold leading-[1.02] tracking-[-0.02em] text-white min-[400px]:text-[34px] lg:mt-3 lg:text-[48px]" style={{ animationDelay: '120ms' }}>
+          Glow,
+          <span className="fg-serif fg-shimmer block pb-1 text-[36px] font-semibold tracking-[-0.01em] min-[400px]:text-[40px] lg:text-[58px]">wherever you go.</span>
+        </h1>
+        <p className="fg-rise mt-1 hidden text-[15px] leading-relaxed text-white/65 lg:block" style={{ animationDelay: '200ms' }}>
+          A beauty camera and photo studio that does everything on your device. Shoot it glowing, or fix it after.
+        </p>
+        <div className="mt-4 grid grid-cols-2 gap-2.5 lg:mt-8 lg:grid-cols-1 lg:gap-3.5">
+          <ModeButton primary icon={IconCamera} title="Camera" hint="Live retouch" hintLong="Shoot with live retouch" delay={260} onClick={() => onCamera()} />
+          <ModeButton icon={IconImage} title="Edit" hint="Photo or video" hintLong="Retouch a photo or video" delay={360} onClick={pick} />
         </div>
-        <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-1 lg:gap-3">
-          <ModeButton primary icon={IconCamera} title="Camera" hint="Shoot with live retouch" inside="Looks · Beauty · Shape · Filters · Effects" onClick={() => onCamera()} />
-          <ModeButton icon={IconImage} title="Edit" hint="Retouch a photo or video" inside="Photos · Videos · Stickers" onClick={() => pick('image/*,video/*')} />
-        </div>
-        <p className="mt-3 text-center text-[11px] text-muted lg:mt-6 lg:text-left">
-          Everything stays on this device.{' '}
+        <p className="fg-rise mt-3.5 text-center text-[11px] text-white/55 lg:mt-6 lg:text-left lg:text-xs" style={{ animationDelay: '460ms' }}>
+          Nothing leaves this device.{' '}
           <button onClick={onSample} className="font-semibold text-primary underline-offset-2 hover:underline">
             Try a sample photo
           </button>
@@ -195,7 +196,7 @@ export default function Welcome({ onCamera, onEdit, onSample }: { onCamera: (sta
       <button
         onClick={() => setSettingsOpen(true)}
         aria-label="Settings"
-        className="absolute right-3 z-20 flex h-10 w-10 items-center justify-center rounded-full bg-black/40 text-white backdrop-blur-md transition active:scale-95"
+        className="absolute right-3 z-20 flex h-10 w-10 items-center justify-center rounded-full bg-black/40 text-white transition active:scale-95"
         style={{ top: 'max(0.75rem, env(safe-area-inset-top))' }}
       >
         <IconSettings className="h-5 w-5" />
@@ -208,7 +209,7 @@ export default function Welcome({ onCamera, onEdit, onSample }: { onCamera: (sta
         onChange={(e) => {
           const file = e.target.files?.[0]
           e.target.value = ''
-          if (file) onEdit(file, pickStart.current)
+          if (file) onEdit(file)
         }}
       />
       {settingsOpen && <SettingsSheet onClose={() => setSettingsOpen(false)} />}

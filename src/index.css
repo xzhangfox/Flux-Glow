@@ -152,3 +152,395 @@ body {
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
+
+/* ---- Welcome screen ----
+   A glow behind the photo sphere in the colours of the photo in front
+   (--glow-a, --glow-b, eased from one photo to the next), a few twinkling
+   specks, and the two mode buttons. Nothing here blurs or blends what's
+   behind it: phone browsers draw those as a square pane on moving things. */
+@property --glow-a {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #cba35c;
+}
+@property --glow-b {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #2f4256;
+}
+@property --fg-spin {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+.fg-welcome {
+  background: var(--bg-base);
+  transition:
+    --glow-a 1.8s ease,
+    --glow-b 1.8s ease;
+}
+.fg-aurora {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background:
+    radial-gradient(120% 70% at 50% 100%, color-mix(in srgb, var(--glow-a) 22%, transparent), transparent 70%),
+    radial-gradient(90% 60% at 50% 0%, color-mix(in srgb, var(--glow-b) 26%, transparent), transparent 75%);
+}
+.fg-aurora > i {
+  position: absolute;
+  width: 90vmax;
+  height: 90vmax;
+  border-radius: 50%;
+}
+.fg-aurora-a {
+  left: -35vmax;
+  top: -30vmax;
+  opacity: 0.5;
+  background: radial-gradient(closest-side, var(--glow-a), transparent);
+  animation: fg-drift-a 19s ease-in-out infinite alternate;
+}
+.fg-aurora-b {
+  right: -40vmax;
+  top: 5vmax;
+  opacity: 0.45;
+  background: radial-gradient(closest-side, var(--glow-b), transparent);
+  animation: fg-drift-b 23s ease-in-out infinite alternate;
+}
+.fg-aurora-c {
+  left: -10vmax;
+  bottom: -55vmax;
+  opacity: 0.3;
+  background: radial-gradient(closest-side, rgba(var(--primary-rgb), 0.9), transparent);
+  animation: fg-drift-c 27s ease-in-out infinite alternate;
+}
+@keyframes fg-drift-a {
+  to {
+    transform: translate(18vmax, 12vmax) scale(1.15);
+  }
+}
+@keyframes fg-drift-b {
+  to {
+    transform: translate(-16vmax, 18vmax) scale(0.9);
+  }
+}
+@keyframes fg-drift-c {
+  to {
+    transform: translate(22vmax, -10vmax) scale(1.1);
+  }
+}
+.fg-aurora > .fg-sparkle {
+  inset: 0;
+  width: auto;
+  height: auto;
+  border-radius: 0;
+  background-image:
+    radial-gradient(1.5px 1.5px at 12% 18%, #fff, transparent),
+    radial-gradient(1px 1px at 78% 12%, #fff, transparent),
+    radial-gradient(1.5px 1.5px at 64% 38%, #fff, transparent),
+    radial-gradient(1px 1px at 30% 62%, #fff, transparent),
+    radial-gradient(1.5px 1.5px at 88% 70%, #fff, transparent),
+    radial-gradient(1px 1px at 8% 84%, #fff, transparent),
+    radial-gradient(1px 1px at 46% 90%, #fff, transparent);
+  animation: fg-twinkle 4.5s ease-in-out infinite;
+}
+.fg-aurora > .fg-sparkle-late {
+  transform: translate(7%, 11%) scaleX(-1);
+  animation-delay: -2.2s;
+  animation-duration: 5.5s;
+}
+@keyframes fg-twinkle {
+  0%,
+  100% {
+    opacity: 0.15;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+/* A halo behind the photo in front, breathing slowly. */
+.fg-halo {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--glow-a) 60%, transparent), color-mix(in srgb, var(--glow-b) 22%, transparent) 55%, transparent);
+  transform: translate(-50%, -50%);
+  animation: fg-halo 7s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes fg-halo {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) scale(0.9);
+    opacity: 0.75;
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1.06);
+    opacity: 1;
+  }
+}
+
+/* The headline: Manrope, then an italic serif with a slow shimmer. */
+.fg-serif {
+  font-family: 'Cormorant Garamond', 'Playfair Display', Georgia, serif;
+  font-style: italic;
+}
+.fg-shimmer {
+  background: linear-gradient(100deg, #fff 0%, var(--primary) 28%, #fff 46%, var(--glow-a) 64%, var(--primary) 82%, #fff 100%);
+  background-size: 250% auto;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: fg-shimmer 7s ease-in-out infinite alternate;
+}
+@keyframes fg-shimmer {
+  from {
+    background-position: 0% center;
+  }
+  to {
+    background-position: 100% center;
+  }
+}
+
+/* Things rising in, with a little overshoot; the photo caption fading in. */
+@keyframes fg-rise {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.fg-rise {
+  animation: fg-rise 800ms cubic-bezier(0.34, 1.4, 0.64, 1) both;
+}
+@keyframes fg-caption {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.fg-caption {
+  animation: fg-caption 600ms ease-out both;
+}
+@keyframes fg-photo-in {
+  from {
+    opacity: 0;
+    transform: scale(1.04);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.fg-photo-in {
+  animation: fg-photo-in 900ms ease-out both;
+}
+
+/* The mode buttons: capsules that rise in (filling backwards only, so the
+   hover lift and the press spring still apply after), carry a soft light under the
+   finger (--mx, --my), and spring back when let go. Camera glows and
+   breathes, with a sheen passing now and then; Edit has a light running
+   round its edge. */
+.fg-mode {
+  --mx: 50%;
+  --my: 50%;
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.7rem;
+  border-radius: 9999px;
+  padding: 0.5rem 1.1rem 0.5rem 0.5rem;
+  overflow: hidden;
+  animation: fg-rise 900ms cubic-bezier(0.34, 1.5, 0.64, 1) backwards;
+  transition:
+    transform 520ms cubic-bezier(0.34, 1.7, 0.64, 1),
+    box-shadow 300ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.fg-mode:hover {
+  transform: translateY(-2px);
+}
+.fg-mode:active {
+  transform: scale(0.95);
+  transition-duration: 140ms;
+}
+.fg-mode:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+/* (the light under the finger) */
+.fg-mode::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: radial-gradient(120px circle at var(--mx) var(--my), rgba(255, 255, 255, 0.28), transparent 70%);
+  opacity: 0;
+  transition: opacity 300ms ease;
+}
+.fg-mode:hover::before,
+.fg-mode:active::before {
+  opacity: 1;
+}
+.fg-mode-icon {
+  position: relative;
+  display: flex;
+  height: 3rem;
+  width: 3rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  transition: transform 520ms cubic-bezier(0.34, 1.7, 0.64, 1);
+}
+.fg-mode-primary {
+  color: #120f17;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 70%, #fff) 0%, var(--primary) 45%, color-mix(in srgb, var(--primary) 78%, var(--glow-a)) 100%);
+  box-shadow:
+    0 14px 34px -12px rgba(var(--primary-rgb), 0.85),
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -2px 6px rgba(0, 0, 0, 0.12);
+  animation:
+    fg-rise 900ms cubic-bezier(0.34, 1.5, 0.64, 1) backwards,
+    fg-breathe 3.6s ease-in-out 1.2s infinite;
+}
+@keyframes fg-breathe {
+  0%,
+  100% {
+    box-shadow:
+      0 14px 34px -12px rgba(var(--primary-rgb), 0.85),
+      inset 0 1px 0 rgba(255, 255, 255, 0.55),
+      inset 0 -2px 6px rgba(0, 0, 0, 0.12);
+  }
+  50% {
+    box-shadow:
+      0 18px 46px -10px rgba(var(--primary-rgb), 1),
+      inset 0 1px 0 rgba(255, 255, 255, 0.55),
+      inset 0 -2px 6px rgba(0, 0, 0, 0.12);
+  }
+}
+/* (the sheen passing over Camera) */
+.fg-mode-primary::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(105deg, transparent 35%, rgba(255, 255, 255, 0.55) 50%, transparent 65%);
+  transform: translateX(-120%);
+  animation: fg-sheen 5.5s ease-in-out 1.6s infinite;
+  pointer-events: none;
+}
+@keyframes fg-sheen {
+  0%,
+  62% {
+    transform: translateX(-120%);
+  }
+  85%,
+  100% {
+    transform: translateX(120%);
+  }
+}
+.fg-mode-primary .fg-mode-icon {
+  background: rgba(18, 15, 23, 0.14);
+}
+/* (a ring leaving the shutter now and then) */
+.fg-mode-primary .fg-mode-icon::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  border: 2px solid rgba(18, 15, 23, 0.4);
+  animation: fg-ring 3.6s ease-out 1.2s infinite;
+}
+@keyframes fg-ring {
+  0% {
+    transform: scale(0.85);
+    opacity: 0.9;
+  }
+  45%,
+  100% {
+    transform: scale(1.45);
+    opacity: 0;
+  }
+}
+.fg-mode-primary .fg-mode-hint {
+  color: rgba(18, 15, 23, 0.68);
+}
+.fg-mode-primary:hover .fg-mode-icon {
+  transform: scale(1.08);
+}
+.fg-mode-soft {
+  color: #fff;
+  border: 1.5px solid transparent;
+  background:
+    linear-gradient(160deg, #1f1d27, #121118) padding-box,
+    conic-gradient(from var(--fg-spin), rgba(255, 255, 255, 0.14), var(--primary) 18%, rgba(255, 255, 255, 0.14) 34%, rgba(255, 255, 255, 0.14) 60%, var(--glow-a) 76%, rgba(255, 255, 255, 0.14) 90%) border-box;
+  box-shadow: 0 14px 34px -16px rgba(0, 0, 0, 0.9);
+  animation:
+    fg-rise 900ms cubic-bezier(0.34, 1.5, 0.64, 1) backwards,
+    fg-spin 6s linear infinite;
+}
+@keyframes fg-spin {
+  to {
+    --fg-spin: 360deg;
+  }
+}
+.fg-mode-soft .fg-mode-icon {
+  color: var(--primary);
+  background: rgba(255, 255, 255, 0.08);
+}
+.fg-mode-soft .fg-mode-hint {
+  color: rgba(255, 255, 255, 0.6);
+}
+.fg-mode-soft:hover .fg-mode-icon {
+  transform: rotate(-8deg) scale(1.06);
+}
+@media (max-width: 399px) {
+  .fg-mode {
+    gap: 0.55rem;
+    padding: 0.4rem 0.85rem 0.4rem 0.4rem;
+  }
+  .fg-mode-icon {
+    height: 2.6rem;
+    width: 2.6rem;
+  }
+}
+@media (min-width: 1024px) {
+  .fg-mode {
+    gap: 1rem;
+    padding: 0.7rem 1.6rem 0.7rem 0.7rem;
+  }
+  .fg-mode-icon {
+    height: 3.5rem;
+    width: 3.5rem;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fg-aurora > i,
+  .fg-halo,
+  .fg-shimmer,
+  .fg-mode,
+  .fg-mode::after,
+  .fg-mode-icon::after,
+  .fg-rise,
+  .fg-caption,
+  .fg-photo-in {
+    animation: none !important;
+  }
+  .fg-welcome {
+    transition: none;
+  }
+}
