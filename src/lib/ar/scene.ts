@@ -236,8 +236,18 @@ function buildRig(P: THREE.Vector3[], live: boolean): Rig {
   // face's own right and left eye (not whichever is further left now: a
   // head held turned past profile, its face out of sight, has them the
   // other way round on screen, and its effect has to face away with it).
-  const eyeL = centroid(RIGHT_EYE, P)
-  const eyeR = centroid(LEFT_EYE, P)
+  let eyeL = centroid(RIGHT_EYE, P)
+  let eyeR = centroid(LEFT_EYE, P)
+  // …unless the picture is mirrored (the front camera's live preview, its
+  // landmarks flipped after tracking): then the face's own right eye shows
+  // on the right. Mirroring flips the face's handedness, which no turn of
+  // the head can, so that's what tells: across the eyes × up the face
+  // points the way the nose does on a real face, the other way on a
+  // mirrored one. (Taken the other way, a mirrored head faced backwards.)
+  const across = eyeR.clone().sub(eyeL)
+  const upFace = P[10].clone().sub(P[152])
+  const nose = P[1].clone().sub(eyeL.clone().add(eyeR).multiplyScalar(0.5))
+  if (across.cross(upFace).dot(nose) < 0) [eyeL, eyeR] = [eyeR, eyeL]
   const E = Math.max(1, eyeL.distanceTo(eyeR))
   const right = eyeR.clone().sub(eyeL).normalize()
   const upRaw = P[10].clone().sub(P[152]).normalize()
