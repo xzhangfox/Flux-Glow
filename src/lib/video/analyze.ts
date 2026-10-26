@@ -2,7 +2,7 @@ import { ImageEmbedder, ImageSegmenter, type FaceLandmarker, type NormalizedLand
 import { ALL_FORMATS, BlobSource, Input, VideoSampleSink } from 'mediabunny'
 import { closureFrom, createLandmarker, visionFileset } from '../faceLandmarker'
 import { nextTask } from '../schedule'
-import { area, boxOf, centreOf, cropOf, fitScore, iou, pack, shift, sizeOf, stamp, unpack, windowAt, type Box, type Region } from './faces'
+import { SAME_ANGLE, area, boxOf, centreOf, cropOf, fitScore, frameThumb, iou, isCut, pack, shift, sizeOf, stamp, thumbChange, thumbSpread, unpack, windowAt, within, type Box, type Region } from './faces'
 
 // Video analysis for the video editor: who is in the clip, and where each
 // of them is through it — so each person keeps their own retouch and
@@ -30,6 +30,14 @@ import { area, boxOf, centreOf, cropOf, fitScore, iou, pack, shift, sizeOf, stam
 //     that never share a frame and look alike (or one picks up where the
 //     other left off) are the same person — so someone who leaves and comes
 //     back, or turns away for a while, keeps their identity and settings.
+//
+// A fixed camera's clip may be an edited one, cut between cameras — a wide
+// shot of everyone, a close-up of each — and where someone sits only says
+// who they are between shots from the same camera, framed the same (each
+// person's close-up has them in the middle of the picture). So the pass
+// also finds the cuts, no track carries on across one, and each shot is put
+// to the camera angle its picture matches: seats are only compared within
+// an angle, and someone is only where the analysis saw them in this shot.
 //
 // What's kept per person: their box at each analysed frame (24 bytes), a
 // picture of their clearest view, and the spans they're on screen.
@@ -74,6 +82,9 @@ const SURE_AFTER_S = 20
 const SURE_EVERY = 2
 /** The clearest view of each face is kept as a crop this big (px). */
 const BEST_PX = 288
+/** A camera angle's picture is the average of its shots' over about this
+ *  many frames at most (so it follows the light changing slowly). */
+const ANGLE_FRAMES = 300
 
 const EMBEDDER_URL = '/mediapipe/image_embedder.tflite'
 
@@ -105,6 +116,12 @@ export interface VideoAnalysis {
   /** Where each person on screen at `t` is (their face's box, in fractions
    *  of the frame), from the analysed frames either side. */
   boxesAt(t: number): { id: number; box: Box }[]
+  /** The shot `t` is in (0, then one more at each cut; a fixed camera's —
+   *  a moving one is taken as one shot)… */
+  shotAt(t: number): number
+  /** …and the camera angle it's from (shots cut back to the same camera,
+   *  framed the same, share one). */
+  angleAt(t: number): number
   /** Joins `from` into `into` (the user says they're the same person). */
   merge(from: number, into: number): void
 }
@@ -364,6 +381,10 @@ class Timeline {
 interface Track {
   id: number
   tl: Timeline
+  /** The shot it's in (a track never crosses a cut), and that shot's
+   *  camera angle (known once the shot has ended). */
+  shot: number
+  angle: number
   /** A fixed camera: found by the strict landmarker (see SURE_AFTER_S), and
    *  the analysed frame it was last looked for in. */
   sure: boolean
@@ -385,11 +406,12 @@ interface Det {
 }
 
 /** Drops detections that are the same face found twice (whole frame and a
- *  tile, say), keeping the larger. */
+ *  tile, say — or a tile's look at part of a close-up's big face, mostly
+ *  inside it), keeping the larger. */
 function dedupe(dets: Det[]): Det[] {
   dets.sort((a, b) => area(b.box) - area(a.box))
   const out: Det[] = []
-  for (const d of dets) if (!out.some((o) => iou(o.box, d.box) > 0.35)) out.push(d)
+  for (const d of dets) if (!out.some((o) => iou(o.box, d.box) > 0.35 || within(d.box, o.box) > 0.7)) out.push(d)
   return out
 }
 
@@ -468,6 +490,57 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
       if (!t.embSum) faceless++
     }
 
+    // Shots (a fixed camera): every decoded frame's thumbnail against the
+    // last one's — a cut starts the next shot — and each shot, once it's
+    // over, put to the camera angle whose picture its own (averaged over
+    // it, and how much that varies) matches, or to a new one.
+    const cuts: number[] = []
+    /** The first analysed frame of each shot (one a cut came before the
+     *  next frame was analysed starts at the same frame as the next). */
+    const shotFirst: number[] = [0]
+    const shotAngle: number[] = []
+    const angles: { mean: Float32Array; sq: Float32Array; spread: Float32Array; n: number }[] = []
+    let shot = 0
+    let prevThumb: Float32Array | null = null
+    let shotSum: Float32Array | null = null
+    let shotSq: Float32Array | null = null
+    let shotN = 0
+    const endShot = () => {
+      if (!shotSum || !shotSq || !shotN) {
+        shotAngle.push(shotAngle[shotAngle.length - 1] ?? 0)
+        return
+      }
+      const mean = shotSum.map((v) => v / shotN)
+      const sq = shotSq.map((v) => v / shotN)
+      const spread = thumbSpread(mean, sq)
+      let best = -1
+      let bestChange = SAME_ANGLE
+      angles.forEach((a, i) => {
+        const c = thumbChange(a.mean, mean, a.spread, spread)
+        if (c < bestChange) {
+          bestChange = c
+          best = i
+        }
+      })
+      if (best < 0) {
+        angles.push({ mean, sq, spread, n: Math.min(ANGLE_FRAMES, shotN) })
+        best = angles.length - 1
+      } else {
+        const a = angles[best]
+        const w = shotN / (a.n + shotN)
+        for (let i = 0; i < mean.length; i++) {
+          a.mean[i] += (mean[i] - a.mean[i]) * w
+          a.sq[i] += (sq[i] - a.sq[i]) * w
+        }
+        a.spread = thumbSpread(a.mean, a.sq)
+        a.n = Math.min(ANGLE_FRAMES, a.n + shotN)
+      }
+      shotAngle.push(best)
+      shotSum.fill(0)
+      shotSq.fill(0)
+      shotN = 0
+    }
+
     const sink = new VideoSampleSink(track)
     let breathed = performance.now()
     for await (const sample of sink.samples()) {
@@ -478,6 +551,23 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
         ts = sample.timestamp
         if (ts <= lastTs) continue
         lastTs = ts
+        if (fixed) {
+          const th = frameThumb(sample)
+          if (prevThumb && isCut(prevThumb, th)) {
+            endShot()
+            shot++
+            cuts.push(ts)
+            shotFirst.push(times.length)
+          }
+          prevThumb = th
+          shotSum ??= new Float32Array(th.length)
+          shotSq ??= new Float32Array(th.length)
+          for (let i = 0; i < th.length; i++) {
+            shotSum[i] += th[i]
+            shotSq[i] += th[i] * th[i]
+          }
+          shotN++
+        }
         use = srcIdx++ % step === 0
         if (use) sample.draw(fctx, 0, 0, W, H)
       } finally {
@@ -486,6 +576,8 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
       if (!use) continue
       const fi = times.length
       times.push(ts)
+      // (a cut: whoever was being followed was in the last shot)
+      for (let i = live.length - 1; i >= 0; i--) if (live[i].shot !== shot) retire(live.splice(i, 1)[0])
 
       // 1. Whole frame.
       const vres = vLm.detectForVideo(frame, stamp(vLm, ts))
@@ -533,7 +625,7 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
         const pred = shift(t.box, t.vx * (fi - t.tl.last), t.vy * (fi - t.tl.last))
         const c = centreOf(pred)
         const r = windowAt(c.x, c.y, Math.min(Math.min(W, H), Math.max(sizeOf(pred) * 2.6, 96)), W, H)
-        const found = detectIn(r).filter((d) => !dets.some((o) => iou(o.box, d.box) > 0.35))
+        const found = detectIn(r).filter((d) => !dets.some((o) => iou(o.box, d.box) > 0.35 || within(d.box, o.box) > 0.7))
         let best: Det | null = null
         let bo = 0.12
         for (const d of found) {
@@ -565,7 +657,7 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
         if (sizeOf(d.box) < 14) return
         const tl = new Timeline()
         tl.push(fi, { x0: d.box.x0 / W, y0: d.box.y0 / H, x1: d.box.x1 / W, y1: d.box.y1 / H })
-        const t: Track = { id: nextId++, tl, sure: false, checked: -Infinity, box: d.box, vx: 0, vy: 0, embSum: null, embN: 0, sigs: [], sigSeen: 0, best: { score: 0, canvas: null, url: null, lm: null } }
+        const t: Track = { id: nextId++, tl, shot, angle: 0, sure: false, checked: -Infinity, box: d.box, vx: 0, vy: 0, embSum: null, embN: 0, sigs: [], sigSeen: 0, best: { score: 0, canvas: null, url: null, lm: null } }
         live.push(t)
         matched.push([t, d])
       })
@@ -621,11 +713,14 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
       }
     }
     for (const t of live.splice(0)) retire(t)
+    if (fixed) endShot()
+    for (const t of done) t.angle = shotAngle[t.shot] ?? 0
 
     if (!times.length) throw new Error("Couldn't read any frames from this video.")
     const T = Float64Array.from(times)
     const people = groupIntoPeople(done, T, W, H, fixed)
-    return await makeAnalysis(people, T, W, H, duration, fps, step / fps, tileEvery, fixed)
+    const shots: Shots = { cuts: Float64Array.from(cuts), first: Int32Array.from(shotFirst), angle: Int32Array.from(shotAngle.length ? shotAngle : [0]) }
+    return await makeAnalysis(people, T, shots, W, H, duration, fps, step / fps, tileEvery, fixed)
   } finally {
     input.dispose()
   }
@@ -642,13 +737,14 @@ interface Person {
 
 /** Where a face sits through its frames: the middle of its box, and its
  *  size (px of the working frame; medians, so a lean or a stretch doesn't
- *  move it). */
+ *  move it) — as the camera angle it's seen from frames it. */
 interface Seat {
   x: number
   y: number
   size: number
+  angle: number
 }
-function seatOf(tl: Timeline, W: number, H: number): Seat {
+function seatOf(tl: Timeline, W: number, H: number, angle: number): Seat {
   const xs: number[] = []
   const ys: number[] = []
   const ss: number[] = []
@@ -660,10 +756,13 @@ function seatOf(tl: Timeline, W: number, H: number): Seat {
     ss.push(Math.max((b.x1 - b.x0) * W, (b.y1 - b.y0) * H))
   }
   const med = (v: number[]) => v.sort((a, b) => a - b)[v.length >> 1]
-  return { x: med(xs), y: med(ys), size: med(ss) }
+  return { x: med(xs), y: med(ys), size: med(ss), angle }
 }
-/** 0..1: how surely two seats are the same place (and face size). */
+/** 0..1: how surely two seats are the same place (and face size). Only
+ *  seats seen from the same angle compare: the middle of a close-up is no
+ *  one's seat in the wide shot. */
 function sameSeat(a: Seat, b: Seat) {
+  if (a.angle !== b.angle) return 0
   const d = Math.hypot(a.x - b.x, a.y - b.y) / Math.max(1, a.size, b.size)
   const r = Math.max(a.size, b.size) / Math.max(1, Math.min(a.size, b.size))
   return Math.max(0, 1 - d / 1.1) * Math.max(0, Math.min(1, (2 - r) / 0.6))
@@ -681,7 +780,7 @@ type TrackInfo = { t: Track; emb: Float32Array | null; sig: Float32Array | null;
  *  track in someone's seat is very likely them — and then there are only
  *  as many people as there are seats in use. */
 function groupIntoPeople(tracks: Track[], times: Float64Array, W: number, H: number, fixed: boolean): Person[] {
-  const info: TrackInfo[] = tracks.map((t) => ({ t, emb: t.embSum && t.embN ? t.embSum.map((v) => v / t.embN) : null, sig: medianSig(t.sigs), seat: seatOf(t.tl, W, H) }))
+  const info: TrackInfo[] = tracks.map((t) => ({ t, emb: t.embSum && t.embN ? t.embSum.map((v) => v / t.embN) : null, sig: medianSig(t.sigs), seat: seatOf(t.tl, W, H, t.angle) }))
   // Longest first: the best-known faces anchor the people.
   info.sort((a, b) => b.t.tl.n - a.t.tl.n)
   const groups: Group[] = []
@@ -715,13 +814,16 @@ function join(g: Group, it: { t: Track; emb: Float32Array | null; sig: Float32Ar
   // clearest looks at them)
   if (it.emb && g.embs.length < MAX_LOOKS) g.embs.push(it.emb)
   if (it.sig && g.sigs.length < MAX_LOOKS) g.sigs.push(it.sig)
-  if (it.seat && g.seats.length < MAX_LOOKS) g.seats.push(it.seat)
+  // (as many from each camera angle)
+  const seat = it.seat
+  if (seat && g.seats.filter((s) => s.angle === seat.angle).length < MAX_LOOKS) g.seats.push(seat)
 }
 
 /** A fixed camera: there are as many people as faces on screen together
  *  (most of the time — a few frames with an extra face don't count). Anyone
  *  beyond that who never shares a frame with someone else is folded into
- *  whoever they most likely are: the same seat, or the same look. */
+ *  whoever they most likely are: the same seat (from the same camera
+ *  angle), or the same look. */
 function consolidate(groups: Group[], frames: number) {
   const together = new Uint8Array(frames)
   for (const g of groups) for (let k = 0; k < g.p.tl.n; k++) together[g.p.tl.idx[k]]++
@@ -780,15 +882,20 @@ function sameness(cand: Group, it: TrackInfo, times: Float64Array, W: number, H:
     s += 1.5 * Math.min(1, Math.max(0, 1 - d / 0.09))
     wsum += 1.5
   }
-  if (fixed) {
-    s += 3 * Math.max(...cand.seats.map((c) => sameSeat(c, it.seat)))
+  // (their seat as seen from this track's camera angle — none yet: it
+  // says nothing either way)
+  const seats = fixed ? cand.seats.filter((c) => c.angle === it.seat.angle) : []
+  if (seats.length) {
+    s += 3 * Math.max(...seats.map((c) => sameSeat(c, it.seat)))
     wsum += 3
   }
-  // Continuity: the end of a track of theirs just before this one began.
+  // Continuity: the end of a track of theirs just before this one began
+  // (seen from the same angle: across a cut to another camera, where a face
+  // was says nothing of where it is).
   let cont = 0
   const px = (b: Box): Box => ({ x0: b.x0 * W, y0: b.y0 * H, x1: b.x1 * W, y1: b.y1 * H })
   for (const o of cand.p.tracks) {
-    if (o.tl.last >= it.t.tl.first) continue
+    if (o.tl.last >= it.t.tl.first || o.angle !== it.t.angle) continue
     const dt = times[it.t.tl.first] - times[o.tl.last]
     if (dt > 2.5) continue
     const a = px(o.tl.boxAt(o.tl.n - 1))
@@ -828,8 +935,36 @@ function loadCanvas(url: string): Promise<HTMLCanvasElement> {
   })
 }
 
-async function makeAnalysis(people: Person[], times: Float64Array, W: number, H: number, duration: number, fps: number, interval: number, tileEvery: number, fixed: boolean): Promise<VideoAnalysis> {
+/** The clip's shots: when each after the first begins (s), the first
+ *  analysed frame of each, and each one's camera angle. */
+interface Shots {
+  cuts: Float64Array
+  first: Int32Array
+  angle: Int32Array
+}
+
+/** How many of the sorted `v` are at most `x`. */
+function countUpTo(v: ArrayLike<number>, x: number) {
+  let lo = 0
+  let hi = v.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (v[mid] <= x) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+async function makeAnalysis(people: Person[], times: Float64Array, shots: Shots, W: number, H: number, duration: number, fps: number, interval: number, tileEvery: number, fixed: boolean): Promise<VideoAnalysis> {
   const byId = new Map(people.map((p) => [p.id, p]))
+  const { cuts } = shots
+  /** The shot at `t`: the cuts up to it (a frame shown at a cut's time is
+   *  the new shot's first)… */
+  const shotAt = (t: number) => countUpTo(cuts, t + 1e-3)
+  /** …and the one analysed frame `fi` is in. */
+  const frameShot = (fi: number) => countUpTo(shots.first, fi) - 1
+  const shotStart = (s: number) => (s > 0 ? cuts[s - 1] : 0)
+  const shotEnd = (s: number) => (s < cuts.length ? cuts[s] : duration)
   // A person is on screen this far either side of an analysed frame they're
   // in, and across gaps up to FILL_GAP_S. And they're looked for a little
   // before they were first seen: a small face is only found by the tile
@@ -845,14 +980,19 @@ async function makeAnalysis(people: Person[], times: Float64Array, W: number, H:
   const views = new Map<Track, HTMLCanvasElement>()
   await Promise.all(people.map(async (p) => views.set(bestOf(p), await loadCanvas(bestOf(p).best.url!))))
   const spansOf = (p: Person): [number, number][] => {
-    const spans: [number, number][] = []
+    // (bridged across gaps within a shot; on across a cut only if they're
+    // seen either side of it — and kept to the shots they're seen in)
+    const spans: { a: number; b: number; sa: number; sb: number }[] = []
     for (let k = 0; k < p.tl.n; k++) {
       const t = times[p.tl.idx[k]]
+      const s = frameShot(p.tl.idx[k])
       const last = spans[spans.length - 1]
-      if (last && t - last[1] <= bridge) last[1] = t
-      else spans.push([t, t])
+      if (last && t - last.b <= (s === last.sb ? bridge : interval * 1.5)) {
+        last.b = t
+        last.sb = s
+      } else spans.push({ a: t, b: t, sa: s, sb: s })
     }
-    return spans.map(([a, b]) => [Math.max(0, a - reach), Math.min(duration, b + reach)])
+    return spans.map(({ a, b, sa, sb }) => [Math.max(0, shotStart(sa), a - reach), Math.min(duration, shotEnd(sb), b + reach)])
   }
   const thumbs = new Map<Track, string>()
   const info = (): PersonInfo[] =>
@@ -880,17 +1020,22 @@ async function makeAnalysis(people: Person[], times: Float64Array, W: number, H:
     return lo
   }
   const boxAt = (p: Person, t: number): Box | null => {
+    // (only from what the analysis saw in this shot: someone in the shot
+    // before or after isn't in this one because of it)
+    const s = shotAt(t)
     const i = lastAt(p, t)
-    const ta = i >= 0 ? times[p.tl.idx[i]] : -Infinity
-    const tb = i + 1 < p.tl.n ? times[p.tl.idx[i + 1]] : Infinity
-    if (i >= 0 && i + 1 < p.tl.n && tb - ta <= bridge) {
+    const before = i >= 0 && frameShot(p.tl.idx[i]) === s
+    const after = i + 1 < p.tl.n && frameShot(p.tl.idx[i + 1]) === s
+    const ta = before ? times[p.tl.idx[i]] : -Infinity
+    const tb = after ? times[p.tl.idx[i + 1]] : Infinity
+    if (before && after && tb - ta <= bridge) {
       const a = p.tl.boxAt(i)
       const b = p.tl.boxAt(i + 1)
       const f = Math.min(1, Math.max(0, (t - ta) / Math.max(1e-6, tb - ta)))
       return { x0: a.x0 + (b.x0 - a.x0) * f, y0: a.y0 + (b.y0 - a.y0) * f, x1: a.x1 + (b.x1 - a.x1) * f, y1: a.y1 + (b.y1 - a.y1) * f }
     }
-    if (i >= 0 && t - ta <= reach) return p.tl.boxAt(i)
-    if (i + 1 < p.tl.n && tb - t <= lead) return p.tl.boxAt(i + 1)
+    if (before && t - ta <= reach) return p.tl.boxAt(i)
+    if (after && tb - t <= lead) return p.tl.boxAt(i + 1)
     return null
   }
 
@@ -915,6 +1060,8 @@ async function makeAnalysis(people: Person[], times: Float64Array, W: number, H:
       }
       return out
     },
+    shotAt,
+    angleAt: (t) => shots.angle[Math.min(shots.angle.length - 1, shotAt(t))],
     merge(from, into) {
       const a = byId.get(from)
       const b = byId.get(into)

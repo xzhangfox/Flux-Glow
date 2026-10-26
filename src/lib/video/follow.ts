@@ -2,7 +2,7 @@ import type { FaceLandmarker, ImageSegmenter } from '@mediapipe/tasks-vision'
 import { ALL_FORMATS, BlobSource, CanvasSink, Input } from 'mediabunny'
 import { closureFrom } from '../faceLandmarker'
 import { FILL_GAP_S, loadPersonSegmenter, loadStrictLandmarker, loadVideoModels, type VideoAnalysis } from './analyze'
-import { EuroState, FRAME, HELD_MAX_DEG, STRIDE, Turn, bodyBoxOf, bodySig, boxOf, centreOf, cropOf, fitScore, frameThumb, iou, isCut, lerpFace, lostYaw, pack, personIn, sameBody, scaleBox, shift, sizeOf, stamp, turnTo, windowAt, yawOf, type Box } from './faces'
+import { EuroState, FRAME, HELD_MAX_DEG, STRIDE, Turn, bodyBoxOf, bodySig, boxOf, centreOf, cropOf, fitScore, iou, lerpFace, lostYaw, pack, personIn, sameBody, scaleBox, shift, sizeOf, stamp, turnTo, windowAt, yawOf, type Box } from './faces'
 import { UsualFace, averagePose, lerpLocal, localOf, meshOf, poseOf, quatAngle, shapeDistance, type Pose } from './pose'
 
 // Finding the analysed people in a frame, as it's shown or exported: the
@@ -29,7 +29,10 @@ import { UsualFace, averagePose, lerpLocal, localOf, meshOf, poseOf, quatAngle, 
 //  • a held head counts as back once their clean face keeps being found,
 //    and eases onto it;
 //  • a head's size (a seated head only changes size as they lean) and turn
-//    are steadied over the frames round each one.
+//    are steadied over the frames round each one;
+//  • an edited clip's cuts (see analyze.ts) start each shot afresh: no head
+//    is held, steadied or gated across one — where it was in the wide shot
+//    says nothing of where it is in a close-up.
 
 export interface Found {
   id: number
@@ -129,6 +132,21 @@ class Head {
   private own: Float32Array | null = null
   /** Its size (log) when last facing the camera, and when. */
   private front = { ls: 0, t: -Infinity }
+  /** The shot it was last seen in, and that shot's camera angle. */
+  shot = -1
+  private angle = -1
+
+  /** It's seen in shot `shot` now (from camera angle `angle`): how it was
+   *  held in another shot is no guide to how it's held in this one — nor,
+   *  from another camera, how big it is. (Their usual face is theirs from
+   *  any angle.) */
+  inShot(shot: number, angle: number) {
+    if (shot === this.shot) return
+    this.shot = shot
+    this.recent = []
+    if (angle !== this.angle) this.front = { ls: 0, t: -Infinity }
+    this.angle = angle
+  }
 
   see(lm: Float32Array, t: number, W: number, H: number, pose = poseOf(lm, W, H)) {
     if (t < this.t || t - this.t > 0.5) this.recent = []
@@ -188,7 +206,11 @@ export class FaceFinder {
   /** Where the current run of frames began (a jump or a cut starts one):
    *  only a head seen since then is held. */
   private runStart = -Infinity
-  private thumb: Float32Array | null = null
+  /** The shot the last frame was in, and its camera angle; and whether this
+   *  frame is the first of another (the preview's smoothing starts afresh). */
+  private shot = -1
+  private angle = 0
+  cut = false
   /** The preview: each head as last held, and a head found again easing
    *  in from there. */
   private heldOut = new Map<number, { lm: Float32Array; t: number }>()
@@ -251,7 +273,8 @@ export class FaceFinder {
     const W = frame.width
     const H = frame.height
     const h = this.heads.get(id)
-    if (!h) return true
+    // (first seen in this shot: nothing to hold it to)
+    if (!h || h.shot !== this.shot) return true
     const dt = t - h.t
     const usual = h.usual.face
     const shape = usual ? shapeDistance(localOf(lm, pose, W, H), usual) : 0
@@ -305,15 +328,11 @@ export class FaceFinder {
     }
     this.lastT = t
     // A cut to another shot: no one held from the last one.
-    let cut = false
-    if (this.an.fixed) {
-      const th = frameThumb(frame)
-      if (this.thumb && !jump && isCut(this.thumb, th)) {
-        cut = true
-        this.runStart = t
-      }
-      this.thumb = th
-    }
+    const shot = this.an.shotAt(t)
+    const cut = (this.cut = this.an.fixed && shot !== this.shot && !jump)
+    if (cut) this.runStart = t
+    this.shot = shot
+    this.angle = this.an.angleAt(t)
     const expected = this.an.boxesAt(t)
     this.seated.clear()
     // No one is meant to be here: nothing to look for.
@@ -397,6 +416,7 @@ export class FaceFinder {
           this.comeback.delete(id)
           let h = this.heads.get(id)
           if (!h) this.heads.set(id, (h = new Head()))
+          h.inShot(this.shot, this.angle)
           h.see(lm, t, W, H, pose)
           out[i] = { id, lm: h.sized(lm, pose, t, W, H) }
         } else {
@@ -560,6 +580,8 @@ const STEADY_S = 0.45
 
 interface Scouted {
   ts: number
+  /** The shot it's in (see analyze.ts). */
+  shot: number
   raw: Map<number, Float32Array>
   /** Fixed camera: who is still sitting there (found or not). */
   seated?: Set<number>
@@ -580,13 +602,13 @@ export class FaceScout {
   private ended = false
   private euro = new Map<number, EuroState>()
   /** Each face as last found (a moving camera)… */
-  private lastSeen = new Map<number, { ts: number; lm: Float32Array }>()
+  private lastSeen = new Map<number, { ts: number; shot: number; lm: Float32Array }>()
   /** …or each head as last found (a fixed one: see Head). */
   private heads = new Map<number, Head>()
   /** Fixed camera: when each person was last seen in their seat. */
   private lastSeated = new Map<number, number>()
   /** Fixed camera: each head's pose in the frames just served (steady()). */
-  private past = new Map<number, { ts: number; p: Pose }[]>()
+  private past = new Map<number, { ts: number; shot: number; p: Pose }[]>()
   /** The frames' size, px (for which way heads face). */
   private W = 1
   private H = 1
@@ -594,6 +616,7 @@ export class FaceScout {
    *  head that comes back is turning. */
   private turnAhead: number
   private lastFilled: Map<number, Float32Array> | undefined
+  private lastShot = 0
   private back: EuroState
   private warned = false
   private an: VideoAnalysis
@@ -640,7 +663,7 @@ export class FaceScout {
     if (prev && timestamp <= prev.ts) return
     if (prev) this.tol = Math.min(this.tol, Math.max(1e-3, (timestamp - prev.ts) / 2))
     const found = this.finder.find(canvas as HTMLCanvasElement, timestamp, true)
-    this.frames.push({ ts: timestamp, raw: new Map(found.map((f) => [f.id, f.lm])), seated: this.an.fixed ? new Set(this.finder.seated) : undefined })
+    this.frames.push({ ts: timestamp, shot: this.an.shotAt(timestamp), raw: new Map(found.map((f) => [f.id, f.lm])), seated: this.an.fixed ? new Set(this.finder.seated) : undefined })
   }
 
   /** A fixed camera: is person `id` in their seat in frame `j` — or only
@@ -654,7 +677,7 @@ export class FaceScout {
       return true
     }
     const before = this.lastSeated.get(id) ?? -Infinity
-    for (let k = j + 1; k < this.frames.length && this.frames[k].ts - before <= LEAVE_S; k++) if (this.frames[k].seated?.has(id)) return true
+    for (let k = j + 1; k < this.frames.length && this.frames[k].ts - before <= LEAVE_S && this.frames[k].shot === f.shot; k++) if (this.frames[k].seated?.has(id)) return true
     return false
   }
 
@@ -662,7 +685,7 @@ export class FaceScout {
    *  (from its first moments back), deg/s. */
   private rateBack(k: number, id: number, yaw: number) {
     let m = -1
-    for (let n = k + 1; n < this.frames.length && this.frames[n].ts - this.frames[k].ts <= TURN_READ_S; n++) if (this.frames[n].raw.has(id)) m = n
+    for (let n = k + 1; n < this.frames.length && this.frames[n].ts - this.frames[k].ts <= TURN_READ_S && this.frames[n].shot === this.frames[k].shot; n++) if (this.frames[n].raw.has(id)) m = n
     if (m < 0 || this.frames[m].ts - this.frames[k].ts < 0.1) return 0
     return (yaw - yawOf(this.frames[m].raw.get(id)!, this.W, this.H)) / (this.frames[m].ts - this.frames[k].ts)
   }
@@ -676,27 +699,27 @@ export class FaceScout {
     if (!this.an.fixed) {
       for (const [id, seen] of this.lastSeen) {
         const lost = f.ts - seen.ts
-        if (filled.has(id) || lost > this.gap) continue
+        if (filled.has(id) || lost > this.gap || seen.shot !== f.shot) continue
         // Back within the gap? Then they were here all along.
-        for (let k = j + 1; k < this.frames.length && this.frames[k].ts - seen.ts <= this.gap; k++) {
+        for (let k = j + 1; k < this.frames.length && this.frames[k].ts - seen.ts <= this.gap && this.frames[k].shot === f.shot; k++) {
           const b = this.frames[k].raw.get(id)
           if (!b) continue
           filled.set(id, lerpFace(seen.lm, b, lost / Math.max(1e-6, this.frames[k].ts - seen.ts)))
           break
         }
       }
-      for (const [id, lm] of f.raw) this.lastSeen.set(id, { ts: f.ts, lm })
+      for (const [id, lm] of f.raw) this.lastSeen.set(id, { ts: f.ts, shot: f.shot, lm })
     } else {
       // A fixed camera: whoever is still in their seat keeps their head on,
       // however long it's hidden (see Head). One that comes back soon is
       // eased across the whole gap; after longer, onto where it comes back
       // just before it does.
       for (const [id, h] of this.heads) {
-        if (filled.has(id) || !this.inSeat(j, id) || f.ts <= h.t) continue
+        if (filled.has(id) || h.shot !== f.shot || !this.inSeat(j, id) || f.ts <= h.t) continue
         const held = h.at(f.ts, W, H)
         let k = j + 1
-        while (k < this.frames.length && this.frames[k].ts - f.ts <= this.gap && !this.frames[k].raw.has(id)) k++
-        const b = k < this.frames.length && this.frames[k].ts - f.ts <= this.gap ? this.frames[k].raw.get(id) : undefined
+        while (k < this.frames.length && this.frames[k].ts - f.ts <= this.gap && this.frames[k].shot === f.shot && !this.frames[k].raw.has(id)) k++
+        const b = k < this.frames.length && this.frames[k].ts - f.ts <= this.gap && this.frames[k].shot === f.shot ? this.frames[k].raw.get(id) : undefined
         const tk = b ? this.frames[k].ts : Infinity
         const from = tk - h.t <= this.gap ? h.t : tk - RETURN_BLEND_S
         if (!b || f.ts <= from) {
@@ -715,22 +738,25 @@ export class FaceScout {
       for (const [id, lm] of f.raw) {
         let h = this.heads.get(id)
         if (!h) this.heads.set(id, (h = new Head()))
+        h.inShot(f.shot, this.an.angleAt(f.ts))
         h.see(lm, f.ts, W, H)
         this.lastSeated.set(id, f.ts)
       }
     }
     const prev = this.lastFilled
+    const cut = f.shot !== this.lastShot
     const fwd = new Map<number, Float32Array>()
     for (const [id, lm] of filled) {
       let s = this.euro.get(id)
       if (!s) this.euro.set(id, (s = new EuroState(this.an.fixed)))
-      if (!prev?.has(id)) s.reset()
+      if (!prev?.has(id) || cut) s.reset()
       fwd.set(id, Float32Array.from(s.step(lm, f.ts)))
     }
     for (const id of [...this.euro.keys()]) if (!filled.has(id)) this.euro.delete(id)
     f.filled = filled
     f.fwd = fwd
     this.lastFilled = filled
+    this.lastShot = f.shot
   }
 
   /** The people in the source frame at `ts`, their meshes steadied. */
@@ -763,7 +789,7 @@ export class FaceScout {
       // Backwards from a little ahead (as far as they stay on screen), to
       // meet the forward pass here: their average lags neither way.
       let e = 0
-      while (e + 1 < this.filledTo && this.frames[e + 1].ts - f.ts <= SMOOTH_AHEAD_S && this.frames[e + 1].filled!.has(id)) e++
+      while (e + 1 < this.filledTo && this.frames[e + 1].ts - f.ts <= SMOOTH_AHEAD_S && this.frames[e + 1].shot === f.shot && this.frames[e + 1].filled!.has(id)) e++
       this.back.reset()
       let b: Float32Array = lm
       for (let k = e; k >= 0; k--) b = this.back.step(this.frames[k].filled!.get(id)!, this.frames[k].ts)
@@ -787,15 +813,15 @@ export class FaceScout {
     const { W, H } = this
     const p0 = poseOf(f.filled!.get(id)!, W, H)
     let past = this.past.get(id)
-    if (!past || (past.length && f.ts - past[past.length - 1].ts > 0.15)) this.past.set(id, (past = []))
+    if (!past || (past.length && (f.ts - past[past.length - 1].ts > 0.15 || past[past.length - 1].shot !== f.shot))) this.past.set(id, (past = []))
     const pts: { dt: number; p: Pose }[] = past.filter((x) => f.ts - x.ts <= STEADY_S).map((x) => ({ dt: x.ts - f.ts, p: x.p }))
     pts.push({ dt: 0, p: p0 })
-    for (let k = 1; k < this.filledTo && this.frames[k].ts - f.ts <= STEADY_S; k++) {
+    for (let k = 1; k < this.filledTo && this.frames[k].ts - f.ts <= STEADY_S && this.frames[k].shot === f.shot; k++) {
       const lm = this.frames[k].filled?.get(id)
       if (!lm) break
       pts.push({ dt: this.frames[k].ts - f.ts, p: poseOf(lm, W, H) })
     }
-    past.push({ ts: f.ts, p: p0 })
+    past.push({ ts: f.ts, shot: f.shot, p: p0 })
     while (past.length && f.ts - past[0].ts > STEADY_S) past.shift()
     if (pts.length < 3) return m
     const g = (dt: number, sd: number) => Math.exp(-0.5 * (dt / sd) ** 2)

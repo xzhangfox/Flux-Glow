@@ -383,7 +383,8 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
       if (finder && (!shown || shown.time !== time || shown.w !== w)) {
         const playing = !v.paused
         const found = finder.find(work, time, playing)
-        if (!playing) smoother.current.reset()
+        // (a cut to another shot: nothing carries over from the last one)
+        if (!playing || finder.cut) smoother.current.reset()
         shown = shownRef.current = { time, w, faces: playing ? smoother.current.apply(found, time, w, h) : found }
       }
       let result: HTMLCanvasElement = work
@@ -768,7 +769,7 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
               <button role="switch" aria-checked={fixedCam} aria-label="Fixed camera" onClick={() => chooseFixedCam(!fixedCam)} className="w-full flex items-center justify-between gap-3 text-left">
                 <span>
                   <span className="block text-white text-[12.5px] font-semibold">Fixed camera</span>
-                  <span className="block text-white/50 text-[11px] leading-snug mt-0.5">Interviews, talk shows: people stay in their seats. Fewer mix-ups between people; effects stay on, steady, through a turned head or a hand in front of the face.</span>
+                  <span className="block text-white/50 text-[11px] leading-snug mt-0.5">Interviews, talk shows: people stay in their seats — one camera, or cut between several. Fewer mix-ups between people; effects stay on, steady, through a turned head or a hand in front of the face.</span>
                 </span>
                 <span className={`relative w-9 h-[22px] flex-shrink-0 rounded-full transition ${fixedCam ? 'bg-primary' : 'bg-white/20'}`}>
                   <span className={`absolute top-[3px] w-4 h-4 rounded-full bg-white shadow transition-all ${fixedCam ? 'left-[17px]' : 'left-[3px]'}`} />
@@ -1109,8 +1110,8 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
           <p className="text-white text-[15px] font-semibold mb-1">{fixedCam ? 'Analyse for a moving camera?' : 'Analyse for a fixed camera?'}</p>
           <p className="text-white/60 text-[12px] mb-1.5">
             {fixedCam
-              ? 'For a camera that moves or cuts between shots, or people who move around.'
-              : 'For interviews and talk shows, where the camera stays put and people stay in their seats: fewer mix-ups between people, and effects stay on, steady, through a turned head or a hand in front of the face.'}
+              ? 'For a camera that moves — pans, follows someone — or people who move around.'
+              : 'For interviews and talk shows, where the cameras stay put and people stay in their seats — filmed on one camera, or cut between several: fewer mix-ups between people, and effects stay on, steady, through a turned head or a hand in front of the face.'}
           </p>
           <p className="text-white/45 text-[11.5px] mb-4">The video is analysed again; settings for individual people start over.</p>
           <div className="flex gap-3">

@@ -50,6 +50,10 @@ export function iou(a: Box, b: Box) {
   const i = area({ x0: Math.max(a.x0, b.x0), y0: Math.max(a.y0, b.y0), x1: Math.min(a.x1, b.x1), y1: Math.min(a.y1, b.y1) })
   return i / Math.max(1e-9, area(a) + area(b) - i)
 }
+/** How much of box `a` is inside box `b` (0..1). */
+export function within(a: Box, b: Box) {
+  return area({ x0: Math.max(a.x0, b.x0), y0: Math.max(a.y0, b.y0), x1: Math.min(a.x1, b.x1), y1: Math.min(a.y1, b.y1) }) / Math.max(1e-9, area(a))
+}
 export const sizeOf = (b: Box) => Math.max(b.x1 - b.x0, b.y1 - b.y0)
 export const centreOf = (b: Box) => ({ x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2 })
 export const shift = (b: Box, dx: number, dy: number): Box => ({ x0: b.x0 + dx, y0: b.y0 + dy, x1: b.x1 + dx, y1: b.y1 + dy })
@@ -173,27 +177,58 @@ export function personIn(seg: ImageSegmenter, frame: HTMLCanvasElement, head: Bo
 const THUMB_W = 32
 const THUMB_H = 18
 let thumbCanvas: HTMLCanvasElement | null = null
-/** The frame shrunk to a few grey values: compared frame to frame, it shows
- *  a cut to another shot. */
-export function frameThumb(frame: HTMLCanvasElement): Float32Array {
+/** The frame (or a decoded video frame) shrunk to a few colours: compared
+ *  frame to frame, it shows a cut to another shot; averaged over a shot, the
+ *  camera angle it's from. */
+export function frameThumb(frame: CanvasImageSource | { draw(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number): void }): Float32Array {
   const c = (thumbCanvas ??= document.createElement('canvas'))
   c.width = THUMB_W
   c.height = THUMB_H
   const g = c.getContext('2d', { willReadFrequently: true })!
-  g.drawImage(frame, 0, 0, THUMB_W, THUMB_H)
+  g.imageSmoothingQuality = 'high'
+  if ('draw' in frame) frame.draw(g, 0, 0, THUMB_W, THUMB_H)
+  else g.drawImage(frame, 0, 0, THUMB_W, THUMB_H)
   const d = g.getImageData(0, 0, THUMB_W, THUMB_H).data
-  const out = new Float32Array(THUMB_W * THUMB_H)
-  for (let i = 0; i < out.length; i++) out[i] = (0.3 * d[i * 4] + 0.59 * d[i * 4 + 1] + 0.11 * d[i * 4 + 2]) / 255
+  const out = new Float32Array(THUMB_W * THUMB_H * 3)
+  for (let i = 0; i < THUMB_W * THUMB_H; i++) for (let k = 0; k < 3; k++) out[i * 3 + k] = d[i * 4 + k] / 255
+  return out
+}
+
+/** The share of two thumbnails' pixels that differ — in colour, not only in
+ *  brightness (two close-ups against walls of another colour but the same
+ *  lightness are still two shots). `spreadA`, `spreadB`: how much each
+ *  pixel varies over the shot each is the average of (someone swaying, a
+ *  screen behind them) — a difference of about that much is put down to it. */
+export function thumbChange(a: Float32Array, b: Float32Array, spreadA?: Float32Array, spreadB?: Float32Array) {
+  let n = 0
+  for (let i = 0, j = 0; i < a.length; i += 3, j++) {
+    const tol = 0.06 + (spreadA && spreadB ? Math.min(0.15, 1.5 * (spreadA[j] + spreadB[j])) : 0)
+    if (Math.hypot(a[i] - b[i], a[i + 1] - b[i + 1], a[i + 2] - b[i + 2]) > tol) n++
+  }
+  return n / (a.length / 3)
+}
+
+/** A shot's (or camera angle's) picture: its thumbnails' average, and how
+ *  much each pixel varies about it (see thumbChange). */
+export function thumbSpread(mean: Float32Array, meanSq: Float32Array): Float32Array {
+  const out = new Float32Array(mean.length / 3)
+  for (let j = 0; j < out.length; j++) {
+    let v = 0
+    for (let k = 0; k < 3; k++) v += Math.max(0, meanSq[j * 3 + k] - mean[j * 3 + k] ** 2)
+    out[j] = Math.sqrt(v)
+  }
   return out
 }
 
 /** A cut: most of the picture changed at once (not a hand passing, a head
  *  turning — those change a corner of it). */
-export function isCut(a: Float32Array, b: Float32Array) {
-  let changed = 0
-  for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > 0.12) changed++
-  return changed / a.length > 0.55
-}
+export const isCut = (a: Float32Array, b: Float32Array) => thumbChange(a, b) > 0.55
+
+/** Two shots (their thumbnails, averaged over each) from the same camera,
+ *  framed the same, differ in less of the picture than this — someone
+ *  leaning or turning changes a little of it; another camera, or another
+ *  person in a close-up, much more. */
+export const SAME_ANGLE = 0.2
 
 /** The area under a face (px box of a W × H frame): shoulders and chest. */
 export function bodyBoxOf(face: Box, W: number, H: number): Box | null {
