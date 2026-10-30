@@ -1,0 +1,43 @@
+{
+  "generator": "image_gen built-in",
+  "date": "2026-10-30",
+  "size": [
+    1600,
+    900
+  ],
+  "processing": "Cover crop to 1600x900, WebP quality 86; Nutrition also uses JPEG quality 86 in 1600px and 1280px variants. Shared byte-identical WebP masters across all six apps.",
+  "prompts": {
+    "dark_luxury_bg.webp": "Create a NEW ORIGINAL premium wide landscape 16:9 background image for the Flux family of productivity apps, inspired by the FIRST user reference: dark charcoal and midnight navy fluid marble, broad flowing soft smoky mineral ribbons, warm bronze and muted champagne-gold veins with sparse fine metallic gold flecks. The first reference is the mood and material reference, the second blue sea reference is NOT relevant for this asset. Large elegant continuous swirls, generous dark negative space throughout for frosted glass app cards and readable text, restrained luminous gold, editorial luxury mineral photography, smooth not gritty. Dark overall, beautiful tonal depth. Edge-to-edge artwork only. No UI, no lettering, no logos, no typography. High resolution, suitable for desktop and center-cropped mobile.",
+    "ocean_bg.webp": "Create a NEW ORIGINAL wide landscape 16:9 photographic background for Flux apps' Calm Ocean blue theme. Use the user's BLUE BIOLUMINESCENT BEACH reference (second of the two user attachments) as the mood/composition inspiration; the gold marble references are irrelevant. A serene uninhabited night beach with a smooth sweeping S-shaped shoreline, continuous soft electric cyan bioluminescent surf, deep cobalt and midnight indigo sea, dark tropical tree silhouettes along the upper left shore, distant pale lavender clouds and a spacious calm twilight star sky. Broad flowing luminous wave edges, gentle reflections, dark navy foreground negative space, soft cinematic radiance rather than glitter or sharp busy sparkles. Keep bright wave edges restrained so white text and frosted UI cards remain readable. Original artwork, not a reproduction of any stock image. No letters, no logo, no UI. High resolution, edge-to-edge composition that works on desktop and center-cropped mobile."
+  },
+  "saved_paths": {
+    "Flux": [
+      "public/dark_luxury_bg.webp",
+      "public/ocean_bg.webp",
+      "public/dark_luxury_bg.jpg",
+      "public/dark_luxury_bg_small.jpg",
+      "public/ocean_bg.jpg",
+      "public/ocean_bg_small.jpg"
+    ],
+    "Flux-Career": [
+      "public/themes/dark_luxury_bg.webp",
+      "public/themes/ocean_bg.webp"
+    ],
+    "Flux-Finance": [
+      "public/themes/dark_luxury_bg.webp",
+      "public/themes/ocean_bg.webp"
+    ],
+    "Flux-Glow": [
+      "public/themes/dark_luxury_bg.webp",
+      "public/themes/ocean_bg.webp"
+    ],
+    "flux-path": [
+      "public/themes/dark_luxury_bg.webp",
+      "public/themes/ocean_bg.webp"
+    ],
+    "flux-scribe": [
+      "public/themes/dark_luxury_bg.webp",
+      "public/themes/ocean_bg.webp"
+    ]
+  }
+}

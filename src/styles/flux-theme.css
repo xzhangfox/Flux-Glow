@@ -24,7 +24,7 @@
   --text-inverse: #000000;
   --app-bg-image: radial-gradient(circle at 18% 12%, rgba(203, 163, 92, 0.2) 0%, rgba(7, 10, 17, 0) 45%),
     radial-gradient(circle at 88% 86%, rgba(47, 66, 86, 0.4) 0%, rgba(7, 10, 17, 0.62) 60%, rgba(3, 5, 9, 0.8) 100%),
-    url('/themes/dark_luxury_bg.webp');
+    url('/themes/dark_luxury_bg.webp?v=20261030');
   --app-bg-blur: blur(16px);
 }
 
@@ -91,7 +91,7 @@
   --text-secondary: #969bb8;
   --app-bg-image: radial-gradient(circle at 82% 10%, rgba(89, 161, 213, 0.22) 0%, rgba(5, 9, 15, 0) 45%),
     radial-gradient(circle at 16% 88%, rgba(44, 73, 123, 0.4) 0%, rgba(4, 7, 12, 0.6) 60%, rgba(2, 4, 7, 0.8) 100%),
-    url('/themes/ocean_bg.webp');
+    url('/themes/ocean_bg.webp?v=20261030');
   --app-bg-blur: blur(18px);
 }
 
