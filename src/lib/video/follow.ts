@@ -512,18 +512,20 @@ export class FaceFinder {
         // (where their head last was in this run of frames — or, not seen
         // in it, where the analysis has it)
         if (this.person) {
-          const last = h && h.t >= this.runStart ? scaleBox(h.box, W, H) : null
-          const p = personIn(this.person, frame, last ?? w.where)
-          there = p.head >= PRESENT || p.body >= BODY_PRESENT
-          this.seatLog?.push({ t, id: w.id, head: p.head, body: p.body })
-          // (nobody where the head was last trusted — that last mesh may
-          // have slid onto what came over the face: their seat is where the
-          // analysis has them)
-          if (!there && last && iou(last, w.where) < 0.5) {
-            const q = personIn(this.person, frame, w.where)
-            there = q.head >= PRESENT || q.body >= BODY_PRESENT
-            this.seatLog?.push({ t, id: w.id, head: q.head, body: q.body })
+          const seg = this.person
+          const look = (b: Box, wide = false) => {
+            const p = personIn(seg, frame, b, wide)
+            this.seatLog?.push({ t, id: w.id, head: p.head, body: p.body })
+            return p.head >= PRESENT || p.body >= BODY_PRESENT
           }
+          // Where their head was last trusted (in this run of frames); if
+          // no one's there — that last mesh may have slid or shrunk onto
+          // what came over the face — where the analysis has them; and if
+          // the segmenter still sees no one, once more taking in their whole
+          // upper body (a close look at a face half behind a book can come
+          // back empty).
+          const last = h && h.t >= this.runStart ? scaleBox(h.box, W, H) : null
+          there = look(last ?? w.where) || (!!last && look(w.where)) || look(w.where, true)
         } else {
           // (nothing to go by: take the analysis's word that they're there)
           const b = this.bodies.get(w.id)

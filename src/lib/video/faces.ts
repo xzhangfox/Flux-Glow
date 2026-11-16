@@ -132,16 +132,23 @@ export function cropOf(src: HTMLCanvasElement, r: Region, max = 640) {
 // time it's found, compared with the same area now.
 
 let segCanvas: HTMLCanvasElement | null = null
+/** The window looked at round a head, in head sizes — or, `wide`, a
+ *  second look taking in the whole upper body. */
+const SEG_WINDOW = 3.2
+const SEG_WIDE = 5
 /** How much of `head` (px box of a W × H frame) is a person, 0..1 — and of
  *  the shoulders just under it — looked at in a window round it, about head
  *  and shoulders, the way the segmenter sees people best. (Something held
  *  up in front of the face — a book, a cup, a phone, a microphone — isn't a
  *  person; the shoulders under it still are.) */
-export function personIn(seg: ImageSegmenter, frame: HTMLCanvasElement, head: Box): { head: number; body: number } {
+export function personIn(seg: ImageSegmenter, frame: HTMLCanvasElement, head: Box, wide = false): { head: number; body: number } {
   const W = frame.width
   const H = frame.height
   const c = centreOf(head)
-  const r = windowAt(c.x, c.y + sizeOf(head) * 0.35, Math.min(Math.min(W, H), Math.max(sizeOf(head) * 2.6, 64)), W, H)
+  // (head and shoulders, with room round them: the segmenter needs the
+  // outline of a person to see one — a crop that's mostly face, a book
+  // held up over half of it, can come back with no one in it at all)
+  const r = windowAt(c.x, c.y + sizeOf(head) * 0.5, Math.min(Math.min(W, H), Math.max(sizeOf(head) * (wide ? SEG_WIDE : SEG_WINDOW), 64)), W, H)
   const src = cropOf(frame, r, 256)
   const crop = (segCanvas ??= document.createElement('canvas'))
   if (crop.width !== src.width || crop.height !== src.height) {
