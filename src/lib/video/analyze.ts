@@ -2,7 +2,8 @@ import { ImageEmbedder, ImageSegmenter, type FaceLandmarker, type NormalizedLand
 import { ALL_FORMATS, BlobSource, Input, VideoSampleSink } from 'mediabunny'
 import { closureFrom, createLandmarker, visionFileset } from '../faceLandmarker'
 import { nextTask } from '../schedule'
-import { SAME_ANGLE, area, boxOf, centreOf, cropOf, fitScore, frameThumb, iou, isCut, pack, shift, sizeOf, stamp, thumbChange, thumbSpread, unpack, windowAt, within, type Box, type Region } from './faces'
+import { averagePose, poseOf, type Pose } from './pose'
+import { SAME_ANGLE, area, boxOf, centreOf, cropOf, fitScore, frameThumb, iou, isCut, pack, personIn, shift, sizeOf, stamp, thumbChange, thumbSpread, unpack, windowAt, within, type Box, type Region } from './faces'
 
 // Video analysis for the video editor: who is in the clip, and where each
 // of them is through it — so each person keeps their own retouch and
@@ -74,10 +75,18 @@ const RATE_FIXED = 8
  *  they really are, frame by frame, is the person segmenter's to say (see
  *  follow.ts). */
 const FIXED_BRIDGE_S = 300
+/** …and looked for in their seat this long before their face is first
+ *  found there (turned away or hidden as the shot starts): the export,
+ *  reading ahead, puts their head on from then if they're sitting there. */
+const FIXED_LEAD_S = 6
 /** A fixed camera: a face only becomes a person once a strict look finds
  *  it (the lenient one that keeps a seated head through a turn also takes
  *  a hand by the face for one now and then) — or it's there this long. */
 const SURE_AFTER_S = 20
+/** …and, never surely one, it's on someone (the person segmenter sees this
+ *  much of a person where it is, on average over at least GHOST_LOOKS). */
+const GHOST_PERSON = 0.25
+const GHOST_LOOKS = 4
 /** …looked for every this many analysed frames, till it's found. */
 const SURE_EVERY = 2
 /** The clearest view of each face is kept as a crop this big (px). */
@@ -122,6 +131,17 @@ export interface VideoAnalysis {
   /** …and the camera angle it's from (shots cut back to the same camera,
    *  framed the same, share one). */
   angleAt(t: number): number
+  /** Whether the analysis found person `id`'s face between `t0` and `t1`
+   *  (in the shot `t0` is in): what the preview, which can't read ahead,
+   *  knows of what comes next. */
+  seenWithin(id: number, t0: number, t1: number): boolean
+  /** Person `id`'s head as the analysis saw it about `t`, in the shot `t`
+   *  is in: placed and sized between the sightings either side, turned as
+   *  at the nearer — and how long from that one (s). In fractions: the place
+   *  of a frame (depth as x), the size of its width. Null: not seen in this
+   *  shot. (A head the preview has nothing else to go by for, as on a frame
+   *  just jumped to.) */
+  poseAt(id: number, t: number): { pose: Pose; gap: number } | null
   /** Joins `from` into `into` (the user says they're the same person). */
   merge(from: number, into: number): void
 }
@@ -301,14 +321,25 @@ function medianSig(vs: Float32Array[]): Float32Array | null {
 
 // ---- Timelines ---------------------------------------------------------------------
 
+const POSE_N = 8
+/** A head's pose (pose.ts), packed: its place in fractions of a W × H frame
+ *  (depth as x), its size in fractions of the width, its turn. */
+function packPose(lm: Float32Array, W: number, H: number): Float32Array {
+  const p = poseOf(lm, W, H)
+  return Float32Array.of(p.o[0] / W, p.o[1] / H, p.o[2] / W, p.s / W, ...p.q)
+}
+
 /** Where a face is, frame after frame: analysed-frame indices and boxes
- *  (fractions of the frame), in growing typed arrays. */
+ *  (fractions of the frame), and its head's pose (see pose.ts: the place in
+ *  fractions of the frame — depth as x — the size in fractions of its
+ *  width, the turn), in growing typed arrays. */
 class Timeline {
   idx = new Int32Array(64)
   box = new Float32Array(256)
+  pose = new Float32Array(64 * POSE_N)
   n = 0
 
-  push(i: number, b: Box) {
+  push(i: number, b: Box, pose: ArrayLike<number>) {
     if (this.n === this.idx.length) {
       const idx = new Int32Array(this.n * 2)
       idx.set(this.idx)
@@ -316,15 +347,23 @@ class Timeline {
       const box = new Float32Array(this.n * 8)
       box.set(this.box)
       this.box = box
+      const ps = new Float32Array(this.n * 2 * POSE_N)
+      ps.set(this.pose)
+      this.pose = ps
     }
     this.idx[this.n] = i
     this.box.set([b.x0, b.y0, b.x1, b.y1], this.n * 4)
+    this.pose.set(pose, this.n * POSE_N)
     this.n++
   }
 
   boxAt(k: number): Box {
     const o = k * 4
     return { x0: this.box[o], y0: this.box[o + 1], x1: this.box[o + 2], y1: this.box[o + 3] }
+  }
+
+  poseAt(k: number) {
+    return this.pose.subarray(k * POSE_N, (k + 1) * POSE_N)
   }
 
   get first() {
@@ -359,7 +398,7 @@ class Timeline {
     // One after another (a person's tracks never share a frame, as a rule):
     // end to end. A long clip has thousands of them.
     if (parts.every((p, i) => i === 0 || p.first > parts[i - 1].last)) {
-      for (const p of parts) for (let k = 0; k < p.n; k++) out.push(p.idx[k], p.boxAt(k))
+      for (const p of parts) for (let k = 0; k < p.n; k++) out.push(p.idx[k], p.boxAt(k), p.poseAt(k))
       return out
     }
     const at = parts.map(() => 0)
@@ -370,7 +409,7 @@ class Timeline {
       const k = at[pick]++
       // (one frame twice — two merged people both there: keep the first)
       if (out.n && out.idx[out.n - 1] === parts[pick].idx[k]) continue
-      out.push(parts[pick].idx[k], parts[pick].boxAt(k))
+      out.push(parts[pick].idx[k], parts[pick].boxAt(k), parts[pick].poseAt(k))
     }
     return out
   }
@@ -389,6 +428,9 @@ interface Track {
    *  the analysed frame it was last looked for in. */
   sure: boolean
   checked: number
+  /** …and, while it isn't, how much of a person the segmenter sees where
+   *  it is (summed over `n` looks). */
+  person: { sum: number; n: number }
   /** Last box, px of the working frame, and its velocity per analysed frame. */
   box: Box
   vx: number
@@ -423,6 +465,7 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
   const models = await loadVideoModels()
   const { image: iLm, embedder } = models
   const sLm = fixed ? await loadStrictLandmarker() : null
+  const seg = fixed ? await loadPersonSegmenter() : null
   const vLm = fixed ? models.seated : models.video
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
   try {
@@ -482,7 +525,10 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
     const sureFrames = Math.round(SURE_AFTER_S * rate)
     const retire = (t: Track) => {
       if (t.tl.n < minFrames || !t.best.canvas) return
-      if (sLm && !t.sure && t.tl.n < sureFrames) return
+      // (never surely a face: kept only if it's been there a good while —
+      // and is on someone: a face-like pattern on a chair or a wall, which
+      // stays put just as long, isn't)
+      if (sLm && !t.sure && (t.tl.n < sureFrames || (t.person.n >= GHOST_LOOKS && t.person.sum / t.person.n < GHOST_PERSON))) return
       t.best.url = t.best.canvas.toDataURL('image/jpeg', 0.9)
       t.best.canvas = null
       done.push(t)
@@ -649,15 +695,15 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
         t.vx = t.vx * 0.5 + ((c1.x - c0.x) / dtf) * 0.5
         t.vy = t.vy * 0.5 + ((c1.y - c0.y) / dtf) * 0.5
         t.box = d.box
-        t.tl.push(fi, { x0: d.box.x0 / W, y0: d.box.y0 / H, x1: d.box.x1 / W, y1: d.box.y1 / H })
+        t.tl.push(fi, { x0: d.box.x0 / W, y0: d.box.y0 / H, x1: d.box.x1 / W, y1: d.box.y1 / H }, packPose(d.lm, W, H))
       }
       // New tracks for the rest.
       dets.forEach((d, di) => {
         if (dUsed.has(di) || matched.some(([, m]) => m === d)) return
         if (sizeOf(d.box) < 14) return
         const tl = new Timeline()
-        tl.push(fi, { x0: d.box.x0 / W, y0: d.box.y0 / H, x1: d.box.x1 / W, y1: d.box.y1 / H })
-        const t: Track = { id: nextId++, tl, shot, angle: 0, sure: false, checked: -Infinity, box: d.box, vx: 0, vy: 0, embSum: null, embN: 0, sigs: [], sigSeen: 0, best: { score: 0, canvas: null, url: null, lm: null } }
+        tl.push(fi, { x0: d.box.x0 / W, y0: d.box.y0 / H, x1: d.box.x1 / W, y1: d.box.y1 / H }, packPose(d.lm, W, H))
+        const t: Track = { id: nextId++, tl, shot, angle: 0, sure: false, checked: -Infinity, box: d.box, vx: 0, vy: 0, embSum: null, embN: 0, sigs: [], sigSeen: 0, best: { score: 0, canvas: null, url: null, lm: null }, person: { sum: 0, n: 0 } }
         live.push(t)
         matched.push([t, d])
       })
@@ -671,6 +717,10 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
           const r = windowAt(c.x, c.y, Math.min(Math.min(W, H), Math.max(sizeOf(d.box) * 2.2, 96)), W, H)
           const res = sLm.detect(cropOf(frame, r))
           t.sure = res.faceLandmarks.some((lm) => iou(boxOf(pack(lm, undefined, r), W, H), d.box) > 0.3)
+          if (!t.sure && seg && t.person.n < GHOST_LOOKS * 4) {
+            t.person.sum += personIn(seg, frame, d.box).head
+            t.person.n++
+          }
         }
 
       // 3. Appearance, shape and best view, for tracks seen this frame.
@@ -971,7 +1021,7 @@ async function makeAnalysis(people: Person[], times: Float64Array, shots: Shots,
   // scan, every `tileEvery` analysed frames, so it may have been there for
   // up to that long already.
   const reach = interval * 0.75
-  const lead = Math.max(reach, tileEvery * interval)
+  const lead = Math.max(reach, tileEvery * interval, fixed ? FIXED_LEAD_S : 0)
   const bridge = fixed ? FIXED_BRIDGE_S : FILL_GAP_S + interval
 
   const bestOf = (p: Person) => p.tracks.reduce((a, b) => (b.best.score > a.best.score ? b : a))
@@ -1034,7 +1084,11 @@ async function makeAnalysis(people: Person[], times: Float64Array, shots: Shots,
       const f = Math.min(1, Math.max(0, (t - ta) / Math.max(1e-6, tb - ta)))
       return { x0: a.x0 + (b.x0 - a.x0) * f, y0: a.y0 + (b.y0 - a.y0) * f, x1: a.x1 + (b.x1 - a.x1) * f, y1: a.y1 + (b.y1 - a.y1) * f }
     }
-    if (before && t - ta <= reach) return p.tl.boxAt(i)
+    // (a fixed camera: someone last seen in their seat is looked for there
+    // to the end of the shot — turned away or hidden as the clip ends, they
+    // haven't gone: whether they're still sitting there is the follower's
+    // call, frame by frame, and the export's, reading ahead)
+    if (before && (fixed || t - ta <= reach)) return p.tl.boxAt(i)
     if (after && tb - t <= lead) return p.tl.boxAt(i + 1)
     return null
   }
@@ -1062,6 +1116,38 @@ async function makeAnalysis(people: Person[], times: Float64Array, shots: Shots,
     },
     shotAt,
     angleAt: (t) => shots.angle[Math.min(shots.angle.length - 1, shotAt(t))],
+    poseAt(id, t) {
+      const p = byId.get(id)
+      if (!p) return null
+      const s = shotAt(t)
+      const i = lastAt(p, t)
+      const a = i >= 0 && frameShot(p.tl.idx[i]) === s ? i : -1
+      const b = i + 1 < p.tl.n && frameShot(p.tl.idx[i + 1]) === s ? i + 1 : -1
+      if (a < 0 && b < 0) return null
+      const ta = a >= 0 ? times[p.tl.idx[a]] : -Infinity
+      const tb = b >= 0 ? times[p.tl.idx[b]] : Infinity
+      const unpackPose = (k: number): Pose => {
+        const v = p.tl.poseAt(k)
+        return { o: [v[0], v[1], v[2]], s: v[3], q: [v[4], v[5], v[6], v[7]] }
+      }
+      const nearA = t - ta <= tb - t
+      const near = unpackPose(nearA ? a : b)
+      const gap = nearA ? t - ta : tb - t
+      if (a < 0 || b < 0 || tb - ta > bridge) return { pose: near, gap }
+      // (placed and sized between the two; turned as the nearer)
+      const f = (t - ta) / Math.max(1e-6, tb - ta)
+      const mid = averagePose([
+        { p: unpackPose(a), w: 1 - f },
+        { p: unpackPose(b), w: f },
+      ])!
+      return { pose: { o: mid.o, s: mid.s, q: near.q }, gap }
+    },
+    seenWithin(id, t0, t1) {
+      const p = byId.get(id)
+      if (!p) return false
+      const i = lastAt(p, t1)
+      return i >= 0 && times[p.tl.idx[i]] >= t0 - 1e-6 && frameShot(p.tl.idx[i]) === shotAt(t0)
+    },
     merge(from, into) {
       const a = byId.get(from)
       const b = byId.get(into)

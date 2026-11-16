@@ -356,7 +356,10 @@ export default function VideoEditor({ file, startParams, onClose }: { file: Blob
     if (!an) return setTags([])
     const shown = shownRef.current?.time === t ? shownRef.current.faces : []
     const tags = shown.map((f) => ({ id: f.id, ...boxOf(f.lm, 1, 1) }))
-    for (const e of an.boxesAt(t)) if (!tags.some((x) => x.id === e.id)) tags.push({ id: e.id, ...e.box })
+    // (a fixed camera looks for someone in their seat to the end of the shot:
+    // only those still sitting there)
+    const seated = finderRef.current?.seated
+    for (const e of an.boxesAt(t)) if (!tags.some((x) => x.id === e.id) && (!an.fixed || !seated || seated.has(e.id))) tags.push({ id: e.id, ...e.box })
     setTags(tags)
   }, [])
 
