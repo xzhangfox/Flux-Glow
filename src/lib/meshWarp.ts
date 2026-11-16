@@ -125,6 +125,8 @@ function compileShader(gl: WebGLRenderingContext, type: number, source: string):
 }
 
 function getState(): GLState {
+  // (a context the browser has taken back — too many on the page, or the GPU reset — draws nothing: a fresh one)
+  if (state && state.gl.isContextLost()) state = null
   if (state) return state
   const canvas = document.createElement('canvas')
   const gl = canvas.getContext('webgl', { premultipliedAlpha: false })
@@ -367,7 +369,15 @@ function buildIndexArray(n: number): Uint16Array {
 }
 
 export function renderMeshWarp(source: HTMLCanvasElement, landmarks: NormalizedLandmark[], params: ReshapeParams): HTMLCanvasElement {
-  const s = getState()
+  // No WebGL to be had (the browser refused a new context after taking one back): the frame unwarped, rather than
+  // a failed frame — which would end a whole video's export.
+  let s: GLState
+  try {
+    s = getState()
+  } catch (err) {
+    console.warn('Reshape unavailable', err)
+    return source
+  }
   const { gl } = s
   s.canvas.width = source.width
   s.canvas.height = source.height
@@ -442,6 +452,12 @@ export function renderMeshWarp(source: HTMLCanvasElement, landmarks: NormalizedL
   // getImageData/ctx.filter, and this avoids relying on
   // preserveDrawingBuffer (which has its own performance cost) just to
   // keep a read-back working.
+  // (the context taken back mid-draw: what it holds is blank — the frame unwarped, never a black face; the next
+  // frame gets a fresh context)
+  if (gl.isContextLost()) {
+    state = null
+    return source
+  }
   const out = document.createElement('canvas')
   out.width = source.width
   out.height = source.height

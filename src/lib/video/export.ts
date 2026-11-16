@@ -2,6 +2,7 @@ import { ALL_FORMATS, BlobSource, Conversion, Input, Mp4OutputFormat, Output, Qu
 import { processFaces, type EditParams, type FaceEdit } from '../pipeline'
 import type { VideoAnalysis } from './analyze'
 import { outputSink } from './disk'
+import { effectWaiter } from './effectsReady'
 import { unpack } from './faces'
 import { FaceScout } from './follow'
 import { markShareable, withFrameDurations } from './source'
@@ -176,6 +177,8 @@ export async function exportVideo(
     const ctx = canvas.getContext('2d')!
     ctx.imageSmoothingQuality = 'high'
     const hq = opts.quality === 'high'
+    // (each face's effect ready before its frame is rendered: video/effectsReady.ts)
+    const effectsReady = effectWaiter()
     // The converter starts its output at the first frame (or sound): source
     // times are this much later.
     const startTs = Math.max(0, await input.getFirstTimestamp())
@@ -216,6 +219,7 @@ export async function exportVideo(
             const params = paramsFor(f.id)
             if (params) faces.push({ landmarks: unpack(f.lm), params, slot: `p${f.id}` })
           }
+          await effectsReady(faces)
           const out = processFaces(canvas, faces, frame, hq, t)
           if (!ticks) {
             expected++

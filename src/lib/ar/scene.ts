@@ -416,13 +416,27 @@ function pmremOf(st: State, tex: THREE.Texture) {
 }
 const idle = () => new Promise<void>((r) => (typeof requestIdleCallback === 'function' ? requestIdleCallback(() => r(), { timeout: 200 }) : setTimeout(r, 0)))
 
+/** The 3D engine — built afresh if the browser has taken its GPU context back (too many on the page, or the GPU
+ *  reset): its models went with it, and are got ready again on the new one, as on first use. */
+function engine(): State {
+  if (S && S.renderer.getContext().isContextLost()) {
+    console.warn('3D effects: the GPU context was lost; starting again')
+    try {
+      S.renderer.dispose()
+    } catch {
+      // (gone already)
+    }
+    S = null
+  }
+  return (S ??= init())
+}
+
 export const modelKey = (effectId: string, slot = '') => (slot ? `${slot}:${effectId}` : effectId)
-export const isModelReady = (effectId: string, slot = '') => !!S?.models.has(modelKey(effectId, slot))
+export const isModelReady = (effectId: string, slot = '') => !!S && !S.renderer.getContext().isContextLost() && S.models.has(modelKey(effectId, slot))
 
 /** Gets the model for `effectId` (for face `slot`) ready. */
 export function prepareModel(effectId: string, slot: string, build: () => Model | Promise<Model>): Promise<void> {
-  S ??= init()
-  const st = S
+  const st = engine()
   const key = modelKey(effectId, slot)
   if (st.models.has(key)) return Promise.resolve()
   let p = pending.get(key)
@@ -479,8 +493,7 @@ export function prepareModel(effectId: string, slot: string, build: () => Model 
 /** Renders the 3D effect over `frame` (in place). `P` are landmark pixel
  *  positions with z in pixels (MediaPipe z × width, negative = nearer). */
 export function renderAR(frame: HTMLCanvasElement, P2: P3[], effectId: string, build: () => Model | Promise<Model>, t: number, live: boolean, slot = ''): boolean {
-  S ??= init()
-  const st = S
+  const st = engine()
   const W = frame.width
   const H = frame.height
   // Rendered a little under full size and scaled up when composited: a
