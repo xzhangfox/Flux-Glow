@@ -83,8 +83,9 @@ const FIXED_LEAD_S = 6
  *  it (the lenient one that keeps a seated head through a turn also takes
  *  a hand by the face for one now and then) — or it's there this long. */
 const SURE_AFTER_S = 20
-/** …and, never surely one, it's on someone (the person segmenter sees this
- *  much of a person where it is, on average over at least GHOST_LOOKS). */
+/** …and, surely one or not, it's on someone: the person segmenter sees
+ *  this much of a person where it is, on average over its first looks (at
+ *  least GHOST_LOOKS of them). */
 const GHOST_PERSON = 0.25
 const GHOST_LOOKS = 4
 /** …looked for every this many analysed frames, till it's found. */
@@ -428,8 +429,8 @@ interface Track {
    *  the analysed frame it was last looked for in. */
   sure: boolean
   checked: number
-  /** …and, while it isn't, how much of a person the segmenter sees where
-   *  it is (summed over `n` looks). */
+  /** …and how much of a person the segmenter sees where it is (summed
+   *  over `n` looks, its first few). */
   person: { sum: number; n: number }
   /** Last box, px of the working frame, and its velocity per analysed frame. */
   box: Box
@@ -525,10 +526,12 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
     const sureFrames = Math.round(SURE_AFTER_S * rate)
     const retire = (t: Track) => {
       if (t.tl.n < minFrames || !t.best.canvas) return
-      // (never surely a face: kept only if it's been there a good while —
-      // and is on someone: a face-like pattern on a chair or a wall, which
-      // stays put just as long, isn't)
-      if (sLm && !t.sure && (t.tl.n < sureFrames || (t.person.n >= GHOST_LOOKS && t.person.sum / t.person.n < GHOST_PERSON))) return
+      // (never surely a face: kept only if it's been there a good while;
+      // and either way, only on someone — a face-like pattern on a chair,
+      // a cabinet or a wall, which even the strict look takes for a face
+      // now and then, isn't)
+      if (sLm && !t.sure && t.tl.n < sureFrames) return
+      if (t.person.n >= GHOST_LOOKS && t.person.sum / t.person.n < GHOST_PERSON) return
       t.best.url = t.best.canvas.toDataURL('image/jpeg', 0.9)
       t.best.canvas = null
       done.push(t)
@@ -711,13 +714,16 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
       // A fixed camera: is each new face surely one?
       if (sLm)
         for (const [t, d] of matched) {
-          if (t.sure || fi - t.checked < SURE_EVERY) continue
+          const looking = !!seg && t.person.n < GHOST_LOOKS * 4
+          if ((t.sure && !looking) || fi - t.checked < SURE_EVERY) continue
           t.checked = fi
-          const c = centreOf(d.box)
-          const r = windowAt(c.x, c.y, Math.min(Math.min(W, H), Math.max(sizeOf(d.box) * 2.2, 96)), W, H)
-          const res = sLm.detect(cropOf(frame, r))
-          t.sure = res.faceLandmarks.some((lm) => iou(boxOf(pack(lm, undefined, r), W, H), d.box) > 0.3)
-          if (!t.sure && seg && t.person.n < GHOST_LOOKS * 4) {
+          if (!t.sure) {
+            const c = centreOf(d.box)
+            const r = windowAt(c.x, c.y, Math.min(Math.min(W, H), Math.max(sizeOf(d.box) * 2.2, 96)), W, H)
+            const res = sLm.detect(cropOf(frame, r))
+            t.sure = res.faceLandmarks.some((lm) => iou(boxOf(pack(lm, undefined, r), W, H), d.box) > 0.3)
+          }
+          if (seg && looking) {
             t.person.sum += personIn(seg, frame, d.box).head
             t.person.n++
           }

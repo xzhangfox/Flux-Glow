@@ -112,9 +112,9 @@ const TRUE_SIZE_DEG = 40
  *  was held onto where it's found — over this long, or longer for a bigger
  *  turn (at most EASE_DEG_S), up to RETURN_EASE_MAX_S. (The export, reading
  *  ahead, eases it in before it's found.) */
-const RETURN_EASE_S = 0.35
+const RETURN_EASE_S = 0.25
 const RETURN_EASE_MAX_S = 0.8
-const EASE_DEG_S = 120
+const EASE_DEG_S = 200
 
 const smoothstep = (u: number) => u * u * (3 - 2 * u)
 
@@ -512,9 +512,18 @@ export class FaceFinder {
         // (where their head last was in this run of frames — or, not seen
         // in it, where the analysis has it)
         if (this.person) {
-          const p = personIn(this.person, frame, h && h.t >= this.runStart ? scaleBox(h.box, W, H) : w.where)
+          const last = h && h.t >= this.runStart ? scaleBox(h.box, W, H) : null
+          const p = personIn(this.person, frame, last ?? w.where)
           there = p.head >= PRESENT || p.body >= BODY_PRESENT
           this.seatLog?.push({ t, id: w.id, head: p.head, body: p.body })
+          // (nobody where the head was last trusted — that last mesh may
+          // have slid onto what came over the face: their seat is where the
+          // analysis has them)
+          if (!there && last && iou(last, w.where) < 0.5) {
+            const q = personIn(this.person, frame, w.where)
+            there = q.head >= PRESENT || q.body >= BODY_PRESENT
+            this.seatLog?.push({ t, id: w.id, head: q.head, body: q.body })
+          }
         } else {
           // (nothing to go by: take the analysis's word that they're there)
           const b = this.bodies.get(w.id)
