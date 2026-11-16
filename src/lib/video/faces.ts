@@ -132,14 +132,23 @@ export function cropOf(src: HTMLCanvasElement, r: Region, max = 640) {
 // time it's found, compared with the same area now.
 
 let segCanvas: HTMLCanvasElement | null = null
-/** How much of `head` (px box of a W × H frame) is a person, 0..1 — looked
- *  at in a window round it, about head and shoulders, the way the
- *  segmenter sees people best. */
-export function personIn(seg: ImageSegmenter, frame: HTMLCanvasElement, head: Box): number {
+/** The window looked at round a head, in head sizes — or, `wide`, a
+ *  second look taking in the whole upper body. */
+const SEG_WINDOW = 3.2
+const SEG_WIDE = 5
+/** How much of `head` (px box of a W × H frame) is a person, 0..1 — and of
+ *  the shoulders just under it — looked at in a window round it, about head
+ *  and shoulders, the way the segmenter sees people best. (Something held
+ *  up in front of the face — a book, a cup, a phone, a microphone — isn't a
+ *  person; the shoulders under it still are.) */
+export function personIn(seg: ImageSegmenter, frame: HTMLCanvasElement, head: Box, wide = false): { head: number; body: number } {
   const W = frame.width
   const H = frame.height
   const c = centreOf(head)
-  const r = windowAt(c.x, c.y + sizeOf(head) * 0.35, Math.min(Math.min(W, H), Math.max(sizeOf(head) * 2.6, 64)), W, H)
+  // (head and shoulders, with room round them: the segmenter needs the
+  // outline of a person to see one — a crop that's mostly face, a book
+  // held up over half of it, can come back with no one in it at all)
+  const r = windowAt(c.x, c.y + sizeOf(head) * 0.5, Math.min(Math.min(W, H), Math.max(sizeOf(head) * (wide ? SEG_WIDE : SEG_WINDOW), 64)), W, H)
   const src = cropOf(frame, r, 256)
   const crop = (segCanvas ??= document.createElement('canvas'))
   if (crop.width !== src.width || crop.height !== src.height) {
@@ -151,27 +160,33 @@ export function personIn(seg: ImageSegmenter, frame: HTMLCanvasElement, head: Bo
   const masks = res.confidenceMasks
   const m = masks && masks[masks.length - 1]?.getAsFloat32Array()
   res.close()
-  if (!m) return 1
-  // The middle of the head's box, in the crop.
+  if (!m) return { head: 1, body: 1 }
   const cw = crop.width
   const ch = crop.height
+  // The mean of the mask over a px box of the frame (null: none of it is in the crop).
+  const mean = (bx0: number, by0: number, bx1: number, by1: number) => {
+    const x0 = Math.max(0, Math.floor(((bx0 / W - r.x) / r.w) * cw))
+    const x1 = Math.min(cw, Math.ceil(((bx1 / W - r.x) / r.w) * cw))
+    const y0 = Math.max(0, Math.floor(((by0 / H - r.y) / r.h) * ch))
+    const y1 = Math.min(ch, Math.ceil(((by1 / H - r.y) / r.h) * ch))
+    let sum = 0
+    let n = 0
+    for (let y = y0; y < y1; y++)
+      for (let x = x0; x < x1; x++) {
+        sum += m[y * cw + x]
+        n++
+      }
+    return n ? sum / n : null
+  }
+  // The middle of the head's box…
+  const w = head.x1 - head.x0
+  const h = head.y1 - head.y0
   const shrink = 0.18
-  const bx0 = ((head.x0 + (head.x1 - head.x0) * shrink) / W - r.x) / r.w
-  const bx1 = ((head.x1 - (head.x1 - head.x0) * shrink) / W - r.x) / r.w
-  const by0 = ((head.y0 + (head.y1 - head.y0) * shrink) / H - r.y) / r.h
-  const by1 = ((head.y1 - (head.y1 - head.y0) * shrink) / H - r.y) / r.h
-  const x0 = Math.max(0, Math.floor(bx0 * cw))
-  const x1 = Math.min(cw, Math.ceil(bx1 * cw))
-  const y0 = Math.max(0, Math.floor(by0 * ch))
-  const y1 = Math.min(ch, Math.ceil(by1 * ch))
-  let sum = 0
-  let n = 0
-  for (let y = y0; y < y1; y++)
-    for (let x = x0; x < x1; x++) {
-      sum += m[y * cw + x]
-      n++
-    }
-  return n ? sum / n : 1
+  const inHead = mean(head.x0 + w * shrink, head.y0 + h * shrink, head.x1 - w * shrink, head.y1 - h * shrink) ?? 1
+  // …and the neck and shoulders under it (out of the picture — a close-up —
+  // nothing to go by but the head).
+  const below = head.y1 + h * 0.25 < H - 2 ? mean(head.x0 - w * 0.2, head.y1 + h * 0.25, head.x1 + w * 0.2, Math.min(H, head.y1 + h * 1.0)) : null
+  return { head: inHead, body: below ?? 0 }
 }
 
 const THUMB_W = 32

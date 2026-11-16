@@ -24,10 +24,18 @@ import { UsualFace, averagePose, lerpLocal, localOf, meshOf, poseOf, quatAngle, 
 //    the face, a mesh collapsing on a profile, the back of a head are not);
 //  • a head that can't be seen (turned to the side, a hand over it) is held
 //    for as long as the person segmenter still sees someone in the seat —
-//    in its last pose, easing into their usual face, eyes open; lost while
-//    turning, it goes on round to side-on;
-//  • a held head counts as back once their clean face keeps being found,
-//    and eases onto it;
+//    their head, or the shoulders under it (a book or a cup held up hides a
+//    face, not a person) — or the analysis, which has read the whole clip,
+//    finds their face again in a moment; and to the end of the clip if they
+//    stay — in its last pose, easing into their usual face, eyes open; lost
+//    while turning, it goes on round to side-on;
+//  • a frame jumped to (a seek, a paused frame) with their head out of
+//    sight has it as the analysis saw it about then;
+//  • a held head counts as back once their clean face keeps being found
+//    (at once if a strict look surely finds a face there), and eases onto
+//    it;
+//  • the export, reading ahead, puts on the head of someone sitting there
+//    from the start of a shot, turned away or hidden as it begins;
 //  • a head's size (a seated head only changes size as they lean) and turn
 //    are steadied over the frames round each one;
 //  • an edited clip's cuts (see analyze.ts) start each shot afresh: no head
@@ -60,6 +68,11 @@ const RETURN_BLEND_S = 0.8
  *  turned away, whose outline no longer fills the box its face did, can
  *  score as little as 0.3.) */
 const PRESENT = 0.2
+/** …or this much of a person in the neck and shoulders under it: something
+ *  held up in front of the face (a book, a cup, a phone, a microphone)
+ *  hides the head, not the person. (An empty seat's chair back scores near
+ *  0; a seated person's shoulders, 0.8 and more.) */
+const BODY_PRESENT = 0.45
 /** A seat that has looked empty this long: they've got up and gone (until
  *  their face is found again). Before then the head isn't shown — except
  *  the preview's, held through the first DOUBT_S of a doubt (it can't look
@@ -99,9 +112,9 @@ const TRUE_SIZE_DEG = 40
  *  was held onto where it's found — over this long, or longer for a bigger
  *  turn (at most EASE_DEG_S), up to RETURN_EASE_MAX_S. (The export, reading
  *  ahead, eases it in before it's found.) */
-const RETURN_EASE_S = 0.35
+const RETURN_EASE_S = 0.25
 const RETURN_EASE_MAX_S = 0.8
-const EASE_DEG_S = 120
+const EASE_DEG_S = 200
 
 const smoothstep = (u: number) => u * u * (3 - 2 * u)
 
@@ -214,6 +227,8 @@ export class FaceFinder {
   /** The preview: each head as last held, and a head found again easing
    *  in from there. */
   private heldOut = new Map<number, { lm: Float32Array; t: number }>()
+  /** Each person's face in their clearest view (head-frame: see pose.ts). */
+  private bestLocal = new Map<number, Float32Array>()
   private easing = new Map<number, { from: Float32Array; t0: number; d: number }>()
   /** The time between frames, as they come (s). */
   private step = 1 / 30
@@ -226,8 +241,10 @@ export class FaceFinder {
   private leaving = new Map<number, number>()
   private gone = new Set<number>()
   seated = new Set<number>()
-  /** Dev: every mesh weighed against a head, and what was made of it. */
+  /** Dev: every mesh weighed against a head, and what was made of it; and
+   *  every look at a seat whose face wasn't found. */
   gateLog: { t: number; id: number; ds: number; dp: number; dr: number; shape: number; far: boolean; ok: boolean }[] | null = null
+  seatLog: { t: number; id: number; head: number; body: number }[] | null = null
   private lastT = -Infinity
   private an: VideoAnalysis
   private video: FaceLandmarker
@@ -255,6 +272,27 @@ export class FaceFinder {
   static async create(an: VideoAnalysis, hold = an.fixed) {
     const [{ video, seated, image, lenient }, person, strict] = await Promise.all([loadVideoModels(), an.fixed ? loadPersonSegmenter() : null, an.fixed ? loadStrictLandmarker() : null])
     return new FaceFinder(an, an.fixed ? seated : video, image, an.fixed ? lenient : image, strict ?? image, person, hold)
+  }
+
+  /** Person `id`'s head at `t` as the analysis saw it (see analyze.ts
+   *  poseAt), with their usual face — or, not yet known, the one in their
+   *  clearest view — eyes open; turned on round if it was turning away. */
+  private fromAnalysis(id: number, t: number, W: number, H: number): Float32Array | null {
+    const at = this.an.poseAt(id, t)
+    if (!at) return null
+    let local = this.heads.get(id)?.usual.face ?? this.bestLocal.get(id)
+    if (!local) {
+      const best = this.an.people.find((p) => p.id === id)?.best
+      if (!best) return null
+      const lm = pack(best.landmarks, undefined)
+      const fw = best.frame.width
+      const fh = best.frame.height
+      local = localOf(lm, poseOf(lm, fw, fh), fw, fh)
+      this.bestLocal.set(id, local)
+    }
+    const { o, s, q } = at.pose
+    const lm = meshOf({ o: [o[0] * W, o[1] * H, o[2] * W], s: s * W, q }, local, W, H)
+    return turnTo(lm, lostYaw(yawOf(lm, W, H), 0, at.gap, HELD_MAX_DEG), W, H)
   }
 
   /** A face found afresh (not tracked) round box `b` of `frame`. */
@@ -303,7 +341,11 @@ export class FaceFinder {
       const heldYaw = lostYaw(h.yaw, h.turn.rate, Math.max(0, dt), HELD_MAX_DEG)
       const turned = Math.abs(yawOf(lm, W, H) - heldYaw) > GATE.farTurn
       const placed = ds <= GATE.farScale && dp <= GATE.farPlace
-      ok = clean && t - since >= (turned || !placed ? COMEBACK_S : BACK_S) && (placed || (dt > 1 && this.faceAt(frame, b)))
+      const waited = t - since
+      // (turned back to the camera where the head was held: a face surely
+      // there is them back — no need to wait out COMEBACK_S with their
+      // effect still turned away on a face in plain view)
+      ok = clean && (waited >= (turned || !placed ? COMEBACK_S : BACK_S) ? placed || (dt > 1 && this.faceAt(frame, b)) : placed && turned && waited >= BACK_S && this.faceAt(frame, b))
     }
     this.gateLog?.push({ t, id, ds, dp, dr, shape, far, ok })
     return ok
@@ -467,12 +509,31 @@ export class FaceFinder {
         }
         const h = this.heads.get(w.id)
         let there: boolean
-        if (this.person && h) there = personIn(this.person, frame, scaleBox(h.box, W, H)) >= PRESENT
-        else {
+        // (where their head last was in this run of frames — or, not seen
+        // in it, where the analysis has it)
+        if (this.person) {
+          const seg = this.person
+          const look = (b: Box, wide = false) => {
+            const p = personIn(seg, frame, b, wide)
+            this.seatLog?.push({ t, id: w.id, head: p.head, body: p.body })
+            return p.head >= PRESENT || p.body >= BODY_PRESENT
+          }
+          // Where their head was last trusted (in this run of frames); if
+          // no one's there — that last mesh may have slid or shrunk onto
+          // what came over the face — where the analysis has them; and if
+          // the segmenter still sees no one, once more taking in their whole
+          // upper body (a close look at a face half behind a book can come
+          // back empty).
+          const last = h && h.t >= this.runStart ? scaleBox(h.box, W, H) : null
+          there = look(last ?? w.where) || (!!last && look(w.where)) || look(w.where, true)
+        } else {
           // (nothing to go by: take the analysis's word that they're there)
           const b = this.bodies.get(w.id)
           there = !b || sameBody(b.sig, bodySig(frame, scaleBox(b.box, W, H)))
         }
+        // (the analysis, which has read the whole clip, finds their face
+        // again in a moment: they never left — whatever hid the seat)
+        if (!there && this.an.seenWithin(w.id, t, t + LEAVE_S)) there = true
         if (there) {
           this.leaving.delete(w.id)
           this.seated.add(w.id)
@@ -483,14 +544,16 @@ export class FaceFinder {
         const since = this.leaving.get(w.id) ?? t
         this.leaving.set(w.id, since)
         if (t - since >= LEAVE_S) this.gone.add(w.id)
-        else if (this.hold && t - since < DOUBT_S) this.seated.add(w.id)
+        else if (this.hold && sequential && t - since < DOUBT_S) this.seated.add(w.id)
       }
       if (this.hold) {
         for (const w of want) {
           if (seen.has(w.id) || !this.seated.has(w.id)) continue
           const h = this.heads.get(w.id)
-          if (!h || h.t < this.runStart || t < h.t) continue
-          const lm = h.at(t, W, H)
+          // (their head as last trusted in this run of frames — or, none
+          // (a frame jumped to, the start of the clip), as the analysis saw it)
+          const lm = h && h.t >= this.runStart && t >= h.t ? h.at(t, W, H) : this.fromAnalysis(w.id, t, W, H)
+          if (!lm) continue
           out.push({ id: w.id, lm })
           this.heldOut.set(w.id, { lm, t })
           this.easing.delete(w.id)
@@ -734,6 +797,19 @@ export class FaceScout {
         const yc = lostYaw(yb, this.rateBack(k, id, yb), tk - f.ts, HELD_MAX_DEG)
         const yaw = ya + (yc - ya) * smoothstep(u)
         filled.set(id, lerpFace(turnTo(held, yaw, W, H), turnTo(b, yaw, W, H), u))
+      }
+      // Someone not yet seen in this shot (turned away or hidden as it
+      // starts), sitting there now and found within the gap: they were
+      // there all along — their head as it's first found, turned the way
+      // it comes round.
+      const ahead = new Map<number, number>()
+      for (let k = j + 1; k < this.frames.length && this.frames[k].ts - f.ts <= this.gap && this.frames[k].shot === f.shot; k++) for (const id of this.frames[k].raw.keys()) if (!ahead.has(id)) ahead.set(id, k)
+      for (const [id, k] of ahead) {
+        const h = this.heads.get(id)
+        if (filled.has(id) || h?.shot === f.shot || !this.inSeat(j, id)) continue
+        const b = this.frames[k].raw.get(id)!
+        const yb = yawOf(b, W, H)
+        filled.set(id, turnTo(b, lostYaw(yb, this.rateBack(k, id, yb), this.frames[k].ts - f.ts, HELD_MAX_DEG), W, H))
       }
       for (const [id, lm] of f.raw) {
         let h = this.heads.get(id)
