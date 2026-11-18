@@ -189,6 +189,109 @@ export function personIn(seg: ImageSegmenter, frame: HTMLCanvasElement, head: Bo
   return { head: inHead, body: below ?? 0 }
 }
 
+// ---- A face on someone's body -----------------------------------------------------
+//
+// A face printed on a T-shirt, or a pattern on clothes the landmarker takes
+// for one (zoomed-in looks for small faces find them now and then), sits on
+// someone's torso: under their chin, between their shoulders. A real head
+// can't be there unless it's in front of them — as near the camera as they
+// are, so about as big as their head (a newborn's face is ~0.6 of an
+// adult's). One much smaller than that, on the same body, is on their
+// clothes. (Effects are found top-down the same way in pose-driven
+// trackers: a face is only looked for where a body's head is.)
+
+/** Smaller than this × the face above it: on their body, whatever the
+ *  landmarker makes of it. */
+export const WORN_SIZE = 0.5
+/** Face `b` is where the torso under face `a` is (px boxes): its middle
+ *  below a's chin, within 4.5 face heights of it (seated: chest and lap;
+ *  standing: down to the waist), and within a's shoulders. */
+export function underChin(a: Box, b: Box) {
+  const ca = centreOf(a)
+  const cb = centreOf(b)
+  const ha = a.y1 - a.y0
+  return cb.y > a.y1 && cb.y < a.y1 + 4.5 * ha && Math.abs(cb.x - ca.x) < 1.6 * (a.x1 - a.x0)
+}
+
+/** Whether faces `a` and `b` (px boxes; b under a's chin) are on one
+ *  person, as the segmenter sees them: a is a person's head, b is on a
+ *  person, and it's a person all the way from a's chin down to b — their
+ *  neck and chest, not a gap (a portrait on the wall above someone has the
+ *  wall under its chin). */
+export function bodyLinks(seg: ImageSegmenter, frame: HTMLCanvasElement, a: Box, b: Box) {
+  const W = frame.width
+  const H = frame.height
+  const ha = a.y1 - a.y0
+  // (a window taking in a's head, with room round it, down past b)
+  const x0 = Math.min(a.x0, b.x0)
+  const x1 = Math.max(a.x1, b.x1)
+  const y0 = a.y0 - ha * 0.6
+  const y1 = b.y1 + (b.y1 - b.y0) * 0.6
+  const side = Math.min(Math.min(W, H), Math.max(y1 - y0, x1 - x0, sizeOf(a) * 3.2) * 1.15)
+  const r = windowAt((x0 + x1) / 2, (y0 + y1) / 2, side, W, H)
+  const src = cropOf(frame, r, 256)
+  const crop = (segCanvas ??= document.createElement('canvas'))
+  if (crop.width !== src.width || crop.height !== src.height) {
+    crop.width = src.width
+    crop.height = src.height
+  }
+  crop.getContext('2d')!.drawImage(src, 0, 0)
+  const res = seg.segment(crop)
+  const masks = res.confidenceMasks
+  const m = masks && masks[masks.length - 1]?.getAsFloat32Array()
+  res.close()
+  if (!m) return true
+  const cw = crop.width
+  const ch = crop.height
+  const mean = (bx0: number, by0: number, bx1: number, by1: number) => {
+    const xa = Math.max(0, Math.floor(((bx0 / W - r.x) / r.w) * cw))
+    const xb = Math.min(cw, Math.ceil(((bx1 / W - r.x) / r.w) * cw))
+    const ya = Math.max(0, Math.floor(((by0 / H - r.y) / r.h) * ch))
+    const yb = Math.min(ch, Math.ceil(((by1 / H - r.y) / r.h) * ch))
+    let sum = 0
+    let n = 0
+    for (let y = ya; y < yb; y++)
+      for (let x = xa; x < xb; x++) {
+        sum += m[y * cw + x]
+        n++
+      }
+    return n ? sum / n : null
+  }
+  const inner = (q: Box, k: number) => {
+    const w = q.x1 - q.x0
+    const h = q.y1 - q.y0
+    return mean(q.x0 + w * k, q.y0 + h * k, q.x1 - w * k, q.y1 - h * k)
+  }
+  /** The least of the mask along a band (its mean across the band, at each
+   *  step along it): a gap anywhere shows. */
+  const leastAlong = (bx0: number, by0: number, bx1: number, by1: number, alongX: boolean) => {
+    const xa = Math.max(0, Math.floor(((bx0 / W - r.x) / r.w) * cw))
+    const xb = Math.min(cw, Math.ceil(((bx1 / W - r.x) / r.w) * cw))
+    const ya = Math.max(0, Math.floor(((by0 / H - r.y) / r.h) * ch))
+    const yb = Math.min(ch, Math.ceil(((by1 / H - r.y) / r.h) * ch))
+    if (xb <= xa || yb <= ya) return 1
+    let least = 1
+    for (let i = alongX ? xa : ya; i < (alongX ? xb : yb); i++) {
+      let sum = 0
+      for (let j = alongX ? ya : xa; j < (alongX ? yb : xb); j++) sum += alongX ? m[j * cw + i] : m[i * cw + j]
+      least = Math.min(least, sum / ((alongX ? yb - ya : xb - xa) || 1))
+    }
+    return least
+  }
+  const head = inner(a, 0.18) ?? 1
+  const on = inner(b, 0.15) ?? 1
+  // (down a's neck and the middle of their chest to b's height, then across
+  // to b: a person all the way — inside a torso, wherever on it b is. A face
+  // further back seen beside their neck has the room behind between.)
+  const ca = centreOf(a)
+  const cb = centreOf(b)
+  const wa = a.x1 - a.x0
+  const hb = b.y1 - b.y0
+  const down = leastAlong(ca.x - wa * 0.15, a.y1, ca.x + wa * 0.15, cb.y, false)
+  const across = Math.abs(cb.x - ca.x) > (b.x1 - b.x0) * 0.5 ? leastAlong(Math.min(ca.x, cb.x), cb.y - hb * 0.2, Math.max(ca.x, cb.x), cb.y + hb * 0.2, true) : 1
+  return head >= 0.3 && on >= 0.5 && Math.min(down, across) >= 0.45
+}
+
 const THUMB_W = 32
 const THUMB_H = 18
 let thumbCanvas: HTMLCanvasElement | null = null

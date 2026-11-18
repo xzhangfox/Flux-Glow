@@ -3,7 +3,7 @@ import { ALL_FORMATS, BlobSource, Input, VideoSampleSink } from 'mediabunny'
 import { closureFrom, createLandmarker, visionFileset } from '../faceLandmarker'
 import { nextTask } from '../schedule'
 import { averagePose, poseOf, type Pose } from './pose'
-import { SAME_ANGLE, area, boxOf, centreOf, cropOf, fitScore, frameThumb, iou, isCut, pack, personIn, shift, sizeOf, stamp, thumbChange, thumbSpread, unpack, windowAt, within, type Box, type Region } from './faces'
+import { SAME_ANGLE, WORN_SIZE, area, bodyLinks, boxOf, centreOf, cropOf, fitScore, frameThumb, iou, isCut, pack, personIn, shift, sizeOf, stamp, thumbChange, thumbSpread, underChin, unpack, windowAt, within, type Box, type Region } from './faces'
 
 // Video analysis for the video editor: who is in the clip, and where each
 // of them is through it — so each person keeps their own retouch and
@@ -22,6 +22,10 @@ import { SAME_ANGLE, area, boxOf, centreOf, cropOf, fitScore, frameThumb, iou, i
 //     face the whole-frame pass loses for a moment (turned away, half
 //     covered, motion blur) is looked for again in a window around where
 //     it's heading.
+//     A "face" on someone's body — under their chin, in their torso, far
+//     too small to be a head there (a face printed on a T-shirt, a pattern
+//     on clothes the zoomed-in looks take for one) — isn't a person (see
+//     underChin in faces.ts).
 //  2. Associate. Each detection joins the track whose predicted box
 //     (constant velocity) it overlaps best; the rest start new tracks. A
 //     track survives short misses and ends after a longer one.
@@ -90,6 +94,13 @@ const GHOST_PERSON = 0.25
 const GHOST_LOOKS = 4
 /** …looked for every this many analysed frames, till it's found. */
 const SURE_EVERY = 2
+/** A face on someone's body is looked at this many times (analysed frames
+ *  with a face above it), every SURE_EVERY frames… */
+const WORN_LOOKS = 12
+/** …and, a fixed camera, one that never surely is a face is on their
+ *  clothes up to this size × the face above it (one that surely is: up to
+ *  WORN_SIZE — a child on a lap is a face of their own). */
+const WORN_UNSURE = 0.95
 /** The clearest view of each face is kept as a crop this big (px). */
 const BEST_PX = 288
 /** A camera angle's picture is the average of its shots' over about this
@@ -432,6 +443,10 @@ interface Track {
   /** …and how much of a person the segmenter sees where it is (summed
    *  over `n` looks, its first few). */
   person: { sum: number; n: number }
+  /** Looks at it with a face above it (`n`), and how many found it on that
+   *  person's body: far smaller than them (`small`), or not much smaller
+   *  (`near`); and the analysed frame it was last looked at in. */
+  worn: { n: number; small: number; near: number; at: number }
   /** Last box, px of the working frame, and its velocity per analysed frame. */
   box: Box
   vx: number
@@ -524,6 +539,12 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
     const knownFace = (t: Track) => !!t.embSum && counted.some((c) => cosine(c, t.embSum!) > 0.82)
     let faceless = 0
     const sureFrames = Math.round(SURE_AFTER_S * rate)
+    // (on someone's body most times it was looked at with them there: their
+    // clothes, not a person)
+    const isWorn = (t: Track) => t.worn.n >= 2 && (t.worn.small >= t.worn.n * 0.5 || (!!sLm && !t.sure && t.worn.small + t.worn.near >= t.worn.n * 0.5))
+    // (the segmenter, for a moving camera too — loaded once a face is first
+    // seen under another's chin)
+    let bodySeg: ImageSegmenter | null | undefined = seg ?? undefined
     const retire = (t: Track) => {
       if (t.tl.n < minFrames || !t.best.canvas) return
       // (never surely a face: kept only if it's been there a good while;
@@ -532,6 +553,7 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
       // now and then, isn't)
       if (sLm && !t.sure && t.tl.n < sureFrames) return
       if (t.person.n >= GHOST_LOOKS && t.person.sum / t.person.n < GHOST_PERSON) return
+      if (isWorn(t)) return
       t.best.url = t.best.canvas.toDataURL('image/jpeg', 0.9)
       t.best.canvas = null
       done.push(t)
@@ -706,7 +728,7 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
         if (sizeOf(d.box) < 14) return
         const tl = new Timeline()
         tl.push(fi, { x0: d.box.x0 / W, y0: d.box.y0 / H, x1: d.box.x1 / W, y1: d.box.y1 / H }, packPose(d.lm, W, H))
-        const t: Track = { id: nextId++, tl, shot, angle: 0, sure: false, checked: -Infinity, box: d.box, vx: 0, vy: 0, embSum: null, embN: 0, sigs: [], sigSeen: 0, best: { score: 0, canvas: null, url: null, lm: null }, person: { sum: 0, n: 0 } }
+        const t: Track = { id: nextId++, tl, shot, angle: 0, sure: false, checked: -Infinity, box: d.box, vx: 0, vy: 0, embSum: null, embN: 0, sigs: [], sigSeen: 0, best: { score: 0, canvas: null, url: null, lm: null }, person: { sum: 0, n: 0 }, worn: { n: 0, small: 0, near: 0, at: -Infinity } }
         live.push(t)
         matched.push([t, d])
       })
@@ -727,6 +749,31 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
             t.person.sum += personIn(seg, frame, d.box).head
             t.person.n++
           }
+        }
+
+      // On someone else's body? (Each face under another's chin, now and
+      // then: the face above it has to be in the frame too.)
+      if (matched.length > 1)
+        for (const [t, d] of matched) {
+          if (t.worn.n >= WORN_LOOKS || fi - t.worn.at < SURE_EVERY) continue
+          const above = matched.filter(([o, od]) => o !== t && underChin(od.box, d.box))
+          if (!above.length) continue
+          t.worn.at = fi
+          t.worn.n++
+          let small = false
+          let near = false
+          for (const [, od] of above) {
+            const ratio = sizeOf(d.box) / Math.max(1, sizeOf(od.box))
+            if (ratio >= WORN_UNSURE || (small && ratio >= WORN_SIZE)) continue
+            if (bodySeg === undefined) bodySeg = await loadPersonSegmenter()
+            // (one body from their head down through it — without the
+            // segmenter, where it is says enough)
+            if (bodySeg && !bodyLinks(bodySeg, frame, od.box, d.box)) continue
+            if (ratio < WORN_SIZE) small = true
+            else near = true
+          }
+          if (small) t.worn.small++
+          else if (near) t.worn.near++
         }
 
       // 3. Appearance, shape and best view, for tracks seen this frame.
@@ -760,7 +807,7 @@ export async function analyzeVideo(file: Blob, onProgress: (p: AnalyzeProgress) 
 
       // Retire tracks gone too long.
       for (let i = live.length - 1; i >= 0; i--) if (fi - live[i].tl.last > gapFrames) retire(live.splice(i, 1)[0])
-      if (fi % 15 === 0) onProgress({ progress: duration > 0 ? Math.min(0.99, ts / duration) : 0, people: faceless + counted.length + live.filter((t) => t.tl.n >= minFrames && !knownFace(t)).length })
+      if (fi % 15 === 0) onProgress({ progress: duration > 0 ? Math.min(0.99, ts / duration) : 0, people: faceless + counted.length + live.filter((t) => t.tl.n >= minFrames && !knownFace(t) && !isWorn(t)).length })
       // Let the page breathe now and then (a task, not a timer: timers in a
       // hidden tab are slowed to a crawl).
       if (performance.now() - breathed > 50) {
